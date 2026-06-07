@@ -20,7 +20,6 @@ class VectorStoreManager:
         """初始化向量存储管理器"""
         self.vector_store = None
         self.collection_name = COLLECTION_NAME
-        self._initialize_vector_store()
 
     def _initialize_vector_store(self):
         """初始化 Milvus VectorStore"""
@@ -69,6 +68,7 @@ class VectorStoreManager:
             List[str]: 文档 ID 列表
         """
         try:
+            self._ensure_vector_store()
             import time
             import uuid
             start_time = time.time()
@@ -125,12 +125,19 @@ class VectorStoreManager:
         Returns:
             Milvus: VectorStore 实例
         """
+        self._ensure_vector_store()
         return self.vector_store
 
     def reinitialize(self) -> None:
         """在 collection 重建后刷新 LangChain Milvus VectorStore。"""
 
         self._initialize_vector_store()
+
+    def _ensure_vector_store(self) -> None:
+        """按需初始化 VectorStore，避免模块导入阶段依赖 live Milvus。"""
+
+        if self.vector_store is None:
+            self._initialize_vector_store()
 
     def similarity_search(self, query: str, k: int = 3) -> list[Document]:
         """
@@ -144,6 +151,7 @@ class VectorStoreManager:
             List[Document]: 相关文档列表
         """
         try:
+            self._ensure_vector_store()
             docs = self.vector_store.similarity_search(query, k=k)
             logger.debug(f"相似度搜索完成: query='{query}', 结果数={len(docs)}")
             return docs

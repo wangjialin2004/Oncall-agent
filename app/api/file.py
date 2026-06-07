@@ -71,11 +71,26 @@ async def upload_file(file: UploadFile = File(...)):
         logger.info(f"文件上传成功: {file_path}")
 
         # 5. 自动创建向量索引
+        indexing_status = "pending"
+        indexing_error = ""
+        indexed_chunks = 0
+
         try:
             logger.info(f"开始为上传文件创建向量索引: {file_path}")
-            vector_index_service.index_single_file(str(file_path))
+            indexing_result = vector_index_service.index_single_file(str(file_path))
+            result_data = (
+                indexing_result.to_dict()
+                if hasattr(indexing_result, "to_dict")
+                else indexing_result
+            )
+            indexing_status = str(result_data.get("status", "completed"))
+            indexed_chunks = int(result_data.get("chunk_count", 0))
+            indexing_error = str(result_data.get("error_message", ""))
             logger.info(f"向量索引创建成功: {file_path}")
         except Exception as e:
+            indexing_status = "failed"
+            indexing_error = str(e)
+            indexed_chunks = 0
             logger.error(f"向量索引创建失败: {file_path}, 错误: {e}")
             # 注意：即使索引失败，文件上传仍然成功，只是记录错误日志
 
@@ -89,6 +104,9 @@ async def upload_file(file: UploadFile = File(...)):
                     "filename": safe_filename,
                     "file_path": str(file_path),
                     "size": len(content),
+                    "indexing_status": indexing_status,
+                    "indexing_error": indexing_error,
+                    "indexed_chunks": indexed_chunks,
                 },
             },
         )

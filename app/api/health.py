@@ -78,8 +78,16 @@ def build_health_data() -> dict[str, Any]:
     health_data["rag"] = {
         "collection_name": milvus_manager.COLLECTION_NAME,
         "collection_status": "available" if health_data["milvus"]["status"] == "connected" else "unavailable",
-        "retrieval_mode": "dense",
+        "retrieval_mode": config.rag_retrieval_mode,
         "top_k": config.rag_top_k,
+        "dense_weight": config.rag_dense_weight,
+        "bm25_weight": config.rag_bm25_weight,
+    }
+    health_data["monitor"] = {
+        "target_mode": config.monitor_target_mode,
+    }
+    health_data["logs"] = {
+        "provider": config.log_provider,
     }
 
     if health_data["milvus"]["status"] != "connected":

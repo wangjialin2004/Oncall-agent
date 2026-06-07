@@ -61,6 +61,22 @@ class IndexingResult:
         }
 
 
+class SingleFileIndexingResult:
+    """单文件索引结果。"""
+
+    def __init__(self, status: str, chunk_count: int = 0, error_message: str = ""):
+        self.status = status
+        self.chunk_count = chunk_count
+        self.error_message = error_message
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "chunk_count": self.chunk_count,
+            "error_message": self.error_message,
+        }
+
+
 class VectorIndexService:
     """向量索引服务 - 负责读取文件、生成向量、存储到 Milvus"""
 
@@ -137,7 +153,7 @@ class VectorIndexService:
             result.end_time = datetime.now()
             return result
 
-    def index_single_file(self, file_path: str):
+    def index_single_file(self, file_path: str) -> SingleFileIndexingResult:
         """
         索引单个文件 (使用新的 LangChain 分割器)
 
@@ -181,8 +197,10 @@ class VectorIndexService:
             if documents:
                 vector_store_manager.add_documents(documents)
                 logger.info(f"文件索引完成: {file_path}, 共 {len(documents)} 个分片")
+                return SingleFileIndexingResult(status="completed", chunk_count=len(documents))
             else:
                 logger.warning(f"文件内容为空或无法分割: {file_path}")
+                return SingleFileIndexingResult(status="skipped", chunk_count=0)
 
         except Exception as e:
             logger.error(f"索引文件失败: {file_path}, 错误: {e}")

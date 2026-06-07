@@ -155,3 +155,35 @@ def test_diagnosis_memory_service_persists_tool_evidence(tmp_path):
             "raw_result": '{"status":"success"}',
         }
     ]
+
+
+def test_diagnosis_memory_service_persists_feedback(tmp_path):
+    db_path = tmp_path / "diagnosis-memory.sqlite3"
+    service = DiagnosisMemoryService(db_path)
+    service.create_case(
+        session_id="session-1",
+        user_input="diagnose current alerts",
+        case_id="case-1",
+    )
+
+    service.record_feedback(
+        case_id="case-1",
+        session_id="session-1",
+        user_accepted=True,
+        actual_root_cause="Milvus connection exhausted",
+        final_resolution="Restarted Milvus and reduced connection churn",
+        comment="诊断结论准确",
+    )
+
+    feedback = service.list_feedback("case-1")
+
+    assert feedback == [
+        {
+            "case_id": "case-1",
+            "session_id": "session-1",
+            "user_accepted": True,
+            "actual_root_cause": "Milvus connection exhausted",
+            "final_resolution": "Restarted Milvus and reduced connection churn",
+            "comment": "诊断结论准确",
+        }
+    ]

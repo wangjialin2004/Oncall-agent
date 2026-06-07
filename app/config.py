@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     prometheus_base_url: str = "http://127.0.0.1:9090"
     prometheus_request_timeout: float = 10.0
 
+    # Provider modes
+    monitor_target_mode: str = "self"
+    log_provider: str = "local"
+
     # Diagnosis memory
     diagnosis_memory_db_path: str = "data/diagnosis_memory.sqlite3"
 

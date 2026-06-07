@@ -177,6 +177,60 @@ class DiagnosisMemoryService:
             for row in rows
         ]
 
+    def record_feedback(
+        self,
+        case_id: str,
+        session_id: str,
+        user_accepted: bool,
+        actual_root_cause: str = "",
+        final_resolution: str = "",
+        comment: str = "",
+    ) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO diagnosis_feedback (
+                    case_id, session_id, user_accepted, actual_root_cause,
+                    final_resolution, comment, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    case_id,
+                    session_id,
+                    1 if user_accepted else 0,
+                    actual_root_cause,
+                    final_resolution,
+                    comment,
+                    _utc_now(),
+                ),
+            )
+
+    def list_feedback(self, case_id: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT case_id, session_id, user_accepted, actual_root_cause,
+                       final_resolution, comment
+                FROM diagnosis_feedback
+                WHERE case_id = ?
+                ORDER BY id
+                """,
+                (case_id,),
+            ).fetchall()
+
+        return [
+            {
+                "case_id": row["case_id"],
+                "session_id": row["session_id"],
+                "user_accepted": bool(row["user_accepted"]),
+                "actual_root_cause": row["actual_root_cause"],
+                "final_resolution": row["final_resolution"],
+                "comment": row["comment"],
+            }
+            for row in rows
+        ]
+
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
         self._ensure_database()
@@ -236,6 +290,27 @@ class DiagnosisMemoryService:
                 """
                 CREATE INDEX IF NOT EXISTS idx_tool_evidence_case_id
                 ON tool_evidence(case_id)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS diagnosis_feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    case_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    user_accepted INTEGER NOT NULL,
+                    actual_root_cause TEXT NOT NULL,
+                    final_resolution TEXT NOT NULL,
+                    comment TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(case_id) REFERENCES diagnosis_cases(case_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_diagnosis_feedback_case_id
+                ON diagnosis_feedback(case_id)
                 """
             )
             connection.commit()
