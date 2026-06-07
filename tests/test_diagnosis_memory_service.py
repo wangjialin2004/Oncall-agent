@@ -1,0 +1,157 @@
+from langchain_core.messages import ToolMessage
+
+from app.agent.aiops.evidence import build_persistent_tool_evidence
+from app.services.aiops_service import AIOpsService
+from app.services.diagnosis_memory_service import DiagnosisMemoryService
+
+
+class _FakeState:
+    def __init__(self, values):
+        self.values = values
+
+
+class _FakeGraph:
+    def __init__(self):
+        self.input_state = None
+
+    async def astream(self, input, config, stream_mode):
+        self.input_state = input
+        yield {"planner": {"plan": ["check alerts"]}}
+        yield {"executor": {"plan": [], "past_steps": [("check alerts", "ok")]}}
+
+    def get_state(self, config):
+        return _FakeState(
+            {
+                "response": "# final report",
+                "past_steps": [("check alerts", "ok")],
+            }
+        )
+
+
+async def test_aiops_service_execute_persists_case_lifecycle(tmp_path):
+    memory_service = DiagnosisMemoryService(tmp_path / "diagnosis-memory.sqlite3")
+    graph = _FakeGraph()
+    service = object.__new__(AIOpsService)
+    service.memory_service = memory_service
+    service.graph = graph
+
+    events = [event async for event in service.execute("diagnose", session_id="session-1")]
+
+    case_id = graph.input_state["case_id"]
+    case = memory_service.get_case(case_id)
+
+    assert events[-1] == {
+        "type": "complete",
+        "stage": "complete",
+        "message": "任务执行完成",
+        "response": "# final report",
+    }
+    assert graph.input_state["session_id"] == "session-1"
+    assert case["status"] == "completed"
+    assert case["session_id"] == "session-1"
+    assert case["user_input"] == "diagnose"
+    assert case["plan"] == ["check alerts"]
+    assert case["executed_steps"] == [["check alerts", "ok"]]
+    assert case["final_report"] == "# final report"
+
+
+def test_diagnosis_memory_service_persists_case_lifecycle(tmp_path):
+    db_path = tmp_path / "diagnosis-memory.sqlite3"
+    service = DiagnosisMemoryService(db_path)
+
+    case_id = service.create_case(
+        session_id="session-1",
+        user_input="diagnose current alerts",
+        case_id="case-1",
+    )
+    service.update_case_plan(case_id, ["check alerts", "inspect logs"])
+    service.complete_case(
+        case_id,
+        executed_steps=[("check alerts", "found HighCPUUsage")],
+        final_report="# report",
+    )
+
+    case = service.get_case(case_id)
+
+    assert case == {
+        "case_id": "case-1",
+        "session_id": "session-1",
+        "user_input": "diagnose current alerts",
+        "status": "completed",
+        "plan": ["check alerts", "inspect logs"],
+        "executed_steps": [["check alerts", "found HighCPUUsage"]],
+        "final_report": "# report",
+    }
+
+
+def test_persistent_tool_evidence_includes_arguments_and_raw_result():
+    tool_message = ToolMessage(
+        content='{"status":"success","source":"local_logs","evidence_id":"cls-1","duration_ms":5}',
+        name="search_app_logs",
+        tool_call_id="call-1",
+    )
+
+    records = build_persistent_tool_evidence(
+        [tool_message],
+        [{"id": "call-1", "name": "search_app_logs", "args": {"keyword": "ERROR"}}],
+    )
+
+    assert records == [
+        {
+            "tool_name": "search_app_logs",
+            "tool_call_id": "call-1",
+            "evidence_id": "cls-1",
+            "source": "local_logs",
+            "success": True,
+            "duration_ms": 5,
+            "summary": "status=success",
+            "arguments": {"keyword": "ERROR"},
+            "raw_result": (
+                '{"status":"success","source":"local_logs","evidence_id":"cls-1","duration_ms":5}'
+            ),
+        }
+    ]
+
+
+def test_diagnosis_memory_service_persists_tool_evidence(tmp_path):
+    db_path = tmp_path / "diagnosis-memory.sqlite3"
+    service = DiagnosisMemoryService(db_path)
+    service.create_case(
+        session_id="session-1",
+        user_input="diagnose current alerts",
+        case_id="case-1",
+    )
+
+    service.record_tool_evidence(
+        case_id="case-1",
+        session_id="session-1",
+        evidence_records=[
+            {
+                "tool_name": "search_app_logs",
+                "tool_call_id": "call-1",
+                "evidence_id": "cls-1",
+                "source": "local_logs",
+                "success": True,
+                "duration_ms": 5,
+                "summary": "status=success",
+                "arguments": {"keyword": "ERROR"},
+                "raw_result": '{"status":"success"}',
+            }
+        ],
+    )
+
+    evidence = service.list_tool_evidence("case-1")
+
+    assert evidence == [
+        {
+            "tool_name": "search_app_logs",
+            "tool_call_id": "call-1",
+            "evidence_id": "cls-1",
+            "source": "local_logs",
+            "success": True,
+            "duration_ms": 5.0,
+            "summary": "status=success",
+            "arguments": {"keyword": "ERROR"},
+            "raw_result": '{"status":"success"}',
+        }
+    ]
