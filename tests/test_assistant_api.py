@@ -29,3 +29,31 @@ async def test_assistant_endpoint_returns_router_result(monkeypatch, api_client)
             "errorMessage": None,
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_assistant_endpoint_reports_router_exception_as_http_error(
+    monkeypatch,
+    api_client,
+):
+    async def fake_answer(question, session_id):
+        raise RuntimeError("router unavailable")
+
+    monkeypatch.setattr("app.api.assistant.router_service.answer", fake_answer)
+
+    response = await api_client.post(
+        "/api/assistant",
+        json={"Id": "s1", "Question": "diagnose slow response"},
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "code": 500,
+        "message": "error",
+        "data": {
+            "success": False,
+            "route": "error",
+            "answer": None,
+            "errorMessage": "router unavailable",
+        },
+    }
