@@ -1,5 +1,6 @@
 import importlib
 
+import pytest
 from langchain_core.documents import Document
 from pymilvus import DataType, FunctionType
 
@@ -112,6 +113,15 @@ def test_vector_search_dispatches_to_configured_hybrid_mode(monkeypatch):
 
     assert calls == [("HighCPUUsage", 5)]
     assert results == expected
+
+
+def test_vector_search_rejects_blank_query(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-api-key")
+    module = importlib.import_module("app.services.vector_search_service")
+    service = module.VectorSearchService()
+
+    with pytest.raises(ValueError, match="查询文本不能为空"):
+        service.search("   ")
 
 
 def test_milvus_hybrid_schema_includes_bm25_sparse_fields(monkeypatch):
