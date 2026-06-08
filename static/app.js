@@ -1115,10 +1115,10 @@ class AIOpsAssistantApp {
             return;
         }
 
-        // 验证文件大小（限制为50MB）
-        const maxSize = 50 * 1024 * 1024;
+        // 验证文件大小（限制为10MB）
+        const maxSize = 10 * 1024 * 1024;
         if (file.size > maxSize) {
-            this.showNotification('文件大小不能超过50MB', 'error');
+            this.showNotification('文件大小不能超过10MB', 'error');
             return;
         }
 

@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 
+from app.api.file import MAX_FILE_SIZE
 from app.services.document_extraction_service import SUPPORTED_EXTENSIONS
 
 
@@ -19,3 +20,17 @@ def test_static_upload_accepts_backend_supported_document_extensions():
 
     assert allowed_extensions == expected_extensions
     assert accept_extensions == expected_extensions
+
+
+def test_static_upload_size_limit_matches_backend_limit():
+    app_js = Path("static/app.js").read_text(encoding="utf-8")
+
+    max_size_match = re.search(
+        r"const\s+maxSize\s*=\s*(?P<mb>\d+)\s*\*\s*1024\s*\*\s*1024",
+        app_js,
+    )
+    assert max_size_match is not None
+    max_size_mb = int(max_size_match.group("mb"))
+
+    assert max_size_mb * 1024 * 1024 == MAX_FILE_SIZE
+    assert f"文件大小不能超过{max_size_mb}MB" in app_js
