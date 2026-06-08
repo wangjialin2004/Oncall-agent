@@ -516,11 +516,12 @@ class AIOpsAssistantApp {
                 })
             });
 
-            if (!response.ok) {
-                throw new Error('清空会话失败');
-            }
-
             const result = await response.json();
+
+            if (!response.ok) {
+                const errorMessage = result?.detail || result?.message || '清空会话失败';
+                throw new Error(errorMessage);
+            }
             
             if (result.status === 'success') {
                 // 从本地存储中删除

@@ -64,6 +64,19 @@ def test_static_frontend_uses_same_origin_api_base():
     assert "http://localhost:9900/api" not in app_js
 
 
+def test_static_delete_history_uses_fastapi_error_detail_on_http_error():
+    app_js = Path("static/app.js").read_text(encoding="utf-8")
+    delete_start = app_js.index("async deleteChatHistory(historyId)")
+    delete_end = app_js.index("toggleModeDropdown()", delete_start)
+    delete_history = app_js[delete_start:delete_end]
+
+    assert delete_history.index("const result = await response.json();") < delete_history.index(
+        "if (!response.ok)"
+    )
+    assert "result?.detail" in delete_history
+    assert "throw new Error(errorMessage)" in delete_history
+
+
 def test_static_quick_chat_uses_unified_assistant_endpoint():
     app_js = Path("static/app.js").read_text(encoding="utf-8")
 
