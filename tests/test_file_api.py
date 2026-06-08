@@ -48,3 +48,21 @@ def test_upload_reports_failed_indexing_without_failing_upload(monkeypatch, tmp_
     assert data["indexing_status"] == "failed"
     assert data["indexed_chunks"] == 0
     assert data["indexing_error"] == "Milvus unavailable"
+
+
+def test_upload_rejects_oversized_replacement_without_deleting_existing_file(monkeypatch, tmp_path):
+    import app.api.file as file_api
+
+    existing_file = tmp_path / "note.md"
+    existing_file.write_bytes(b"original content")
+    monkeypatch.setattr(file_api, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(file_api, "MAX_FILE_SIZE", 4)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/upload",
+        files={"file": ("note.md", b"too large", "text/markdown")},
+    )
+
+    assert response.status_code == 400
+    assert existing_file.read_bytes() == b"original content"

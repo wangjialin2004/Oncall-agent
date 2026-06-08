@@ -52,11 +52,6 @@ async def upload_file(file: UploadFile = File(...)):
         # 5. 保存文件
         file_path = UPLOAD_DIR / safe_filename
 
-        # 如果文件已存在，先删除旧文件（实现覆盖更新）
-        if file_path.exists():
-            logger.info(f"文件已存在，将覆盖: {file_path}")
-            file_path.unlink()
-
         # 读取并保存文件内容
         content = await file.read()
 
@@ -65,6 +60,10 @@ async def upload_file(file: UploadFile = File(...)):
             raise HTTPException(
                 status_code=400, detail=f"文件大小超过限制（最大 {MAX_FILE_SIZE} 字节）"
             )
+
+        if file_path.exists():
+            logger.info(f"文件已存在，将覆盖: {file_path}")
+            file_path.unlink()
 
         file_path.write_bytes(content)
 
