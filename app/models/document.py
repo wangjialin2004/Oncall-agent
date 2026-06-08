@@ -1,8 +1,6 @@
 """文档相关数据模型"""
 
-from typing import Optional
-
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DocumentChunk(BaseModel):
@@ -12,11 +10,10 @@ class DocumentChunk(BaseModel):
     start_index: int = Field(..., description="分片在原文档中的起始位置")
     end_index: int = Field(..., description="分片在原文档中的结束位置")
     chunk_index: int = Field(..., description="分片索引（从0开始）")
-    title: Optional[str] = Field(None, description="分片所属章节标题")
+    title: str | None = Field(None, description="分片所属章节标题")
 
-    class Config:
-        """Pydantic 配置"""
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "content": "这是一段文档内容...",
                 "start_index": 0,
@@ -25,3 +22,4 @@ class DocumentChunk(BaseModel):
                 "title": "第一章",
             }
         }
+    )

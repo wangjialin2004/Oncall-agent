@@ -4,7 +4,7 @@ AIOps 请求和响应模型
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AIOpsRequest(BaseModel):
@@ -15,13 +15,13 @@ class AIOpsRequest(BaseModel):
         description="会话ID，用于追踪诊断历史"
     )
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "session_id": "session-123"
             }
         }
-
+    )
 
 class AlertInfo(BaseModel):
     """告警信息"""
@@ -50,8 +50,8 @@ class DiagnosisResponse(BaseModel):
     message: str = "success"
     data: dict[str, Any]
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "code": 200,
                 "message": "success",
@@ -68,3 +68,4 @@ class DiagnosisResponse(BaseModel):
                 }
             }
         }
+    )
