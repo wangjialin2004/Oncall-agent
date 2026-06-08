@@ -4,7 +4,8 @@
 支持真正的流式输出和更好的模型适配。
 """
 
-from typing import Annotated, Any, AsyncGenerator, Dict, Sequence
+from collections.abc import AsyncGenerator, Sequence
+from typing import Annotated, Any
 
 from langchain.agents import create_agent
 from langchain_core.messages import (
@@ -13,20 +14,20 @@ from langchain_core.messages import (
     RemoveMessage,
     SystemMessage,
 )
+from langchain_qwq import ChatQwen
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from loguru import logger
 from typing_extensions import TypedDict
-from langchain_qwq import ChatQwen
 
-from app.config import config
-from app.tools import DEFAULT_LOCAL_AGENT_TOOLS
 from app.agent.mcp_client import (
+    format_exception_chain,
     get_mcp_client_with_retry,
     load_mcp_tools_safe,
-    format_exception_chain,
     suggest_mcp_transport,
 )
+from app.config import config
+from app.tools import DEFAULT_LOCAL_AGENT_TOOLS
 
 # 阿里千问大模型和langchain集成参考： https://docs.langchain.com/oss/python/integrations/chat/qwen
 # 注意：需要配置环境变量 DASHSCOPE_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1 否则默认访问的是新加坡站点
@@ -252,7 +253,7 @@ class RagAgentService:
         self,
         question: str,
         session_id: str,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """
         流式处理用户问题（逐步返回答案片段）
 
@@ -331,14 +332,14 @@ class RagAgentService:
         try:
             # 使用 checkpointer 的 get 方法获取最新的检查点
             config = {"configurable": {"thread_id": session_id}}
-            
+
             # 获取该 thread 的最新检查点
             checkpoint_tuple = self.checkpointer.get(config)
-            
+
             if not checkpoint_tuple:
                 logger.info(f"获取会话历史: {session_id}, 消息数量: 0")
                 return []
-            
+
             # checkpoint_tuple 可能是命名元组或普通元组，安全地提取 checkpoint
             # 通常第一个元素是 checkpoint 数据
             if hasattr(checkpoint_tuple, 'checkpoint'):
@@ -346,20 +347,20 @@ class RagAgentService:
             else:
                 # 如果是普通元组，第一个元素是 checkpoint
                 checkpoint_data = checkpoint_tuple[0] if checkpoint_tuple else {}
-            
+
             # 从检查点中提取消息
             messages = checkpoint_data.get("channel_values", {}).get("messages", [])
-            
+
             # 转换为前端需要的格式
             history = []
             for msg in messages:
                 # 跳过系统消息
                 if isinstance(msg, SystemMessage):
                     continue
-                    
+
                 role = "user" if isinstance(msg, HumanMessage) else "assistant"
                 content = msg.content if hasattr(msg, 'content') else str(msg)
-                
+
                 # 提取时间戳（如果有的话）
                 timestamp = getattr(msg, 'timestamp', None)
                 if timestamp:
@@ -375,10 +376,10 @@ class RagAgentService:
                         "content": content,
                         "timestamp": datetime.now().isoformat()
                     })
-            
+
             logger.info(f"获取会话历史: {session_id}, 消息数量: {len(history)}")
             return history
-            
+
         except Exception as e:
             logger.error(f"获取会话历史失败: {session_id}, 错误: {e}")
             return []
@@ -396,10 +397,10 @@ class RagAgentService:
         try:
             # 使用 checkpointer 的 delete_thread 方法删除该 thread 的所有检查点
             self.checkpointer.delete_thread(session_id)
-            
+
             logger.info(f"已清除会话历史: {session_id}")
             return True
-            
+
         except Exception as e:
             logger.error(f"清空会话历史失败: {session_id}, 错误: {e}")
             return False
