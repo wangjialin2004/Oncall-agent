@@ -1139,11 +1139,12 @@ class AIOpsAssistantApp {
                 body: formData
             });
 
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
-            }
-
             const data = await response.json();
+
+            if (!response.ok) {
+                const errorMessage = data?.detail || data?.message || `HTTP错误: ${response.status}`;
+                throw new Error(errorMessage);
+            }
 
             if ((data.code === 200 || data.message === 'success') && data.data) {
                 // 在聊天界面显示上传与索引结果

@@ -44,6 +44,19 @@ def test_static_upload_message_reflects_indexing_status():
     assert "索引分片" in app_js
 
 
+def test_static_upload_uses_fastapi_error_detail_on_http_error():
+    app_js = Path("static/app.js").read_text(encoding="utf-8")
+    upload_start = app_js.index("async uploadFile(file)")
+    upload_end = app_js.index("formatFileSize(bytes)")
+    upload_file = app_js[upload_start:upload_end]
+
+    assert upload_file.index("const data = await response.json();") < upload_file.index(
+        "if (!response.ok)"
+    )
+    assert "data?.detail" in upload_file
+    assert "throw new Error(errorMessage)" in upload_file
+
+
 def test_static_frontend_uses_same_origin_api_base():
     app_js = Path("static/app.js").read_text(encoding="utf-8")
 
