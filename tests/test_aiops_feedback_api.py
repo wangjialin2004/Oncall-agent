@@ -86,7 +86,7 @@ async def test_record_diagnosis_feedback_endpoint_reports_missing_case(monkeypat
         },
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 404
     assert response.json() == {
         "code": 404,
         "message": "Diagnosis case not found: missing-case",
@@ -134,7 +134,7 @@ async def test_list_diagnosis_feedback_endpoint_reports_missing_case(monkeypatch
 
     response = await api_client.get("/api/aiops/cases/missing-case/feedback")
 
-    assert response.status_code == 200
+    assert response.status_code == 404
     assert response.json() == {
         "code": 404,
         "message": "Diagnosis case not found: missing-case",

@@ -5,6 +5,7 @@ AIOps 智能运维接口
 import json
 
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 from loguru import logger
 from sse_starlette.sse import EventSourceResponse
 
@@ -28,11 +29,14 @@ async def record_diagnosis_feedback(request: DiagnosisFeedbackRequest):
             comment=request.comment,
         )
     except ValueError as exc:
-        return {
-            "code": 404,
-            "message": str(exc),
-            "data": None,
-        }
+        return JSONResponse(
+            status_code=404,
+            content={
+                "code": 404,
+                "message": str(exc),
+                "data": None,
+            },
+        )
 
     return {
         "code": 200,
@@ -47,11 +51,14 @@ async def list_diagnosis_feedback(case_id: str):
     try:
         feedback = diagnosis_memory_service.list_feedback(case_id)
     except ValueError as exc:
-        return {
-            "code": 404,
-            "message": str(exc),
-            "data": None,
-        }
+        return JSONResponse(
+            status_code=404,
+            content={
+                "code": 404,
+                "message": str(exc),
+                "data": None,
+            },
+        )
 
     return {
         "code": 200,
