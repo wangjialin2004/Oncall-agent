@@ -56,7 +56,7 @@ async def test_answer_collects_aiops_final_response(monkeypatch):
 
     async def fake_execute(message, session_id):
         yield {"type": "status", "message": "running"}
-        yield {"type": "complete", "response": "# report"}
+        yield {"type": "complete", "case_id": "case-1", "response": "# report"}
 
     monkeypatch.setattr(router_module.aiops_service, "execute", fake_execute)
 
@@ -65,6 +65,7 @@ async def test_answer_collects_aiops_final_response(monkeypatch):
     assert result == {
         "success": True,
         "route": "aiops",
+        "case_id": "case-1",
         "answer": "# report",
         "errorMessage": None,
     }

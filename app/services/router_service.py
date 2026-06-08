@@ -67,12 +67,15 @@ class RouterService:
 
         if decision.route == "aiops":
             final_answer = ""
+            case_id = ""
             async for event in aiops_service.execute(message, session_id=session_id):
                 if event.get("type") == "complete":
+                    case_id = str(event.get("case_id") or "")
                     final_answer = str(event.get("response") or event.get("message") or "")
             return {
                 "success": True,
                 "route": "aiops",
+                "case_id": case_id,
                 "answer": final_answer,
                 "errorMessage": None,
             }
