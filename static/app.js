@@ -681,7 +681,7 @@ class AIOpsAssistantApp {
         const loadingMessage = this.addLoadingMessage('正在思考...');
         
         try {
-            const response = await fetch(`${this.apiBaseUrl}/chat`, {
+            const response = await fetch(`${this.apiBaseUrl}/assistant`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',

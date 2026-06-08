@@ -51,6 +51,13 @@ def test_static_frontend_uses_same_origin_api_base():
     assert "http://localhost:9900/api" not in app_js
 
 
+def test_static_quick_chat_uses_unified_assistant_endpoint():
+    app_js = Path("static/app.js").read_text(encoding="utf-8")
+
+    assert "fetch(`${this.apiBaseUrl}/assistant`" in app_js
+    assert "fetch(`${this.apiBaseUrl}/chat`" not in app_js
+
+
 def test_static_backend_history_maps_assistant_role_to_assistant_message_type():
     app_js = Path("static/app.js").read_text(encoding="utf-8")
 
