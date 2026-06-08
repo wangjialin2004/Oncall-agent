@@ -135,7 +135,10 @@ python -c "import requests, os, time; [requests.post('http://localhost:9900/api/
 |------|------|------|------|
 | 普通对话 | POST | `/api/chat` | 一次性返回 |
 | 流式对话 | POST | `/api/chat_stream` | SSE 流式输出 |
+| 统一助手 | POST | `/api/assistant` | 自动路由到 RAG 或 AIOps 诊断 |
 | AIOps 诊断 | POST | `/api/aiops` | 自动故障诊断（流式） |
+| 诊断反馈提交 | POST | `/api/aiops/feedback` | 记录用户确认的根因、处理结果和反馈 |
+| 诊断反馈查询 | GET | `/api/aiops/cases/{case_id}/feedback` | 查询指定诊断 case 的反馈记录 |
 | 文件上传 | POST | `/api/upload` | 上传并索引文档 |
 | 健康检查 | GET | `/api/health` | 服务状态检查 |
 
@@ -153,11 +156,24 @@ curl -X POST "http://localhost:9900/api/chat_stream" \
   -d '{"Id":"session-123","Question":"你好"}' \
   --no-buffer
 
+# 统一助手：根据意图自动选择 RAG 或 AIOps；AIOps 路由会返回 case_id
+curl -X POST "http://localhost:9900/api/assistant" \
+  -H "Content-Type: application/json" \
+  -d '{"Id":"session-123","Question":"帮我诊断 CPU 告警"}'
+
 # AIOps 诊断
 curl -X POST "http://localhost:9900/api/aiops" \
   -H "Content-Type: application/json" \
   -d '{"session_id":"session-123"}' \
   --no-buffer
+
+# 提交诊断反馈：case_id 来自 /api/aiops 完成事件或 /api/assistant 的 AIOps 响应
+curl -X POST "http://localhost:9900/api/aiops/feedback" \
+  -H "Content-Type: application/json" \
+  -d '{"case_id":"case-xxx","session_id":"session-123","user_accepted":true,"actual_root_cause":"Milvus connection exhausted","final_resolution":"Restarted Milvus","comment":"诊断结论准确"}'
+
+# 查询诊断反馈
+curl "http://localhost:9900/api/aiops/cases/case-xxx/feedback"
 ```
 
 ## 📁 项目结构
