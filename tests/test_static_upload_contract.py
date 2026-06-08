@@ -49,3 +49,10 @@ def test_static_frontend_uses_same_origin_api_base():
 
     assert "this.apiBaseUrl = '/api'" in app_js
     assert "http://localhost:9900/api" not in app_js
+
+
+def test_static_backend_history_maps_assistant_role_to_assistant_message_type():
+    app_js = Path("static/app.js").read_text(encoding="utf-8")
+
+    assert "msg.role === 'assistant' ? 'assistant'" in app_js
+    assert "msg.role === 'user' ? 'user' : 'bot'" not in app_js

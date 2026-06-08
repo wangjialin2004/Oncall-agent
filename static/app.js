@@ -457,7 +457,7 @@ class AIOpsAssistantApp {
                         this.currentChatHistory = [];
                         backendHistory.forEach(msg => {
                             // 后端返回格式: {role: "user|assistant", content: "...", timestamp: "..."}
-                            const messageType = msg.role === 'user' ? 'user' : 'bot';
+                            const messageType = msg.role === 'assistant' ? 'assistant' : 'user';
                             this.addMessage(messageType, msg.content, false, false);
                         });
                     } else {
