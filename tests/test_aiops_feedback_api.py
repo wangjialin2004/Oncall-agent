@@ -8,6 +8,7 @@ class _FakeDiagnosisMemoryService:
         self.feedback = []
         self.missing_cases = set()
         self.raise_unexpected = False
+        self.raise_unexpected_on_list = False
 
     def record_feedback(
         self,
@@ -35,6 +36,8 @@ class _FakeDiagnosisMemoryService:
         )
 
     def list_feedback(self, case_id):
+        if self.raise_unexpected_on_list:
+            raise RuntimeError("sqlite unavailable")
         if case_id in self.missing_cases:
             raise ValueError(f"Diagnosis case not found: {case_id}")
 
@@ -153,6 +156,26 @@ async def test_list_diagnosis_feedback_endpoint(monkeypatch, api_client):
                 "comment": "Root cause needed adjustment",
             }
         ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_diagnosis_feedback_endpoint_reports_unexpected_error(
+    monkeypatch, api_client
+):
+    fake_memory = _FakeDiagnosisMemoryService()
+    fake_memory.raise_unexpected_on_list = True
+    monkeypatch.setattr(aiops_api, "diagnosis_memory_service", fake_memory, raising=False)
+
+    response = await api_client.get("/api/aiops/cases/case-1/feedback")
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "code": 500,
+        "message": "error",
+        "data": {
+            "errorMessage": "sqlite unavailable",
+        },
     }
 
 

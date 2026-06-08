@@ -71,6 +71,18 @@ async def list_diagnosis_feedback(case_id: str):
                 "data": None,
             },
         )
+    except Exception as exc:
+        logger.error(f"查询诊断反馈失败: {exc}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "code": 500,
+                "message": "error",
+                "data": {
+                    "errorMessage": str(exc),
+                },
+            },
+        )
 
     return {
         "code": 200,
