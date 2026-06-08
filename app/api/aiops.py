@@ -18,14 +18,22 @@ router = APIRouter()
 @router.post("/aiops/feedback")
 async def record_diagnosis_feedback(request: DiagnosisFeedbackRequest):
     """Persist user feedback for a diagnosis case."""
-    diagnosis_memory_service.record_feedback(
-        case_id=request.case_id,
-        session_id=request.session_id,
-        user_accepted=request.user_accepted,
-        actual_root_cause=request.actual_root_cause,
-        final_resolution=request.final_resolution,
-        comment=request.comment,
-    )
+    try:
+        diagnosis_memory_service.record_feedback(
+            case_id=request.case_id,
+            session_id=request.session_id,
+            user_accepted=request.user_accepted,
+            actual_root_cause=request.actual_root_cause,
+            final_resolution=request.final_resolution,
+            comment=request.comment,
+        )
+    except ValueError as exc:
+        return {
+            "code": 404,
+            "message": str(exc),
+            "data": None,
+        }
+
     return {
         "code": 200,
         "message": "success",

@@ -187,6 +187,9 @@ class DiagnosisMemoryService:
         comment: str = "",
     ) -> None:
         with self._connection() as connection:
+            if not self._case_exists(connection, case_id):
+                raise ValueError(f"Diagnosis case not found: {case_id}")
+
             connection.execute(
                 """
                 INSERT INTO diagnosis_feedback (
@@ -244,6 +247,17 @@ class DiagnosisMemoryService:
 
     def _open_connection(self) -> sqlite3.Connection:
         return sqlite3.connect(str(self.db_path))
+
+    def _case_exists(self, connection: sqlite3.Connection, case_id: str) -> bool:
+        row = connection.execute(
+            """
+            SELECT 1
+            FROM diagnosis_cases
+            WHERE case_id = ?
+            """,
+            (case_id,),
+        ).fetchone()
+        return row is not None
 
     def _ensure_database(self) -> None:
         if self._initialized:

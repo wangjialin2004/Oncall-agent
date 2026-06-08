@@ -1,3 +1,4 @@
+import pytest
 from langchain_core.messages import ToolMessage
 
 from app.agent.aiops.evidence import build_persistent_tool_evidence
@@ -208,3 +209,15 @@ def test_diagnosis_memory_service_persists_feedback(tmp_path):
             "comment": "诊断结论准确",
         }
     ]
+
+
+def test_diagnosis_memory_service_rejects_feedback_for_missing_case(tmp_path):
+    db_path = tmp_path / "diagnosis-memory.sqlite3"
+    service = DiagnosisMemoryService(db_path)
+
+    with pytest.raises(ValueError, match="Diagnosis case not found"):
+        service.record_feedback(
+            case_id="missing-case",
+            session_id="session-1",
+            user_accepted=False,
+        )

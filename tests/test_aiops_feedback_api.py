@@ -7,6 +7,7 @@ from app.main import app
 class _FakeDiagnosisMemoryService:
     def __init__(self):
         self.feedback = []
+        self.missing_cases = set()
 
     def record_feedback(
         self,
@@ -17,6 +18,9 @@ class _FakeDiagnosisMemoryService:
         final_resolution="",
         comment="",
     ):
+        if case_id in self.missing_cases:
+            raise ValueError(f"Diagnosis case not found: {case_id}")
+
         self.feedback.append(
             {
                 "case_id": case_id,
@@ -63,6 +67,29 @@ def test_record_diagnosis_feedback_endpoint(monkeypatch):
         },
     }
     assert fake_memory.feedback == [response.json()["data"]]
+
+
+def test_record_diagnosis_feedback_endpoint_reports_missing_case(monkeypatch):
+    fake_memory = _FakeDiagnosisMemoryService()
+    fake_memory.missing_cases.add("missing-case")
+    monkeypatch.setattr(aiops_api, "diagnosis_memory_service", fake_memory, raising=False)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/aiops/feedback",
+        json={
+            "case_id": "missing-case",
+            "session_id": "session-1",
+            "user_accepted": False,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "code": 404,
+        "message": "Diagnosis case not found: missing-case",
+        "data": None,
+    }
 
 
 def test_list_diagnosis_feedback_endpoint(monkeypatch):
