@@ -1092,7 +1092,7 @@ class AIOpsAssistantApp {
         if (file) {
             // 验证文件格式
             if (!this.validateFileType(file)) {
-                this.showNotification('只支持上传 TXT 或 Markdown (.md) 格式的文件', 'error');
+                this.showNotification('只支持上传 TXT、Markdown、PDF 或 Word (.docx) 文件', 'error');
                 this.fileInput.value = '';
                 return;
             }
@@ -1103,7 +1103,7 @@ class AIOpsAssistantApp {
     // 验证文件类型
     validateFileType(file) {
         const fileName = file.name.toLowerCase();
-        const allowedExtensions = ['.txt', '.md', '.markdown'];
+        const allowedExtensions = ['.docx', '.markdown', '.md', '.pdf', '.text', '.txt'];
         return allowedExtensions.some(ext => fileName.endsWith(ext));
     }
 
@@ -1111,7 +1111,7 @@ class AIOpsAssistantApp {
     async uploadFile(file) {
         // 再次验证文件类型（双重保险）
         if (!this.validateFileType(file)) {
-            this.showNotification('只支持上传 TXT 或 Markdown (.md) 格式的文件', 'error');
+            this.showNotification('只支持上传 TXT、Markdown、PDF 或 Word (.docx) 文件', 'error');
             return;
         }
 
