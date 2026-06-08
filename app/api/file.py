@@ -157,6 +157,8 @@ async def index_directory(directory_path: str = None):
 
         # 执行索引
         result = vector_index_service.index_directory(directory_path)
+        if result.error_message:
+            raise HTTPException(status_code=400, detail=result.error_message)
 
         return JSONResponse(
             status_code=200,
@@ -167,6 +169,8 @@ async def index_directory(directory_path: str = None):
             },
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"索引目录失败: {e}")
         raise HTTPException(status_code=500, detail=f"索引目录失败: {e}") from e

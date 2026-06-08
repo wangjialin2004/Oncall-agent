@@ -75,3 +75,16 @@ async def test_upload_rejects_oversized_replacement_without_deleting_existing_fi
 def test_sanitize_filename_prefixes_windows_reserved_device_names():
     assert _sanitize_filename("CON.md") == "_CON.md"
     assert _sanitize_filename("nul.txt") == "_nul.txt"
+
+
+@pytest.mark.asyncio
+async def test_index_directory_reports_invalid_path_as_client_error(tmp_path, api_client):
+    missing_dir = tmp_path / "missing"
+
+    response = await api_client.post(
+        "/api/index_directory",
+        params={"directory_path": str(missing_dir)},
+    )
+
+    assert response.status_code == 400
+    assert "目录不存在或不是有效目录" in response.json()["detail"]
