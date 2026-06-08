@@ -124,6 +124,21 @@ def test_vector_search_rejects_blank_query(monkeypatch):
         service.search("   ")
 
 
+def test_vector_search_rejects_non_positive_top_k(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-api-key")
+    module = importlib.import_module("app.services.vector_search_service")
+    service = module.VectorSearchService()
+
+    monkeypatch.setattr(
+        service,
+        "search_similar_documents",
+        lambda query, top_k: (_ for _ in ()).throw(AssertionError("search path not expected")),
+    )
+
+    with pytest.raises(ValueError, match="top_k 必须大于 0"):
+        service.search("HighCPUUsage", top_k=0)
+
+
 def test_milvus_hybrid_schema_includes_bm25_sparse_fields(monkeypatch):
     monkeypatch.setenv("DASHSCOPE_API_KEY", "test-api-key")
     module = importlib.import_module("app.core.milvus_client")
