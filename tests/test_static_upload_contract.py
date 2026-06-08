@@ -58,6 +58,19 @@ def test_static_quick_chat_uses_unified_assistant_endpoint():
     assert "fetch(`${this.apiBaseUrl}/chat`" not in app_js
 
 
+def test_static_quick_chat_uses_assistant_error_envelope_on_http_error():
+    app_js = Path("static/app.js").read_text(encoding="utf-8")
+    quick_chat_start = app_js.index("async sendQuickMessage(message)")
+    quick_chat_end = app_js.index("async sendStreamMessage(message)")
+    quick_chat = app_js[quick_chat_start:quick_chat_end]
+
+    assert quick_chat.index("const data = await response.json();") < quick_chat.index(
+        "if (!response.ok)"
+    )
+    assert "data?.data?.errorMessage" in quick_chat
+    assert "throw new Error(errorMessage)" in quick_chat
+
+
 def test_static_backend_history_maps_assistant_role_to_assistant_message_type():
     app_js = Path("static/app.js").read_text(encoding="utf-8")
 

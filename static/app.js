@@ -692,12 +692,13 @@ class AIOpsAssistantApp {
                 })
             });
 
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
-            }
-
             const data = await response.json();
             console.log('[sendQuickMessage] 响应数据:', JSON.stringify(data));
+
+            if (!response.ok) {
+                const errorMessage = data?.data?.errorMessage || data?.message || `HTTP错误: ${response.status}`;
+                throw new Error(errorMessage);
+            }
             
             // 移除等待提示消息
             if (loadingMessage && loadingMessage.parentNode) {
