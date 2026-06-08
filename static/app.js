@@ -454,11 +454,13 @@ class AIOpsAssistantApp {
                     
                     // 如果后端有历史记录，使用后端的
                     if (backendHistory.length > 0) {
-                        this.currentChatHistory = [];
-                        backendHistory.forEach(msg => {
-                            // 后端返回格式: {role: "user|assistant", content: "...", timestamp: "..."}
-                            const messageType = msg.role === 'assistant' ? 'assistant' : 'user';
-                            this.addMessage(messageType, msg.content, false, false);
+                        this.currentChatHistory = backendHistory.map(msg => ({
+                            type: msg.role === 'assistant' ? 'assistant' : 'user',
+                            content: msg.content,
+                            timestamp: msg.timestamp || new Date().toISOString()
+                        }));
+                        this.currentChatHistory.forEach(msg => {
+                            this.addMessage(msg.type, msg.content, false, false);
                         });
                     } else {
                         // 否则使用localStorage的历史记录

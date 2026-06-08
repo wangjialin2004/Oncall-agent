@@ -102,3 +102,15 @@ def test_static_backend_history_maps_assistant_role_to_assistant_message_type():
 
     assert "msg.role === 'assistant' ? 'assistant'" in app_js
     assert "msg.role === 'user' ? 'user' : 'bot'" not in app_js
+
+
+def test_static_backend_history_populates_current_chat_history_state():
+    app_js = Path("static/app.js").read_text(encoding="utf-8")
+    load_start = app_js.index("async loadChatHistory(historyId)")
+    load_end = app_js.index("async deleteChatHistory(historyId)")
+    load_history = app_js[load_start:load_end]
+
+    assert "this.currentChatHistory = backendHistory.map(msg => ({" in load_history
+    assert "type: msg.role === 'assistant' ? 'assistant' : 'user'" in load_history
+    assert "content: msg.content" in load_history
+    assert "timestamp: msg.timestamp" in load_history
