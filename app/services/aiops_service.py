@@ -159,6 +159,7 @@ class AIOpsService:
                 "type": "complete",
                 "stage": "complete",
                 "message": "任务执行完成",
+                "case_id": case_id,
                 "response": final_response
             }
 
@@ -273,6 +274,7 @@ class AIOpsService:
                     "message": "诊断流程完成",
                     "diagnosis": {
                         "status": "completed",
+                        "case_id": event.get("case_id", ""),
                         "report": event.get("response", "")
                     }
                 }

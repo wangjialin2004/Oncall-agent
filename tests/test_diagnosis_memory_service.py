@@ -44,6 +44,7 @@ async def test_aiops_service_execute_persists_case_lifecycle(tmp_path):
         "type": "complete",
         "stage": "complete",
         "message": "任务执行完成",
+        "case_id": case_id,
         "response": "# final report",
     }
     assert graph.input_state["session_id"] == "session-1"
@@ -53,6 +54,26 @@ async def test_aiops_service_execute_persists_case_lifecycle(tmp_path):
     assert case["plan"] == ["check alerts"]
     assert case["executed_steps"] == [["check alerts", "ok"]]
     assert case["final_report"] == "# final report"
+
+
+async def test_aiops_service_diagnose_exposes_case_id_in_completion(tmp_path):
+    memory_service = DiagnosisMemoryService(tmp_path / "diagnosis-memory.sqlite3")
+    graph = _FakeGraph()
+    service = object.__new__(AIOpsService)
+    service.memory_service = memory_service
+    service.graph = graph
+
+    events = [event async for event in service.diagnose(session_id="session-1")]
+
+    case_id = graph.input_state["case_id"]
+
+    assert events[-1]["type"] == "complete"
+    assert events[-1]["stage"] == "diagnosis_complete"
+    assert events[-1]["diagnosis"] == {
+        "status": "completed",
+        "case_id": case_id,
+        "report": "# final report",
+    }
 
 
 def test_diagnosis_memory_service_persists_case_lifecycle(tmp_path):
