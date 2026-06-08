@@ -203,7 +203,7 @@ def _sanitize_filename(filename: str) -> str:
         str: 规范化后的文件名
     """
     # 去除空格
-    sanitized = filename.replace(" ", "_")
+    sanitized = "".join("_" if char.isspace() or not char.isprintable() else char for char in filename)
     # 去除其他可能导致问题的字符
     for char in ["\\", "/", ":", "*", "?", '"', "<", ">", "|"]:
         sanitized = sanitized.replace(char, "_")

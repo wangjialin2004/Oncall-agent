@@ -77,6 +77,10 @@ def test_sanitize_filename_prefixes_windows_reserved_device_names():
     assert _sanitize_filename("nul.txt") == "_nul.txt"
 
 
+def test_sanitize_filename_replaces_control_characters():
+    assert _sanitize_filename("bad\n\tname.md") == "bad__name.md"
+
+
 @pytest.mark.asyncio
 async def test_index_directory_reports_invalid_path_as_client_error(tmp_path, api_client):
     missing_dir = tmp_path / "missing"
