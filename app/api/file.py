@@ -17,6 +17,30 @@ UPLOAD_DIR = Path("./uploads")
 ALLOWED_EXTENSIONS = sorted(extension.lstrip(".") for extension in SUPPORTED_EXTENSIONS)
 # 单个文件支持最大大小
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+WINDOWS_RESERVED_FILENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+}
 
 
 @router.post("/upload")
@@ -179,4 +203,6 @@ def _sanitize_filename(filename: str) -> str:
     # 去除其他可能导致问题的字符
     for char in ["\\", "/", ":", "*", "?", '"', "<", ">", "|"]:
         sanitized = sanitized.replace(char, "_")
+    if Path(sanitized).stem.upper() in WINDOWS_RESERVED_FILENAMES:
+        sanitized = f"_{sanitized}"
     return sanitized

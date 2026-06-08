@@ -1,5 +1,7 @@
 import pytest
 
+from app.api.file import _sanitize_filename
+
 
 @pytest.mark.asyncio
 async def test_upload_reports_completed_indexing(monkeypatch, tmp_path, api_client):
@@ -68,3 +70,8 @@ async def test_upload_rejects_oversized_replacement_without_deleting_existing_fi
 
     assert response.status_code == 400
     assert existing_file.read_bytes() == b"original content"
+
+
+def test_sanitize_filename_prefixes_windows_reserved_device_names():
+    assert _sanitize_filename("CON.md") == "_CON.md"
+    assert _sanitize_filename("nul.txt") == "_nul.txt"
