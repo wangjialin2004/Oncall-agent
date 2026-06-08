@@ -1145,9 +1145,18 @@ class AIOpsAssistantApp {
             const data = await response.json();
 
             if ((data.code === 200 || data.message === 'success') && data.data) {
-                // 在聊天界面显示上传成功消息
-                const successMessage = `${file.name} 上传到知识库成功`;
-                this.addMessage('assistant', successMessage, false, true);
+                // 在聊天界面显示上传与索引结果
+                const uploadResult = data.data;
+                let uploadMessage = `${file.name} 上传到知识库成功`;
+
+                if (uploadResult.indexing_status === 'failed') {
+                    const errorDetail = uploadResult.indexing_error ? `：${uploadResult.indexing_error}` : '';
+                    uploadMessage = `${file.name} 文件已上传，但知识库索引失败${errorDetail}`;
+                } else if (Number.isFinite(Number(uploadResult.indexed_chunks))) {
+                    uploadMessage = `${file.name} 上传到知识库成功，索引分片 ${uploadResult.indexed_chunks} 个`;
+                }
+
+                this.addMessage('assistant', uploadMessage, false, true);
             } else {
                 throw new Error(data.message || '上传失败');
             }

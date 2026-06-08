@@ -34,3 +34,11 @@ def test_static_upload_size_limit_matches_backend_limit():
 
     assert max_size_mb * 1024 * 1024 == MAX_FILE_SIZE
     assert f"文件大小不能超过{max_size_mb}MB" in app_js
+
+
+def test_static_upload_message_reflects_indexing_status():
+    app_js = Path("static/app.js").read_text(encoding="utf-8")
+
+    assert "uploadResult.indexing_status" in app_js
+    assert "文件已上传，但知识库索引失败" in app_js
+    assert "索引分片" in app_js
