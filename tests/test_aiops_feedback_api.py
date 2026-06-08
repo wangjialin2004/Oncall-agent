@@ -1,7 +1,6 @@
-from fastapi.testclient import TestClient
+import pytest
 
 from app.api import aiops as aiops_api
-from app.main import app
 
 
 class _FakeDiagnosisMemoryService:
@@ -39,12 +38,12 @@ class _FakeDiagnosisMemoryService:
         return [item for item in self.feedback if item["case_id"] == case_id]
 
 
-def test_record_diagnosis_feedback_endpoint(monkeypatch):
+@pytest.mark.asyncio
+async def test_record_diagnosis_feedback_endpoint(monkeypatch, api_client):
     fake_memory = _FakeDiagnosisMemoryService()
     monkeypatch.setattr(aiops_api, "diagnosis_memory_service", fake_memory, raising=False)
 
-    client = TestClient(app)
-    response = client.post(
+    response = await api_client.post(
         "/api/aiops/feedback",
         json={
             "case_id": "case-1",
@@ -72,13 +71,13 @@ def test_record_diagnosis_feedback_endpoint(monkeypatch):
     assert fake_memory.feedback == [response.json()["data"]]
 
 
-def test_record_diagnosis_feedback_endpoint_reports_missing_case(monkeypatch):
+@pytest.mark.asyncio
+async def test_record_diagnosis_feedback_endpoint_reports_missing_case(monkeypatch, api_client):
     fake_memory = _FakeDiagnosisMemoryService()
     fake_memory.missing_cases.add("missing-case")
     monkeypatch.setattr(aiops_api, "diagnosis_memory_service", fake_memory, raising=False)
 
-    client = TestClient(app)
-    response = client.post(
+    response = await api_client.post(
         "/api/aiops/feedback",
         json={
             "case_id": "missing-case",
@@ -95,7 +94,8 @@ def test_record_diagnosis_feedback_endpoint_reports_missing_case(monkeypatch):
     }
 
 
-def test_list_diagnosis_feedback_endpoint(monkeypatch):
+@pytest.mark.asyncio
+async def test_list_diagnosis_feedback_endpoint(monkeypatch, api_client):
     fake_memory = _FakeDiagnosisMemoryService()
     fake_memory.record_feedback(
         case_id="case-1",
@@ -107,8 +107,7 @@ def test_list_diagnosis_feedback_endpoint(monkeypatch):
     )
     monkeypatch.setattr(aiops_api, "diagnosis_memory_service", fake_memory, raising=False)
 
-    client = TestClient(app)
-    response = client.get("/api/aiops/cases/case-1/feedback")
+    response = await api_client.get("/api/aiops/cases/case-1/feedback")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -127,13 +126,13 @@ def test_list_diagnosis_feedback_endpoint(monkeypatch):
     }
 
 
-def test_list_diagnosis_feedback_endpoint_reports_missing_case(monkeypatch):
+@pytest.mark.asyncio
+async def test_list_diagnosis_feedback_endpoint_reports_missing_case(monkeypatch, api_client):
     fake_memory = _FakeDiagnosisMemoryService()
     fake_memory.missing_cases.add("missing-case")
     monkeypatch.setattr(aiops_api, "diagnosis_memory_service", fake_memory, raising=False)
 
-    client = TestClient(app)
-    response = client.get("/api/aiops/cases/missing-case/feedback")
+    response = await api_client.get("/api/aiops/cases/missing-case/feedback")
 
     assert response.status_code == 200
     assert response.json() == {

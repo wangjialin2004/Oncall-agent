@@ -1,9 +1,8 @@
-from fastapi.testclient import TestClient
-
-from app.main import app
+import pytest
 
 
-def test_upload_reports_completed_indexing(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_upload_reports_completed_indexing(monkeypatch, tmp_path, api_client):
     import app.api.file as file_api
 
     monkeypatch.setattr(file_api, "UPLOAD_DIR", tmp_path)
@@ -13,8 +12,7 @@ def test_upload_reports_completed_indexing(monkeypatch, tmp_path):
 
     monkeypatch.setattr(file_api.vector_index_service, "index_single_file", fake_index_single_file)
 
-    client = TestClient(app)
-    response = client.post(
+    response = await api_client.post(
         "/api/upload",
         files={"file": ("note.md", b"# hello", "text/markdown")},
     )
@@ -27,7 +25,10 @@ def test_upload_reports_completed_indexing(monkeypatch, tmp_path):
     assert data["indexing_error"] == ""
 
 
-def test_upload_reports_failed_indexing_without_failing_upload(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_upload_reports_failed_indexing_without_failing_upload(
+    monkeypatch, tmp_path, api_client
+):
     import app.api.file as file_api
 
     monkeypatch.setattr(file_api, "UPLOAD_DIR", tmp_path)
@@ -37,8 +38,7 @@ def test_upload_reports_failed_indexing_without_failing_upload(monkeypatch, tmp_
 
     monkeypatch.setattr(file_api.vector_index_service, "index_single_file", fake_index_single_file)
 
-    client = TestClient(app)
-    response = client.post(
+    response = await api_client.post(
         "/api/upload",
         files={"file": ("note.md", b"# hello", "text/markdown")},
     )
@@ -50,7 +50,10 @@ def test_upload_reports_failed_indexing_without_failing_upload(monkeypatch, tmp_
     assert data["indexing_error"] == "Milvus unavailable"
 
 
-def test_upload_rejects_oversized_replacement_without_deleting_existing_file(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_upload_rejects_oversized_replacement_without_deleting_existing_file(
+    monkeypatch, tmp_path, api_client
+):
     import app.api.file as file_api
 
     existing_file = tmp_path / "note.md"
@@ -58,8 +61,7 @@ def test_upload_rejects_oversized_replacement_without_deleting_existing_file(mon
     monkeypatch.setattr(file_api, "UPLOAD_DIR", tmp_path)
     monkeypatch.setattr(file_api, "MAX_FILE_SIZE", 4)
 
-    client = TestClient(app)
-    response = client.post(
+    response = await api_client.post(
         "/api/upload",
         files={"file": ("note.md", b"too large", "text/markdown")},
     )

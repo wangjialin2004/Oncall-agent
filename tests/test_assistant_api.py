@@ -1,9 +1,8 @@
-from fastapi.testclient import TestClient
-
-from app.main import app
+import pytest
 
 
-def test_assistant_endpoint_returns_router_result(monkeypatch):
+@pytest.mark.asyncio
+async def test_assistant_endpoint_returns_router_result(monkeypatch, api_client):
     async def fake_answer(question, session_id):
         return {
             "success": True,
@@ -14,8 +13,10 @@ def test_assistant_endpoint_returns_router_result(monkeypatch):
 
     monkeypatch.setattr("app.api.assistant.router_service.answer", fake_answer)
 
-    client = TestClient(app)
-    response = client.post("/api/assistant", json={"Id": "s1", "Question": "怎么排查慢响应"})
+    response = await api_client.post(
+        "/api/assistant",
+        json={"Id": "s1", "Question": "怎么排查慢响应"},
+    )
 
     assert response.status_code == 200
     assert response.json() == {
