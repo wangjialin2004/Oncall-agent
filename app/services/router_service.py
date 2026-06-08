@@ -72,6 +72,14 @@ class RouterService:
                 if event.get("type") == "complete":
                     case_id = str(event.get("case_id") or "")
                     final_answer = str(event.get("response") or event.get("message") or "")
+                elif event.get("type") == "error":
+                    return {
+                        "success": False,
+                        "route": "aiops",
+                        "case_id": str(event.get("case_id") or ""),
+                        "answer": None,
+                        "errorMessage": str(event.get("message") or event.get("response") or ""),
+                    }
             return {
                 "success": True,
                 "route": "aiops",

@@ -69,3 +69,24 @@ async def test_answer_collects_aiops_final_response(monkeypatch):
         "answer": "# report",
         "errorMessage": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_answer_reports_aiops_error_event(monkeypatch):
+    service = RouterService()
+
+    async def fake_execute(message, session_id):
+        yield {"type": "status", "message": "running"}
+        yield {"type": "error", "message": "diagnosis failed"}
+
+    monkeypatch.setattr(router_module.aiops_service, "execute", fake_execute)
+
+    result = await service.answer("甯垜璇婃柇 CPU 鍛婅", session_id="s1")
+
+    assert result == {
+        "success": False,
+        "route": "aiops",
+        "case_id": "",
+        "answer": None,
+        "errorMessage": "diagnosis failed",
+    }
