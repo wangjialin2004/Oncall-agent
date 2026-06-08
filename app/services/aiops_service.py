@@ -172,7 +172,8 @@ class AIOpsService:
             yield {
                 "type": "error",
                 "stage": "error",
-                "message": f"任务执行出错: {str(e)}"
+                "message": f"任务执行出错: {str(e)}",
+                "case_id": case_id,
             }
 
     async def diagnose(

@@ -29,6 +29,16 @@ class _FakeGraph:
         )
 
 
+class _FailingGraph:
+    def __init__(self):
+        self.input_state = None
+
+    async def astream(self, input, config, stream_mode):
+        self.input_state = input
+        raise RuntimeError("planner unavailable")
+        yield
+
+
 async def test_aiops_service_execute_persists_case_lifecycle(tmp_path):
     memory_service = DiagnosisMemoryService(tmp_path / "diagnosis-memory.sqlite3")
     graph = _FakeGraph()
@@ -55,6 +65,29 @@ async def test_aiops_service_execute_persists_case_lifecycle(tmp_path):
     assert case["plan"] == ["check alerts"]
     assert case["executed_steps"] == [["check alerts", "ok"]]
     assert case["final_report"] == "# final report"
+
+
+async def test_aiops_service_execute_exposes_case_id_on_error(tmp_path):
+    memory_service = DiagnosisMemoryService(tmp_path / "diagnosis-memory.sqlite3")
+    graph = _FailingGraph()
+    service = object.__new__(AIOpsService)
+    service.memory_service = memory_service
+    service.graph = graph
+
+    events = [event async for event in service.execute("diagnose", session_id="session-1")]
+
+    case_id = graph.input_state["case_id"]
+    case = memory_service.get_case(case_id)
+
+    assert events == [
+        {
+            "type": "error",
+            "stage": "error",
+            "message": "任务执行出错: planner unavailable",
+            "case_id": case_id,
+        }
+    ]
+    assert case["status"] == "failed"
 
 
 async def test_aiops_service_diagnose_exposes_case_id_in_completion(tmp_path):
