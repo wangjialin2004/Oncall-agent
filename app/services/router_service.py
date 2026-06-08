@@ -46,6 +46,8 @@ class RouterService:
         normalized = message.strip().lower()
         if not normalized:
             return RouteDecision(route="clarify", reason="empty_message")
+        if not any(char.isalnum() for char in normalized):
+            return RouteDecision(route="clarify", reason="no_meaningful_text")
 
         if any(keyword in normalized for keyword in self.AIOPS_KEYWORDS):
             return RouteDecision(route="aiops", reason="matched_aiops_keyword")

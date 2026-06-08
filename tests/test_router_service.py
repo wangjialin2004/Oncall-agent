@@ -31,6 +31,15 @@ def test_route_message_clarifies_empty_input():
     assert decision.reason == "empty_message"
 
 
+def test_route_message_clarifies_punctuation_only_input():
+    service = RouterService()
+
+    decision = service.route_message("??? ...")
+
+    assert decision.route == "clarify"
+    assert decision.reason == "no_meaningful_text"
+
+
 @pytest.mark.asyncio
 async def test_answer_dispatches_to_rag(monkeypatch):
     service = RouterService()
