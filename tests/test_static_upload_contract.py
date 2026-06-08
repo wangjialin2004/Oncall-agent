@@ -1,11 +1,12 @@
 import re
+from pathlib import Path
 
 from app.services.document_extraction_service import SUPPORTED_EXTENSIONS
 
 
 def test_static_upload_accepts_backend_supported_document_extensions():
-    app_js = open("static/app.js", encoding="utf-8").read()
-    index_html = open("static/index.html", encoding="utf-8").read()
+    app_js = Path("static/app.js").read_text(encoding="utf-8")
+    index_html = Path("static/index.html").read_text(encoding="utf-8")
 
     expected_extensions = sorted(SUPPORTED_EXTENSIONS)
     allowed_match = re.search(r"allowedExtensions\s*=\s*\[(?P<items>[^\]]+)\]", app_js)
