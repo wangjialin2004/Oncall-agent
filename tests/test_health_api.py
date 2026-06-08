@@ -1,3 +1,7 @@
+import json
+
+import pytest
+
 from app.api import health
 
 
@@ -24,3 +28,51 @@ def test_build_health_data_includes_core_dependencies(monkeypatch):
     assert data["monitor"]["target_mode"] == "self"
     assert data["logs"]["provider"] == "local"
     assert data["status"] == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_health_check_returns_healthy_http_envelope(monkeypatch):
+    monkeypatch.setattr(
+        health,
+        "build_health_data",
+        lambda: {"service": "test", "version": "1.0", "status": "healthy"},
+    )
+
+    response = await health.health_check()
+    body = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert body == {
+        "code": 200,
+        "message": "服务运行正常",
+        "data": {"service": "test", "version": "1.0", "status": "healthy"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_health_check_returns_unhealthy_http_envelope(monkeypatch):
+    monkeypatch.setattr(
+        health,
+        "build_health_data",
+        lambda: {
+            "service": "test",
+            "version": "1.0",
+            "status": "unhealthy",
+            "error": "数据库不可用",
+        },
+    )
+
+    response = await health.health_check()
+    body = json.loads(response.body)
+
+    assert response.status_code == 503
+    assert body == {
+        "code": 503,
+        "message": "服务不可用",
+        "data": {
+            "service": "test",
+            "version": "1.0",
+            "status": "unhealthy",
+            "error": "数据库不可用",
+        },
+    }
