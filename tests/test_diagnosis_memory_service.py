@@ -221,3 +221,11 @@ def test_diagnosis_memory_service_rejects_feedback_for_missing_case(tmp_path):
             session_id="session-1",
             user_accepted=False,
         )
+
+
+def test_diagnosis_memory_service_rejects_feedback_lookup_for_missing_case(tmp_path):
+    db_path = tmp_path / "diagnosis-memory.sqlite3"
+    service = DiagnosisMemoryService(db_path)
+
+    with pytest.raises(ValueError, match="Diagnosis case not found"):
+        service.list_feedback("missing-case")

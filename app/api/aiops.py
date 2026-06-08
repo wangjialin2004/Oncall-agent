@@ -44,10 +44,19 @@ async def record_diagnosis_feedback(request: DiagnosisFeedbackRequest):
 @router.get("/aiops/cases/{case_id}/feedback")
 async def list_diagnosis_feedback(case_id: str):
     """List user feedback recorded for a diagnosis case."""
+    try:
+        feedback = diagnosis_memory_service.list_feedback(case_id)
+    except ValueError as exc:
+        return {
+            "code": 404,
+            "message": str(exc),
+            "data": None,
+        }
+
     return {
         "code": 200,
         "message": "success",
-        "data": diagnosis_memory_service.list_feedback(case_id),
+        "data": feedback,
     }
 
 

@@ -33,6 +33,9 @@ class _FakeDiagnosisMemoryService:
         )
 
     def list_feedback(self, case_id):
+        if case_id in self.missing_cases:
+            raise ValueError(f"Diagnosis case not found: {case_id}")
+
         return [item for item in self.feedback if item["case_id"] == case_id]
 
 
@@ -121,4 +124,20 @@ def test_list_diagnosis_feedback_endpoint(monkeypatch):
                 "comment": "Root cause needed adjustment",
             }
         ],
+    }
+
+
+def test_list_diagnosis_feedback_endpoint_reports_missing_case(monkeypatch):
+    fake_memory = _FakeDiagnosisMemoryService()
+    fake_memory.missing_cases.add("missing-case")
+    monkeypatch.setattr(aiops_api, "diagnosis_memory_service", fake_memory, raising=False)
+
+    client = TestClient(app)
+    response = client.get("/api/aiops/cases/missing-case/feedback")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "code": 404,
+        "message": "Diagnosis case not found: missing-case",
+        "data": None,
     }

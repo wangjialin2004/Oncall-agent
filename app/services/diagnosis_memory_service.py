@@ -211,6 +211,9 @@ class DiagnosisMemoryService:
 
     def list_feedback(self, case_id: str) -> list[dict[str, Any]]:
         with self._connection() as connection:
+            if not self._case_exists(connection, case_id):
+                raise ValueError(f"Diagnosis case not found: {case_id}")
+
             rows = connection.execute(
                 """
                 SELECT case_id, session_id, user_accepted, actual_root_cause,
