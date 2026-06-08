@@ -6,6 +6,7 @@
 import json
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from loguru import logger
 from sse_starlette.sse import EventSourceResponse
 
@@ -57,15 +58,18 @@ async def chat(request: ChatRequest):
 
     except Exception as e:
         logger.error(f"对话接口错误: {e}")
-        return {
-            "code": 500,
-            "message": "error",
-            "data": {
-                "success": False,
-                "answer": None,
-                "errorMessage": str(e)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "code": 500,
+                "message": "error",
+                "data": {
+                    "success": False,
+                    "answer": None,
+                    "errorMessage": str(e),
+                },
             }
-        }
+        )
 
 
 @router.post("/chat_stream")
