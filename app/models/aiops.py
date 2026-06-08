@@ -2,18 +2,19 @@
 AIOps 请求和响应模型
 """
 
-from typing import Optional, List, Dict, Any
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
 class AIOpsRequest(BaseModel):
     """AIOps 诊断请求"""
-    
-    session_id: Optional[str] = Field(
+
+    session_id: str | None = Field(
         default="default",
         description="会话ID，用于追踪诊断历史"
     )
-    
+
     class Config:
         json_schema_extra = {
             "example": {
@@ -28,16 +29,27 @@ class AlertInfo(BaseModel):
     severity: str
     instance: str
     duration: str
-    description: Optional[str] = None
+    description: str | None = None
+
+
+class DiagnosisFeedbackRequest(BaseModel):
+    """User feedback for a completed diagnosis case."""
+
+    case_id: str = Field(..., description="Diagnosis case ID")
+    session_id: str = Field(..., description="Session ID")
+    user_accepted: bool = Field(..., description="Whether the user accepted the diagnosis")
+    actual_root_cause: str = Field(default="", description="Confirmed root cause")
+    final_resolution: str = Field(default="", description="Final resolution")
+    comment: str = Field(default="", description="Additional feedback")
 
 
 class DiagnosisResponse(BaseModel):
     """诊断响应（非流式）"""
-    
+
     code: int = 200
     message: str = "success"
-    data: Dict[str, Any]
-    
+    data: dict[str, Any]
+
     class Config:
         json_schema_extra = {
             "example": {

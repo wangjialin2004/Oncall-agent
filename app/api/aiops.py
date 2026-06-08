@@ -3,14 +3,44 @@ AIOps 智能运维接口
 """
 
 import json
-from fastapi import APIRouter
-from sse_starlette.sse import EventSourceResponse
-from loguru import logger
 
-from app.models.aiops import AIOpsRequest
+from fastapi import APIRouter
+from loguru import logger
+from sse_starlette.sse import EventSourceResponse
+
+from app.models.aiops import AIOpsRequest, DiagnosisFeedbackRequest
 from app.services.aiops_service import aiops_service
+from app.services.diagnosis_memory_service import diagnosis_memory_service
 
 router = APIRouter()
+
+
+@router.post("/aiops/feedback")
+async def record_diagnosis_feedback(request: DiagnosisFeedbackRequest):
+    """Persist user feedback for a diagnosis case."""
+    diagnosis_memory_service.record_feedback(
+        case_id=request.case_id,
+        session_id=request.session_id,
+        user_accepted=request.user_accepted,
+        actual_root_cause=request.actual_root_cause,
+        final_resolution=request.final_resolution,
+        comment=request.comment,
+    )
+    return {
+        "code": 200,
+        "message": "success",
+        "data": request.model_dump(),
+    }
+
+
+@router.get("/aiops/cases/{case_id}/feedback")
+async def list_diagnosis_feedback(case_id: str):
+    """List user feedback recorded for a diagnosis case."""
+    return {
+        "code": 200,
+        "message": "success",
+        "data": diagnosis_memory_service.list_feedback(case_id),
+    }
 
 
 @router.post("/aiops")
