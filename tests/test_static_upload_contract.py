@@ -42,3 +42,10 @@ def test_static_upload_message_reflects_indexing_status():
     assert "uploadResult.indexing_status" in app_js
     assert "文件已上传，但知识库索引失败" in app_js
     assert "索引分片" in app_js
+
+
+def test_static_frontend_uses_same_origin_api_base():
+    app_js = Path("static/app.js").read_text(encoding="utf-8")
+
+    assert "this.apiBaseUrl = '/api'" in app_js
+    assert "http://localhost:9900/api" not in app_js
