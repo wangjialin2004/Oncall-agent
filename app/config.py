@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     # Diagnosis memory
     diagnosis_memory_db_path: str = "data/diagnosis_memory.sqlite3"
 
+    # Long-term experience memory
+    project_id: str = "super_biz_agent"
+    experience_memory_db_path: str = "data/experience_memory.sqlite3"
+    experience_memory_collection: str = "experience_memory"
+    experience_memory_top_k: int = 3
+    experience_memory_similarity_threshold: float = 0.78
+    experience_memory_high_confidence_threshold: float = 0.75
+    experience_memory_initial_confidence: float = 0.8
+
     @field_validator("debug", mode="before")
     @classmethod
     def parse_debug_mode(cls, value: Any) -> Any:
