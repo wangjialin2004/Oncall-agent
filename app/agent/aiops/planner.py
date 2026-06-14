@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.mcp_client import get_mcp_client_with_retry
 from app.config import config
+from app.services.experience_memory_service import experience_memory_service
 from app.tools import DEFAULT_LOCAL_AGENT_TOOLS, retrieve_knowledge
 
 from .state import PlanExecuteState
@@ -24,6 +25,48 @@ class Plan(BaseModel):
 
 
 # Planner 提示词
+def load_experience_context(input_text: str) -> str:
+    try:
+        experiences = experience_memory_service.search_relevant_experiences(
+            query=input_text,
+            project_id=config.project_id,
+            top_k=config.experience_memory_top_k,
+        )
+    except Exception as exc:
+        logger.warning(f"experience memory recall failed: {exc}")
+        return ""
+    return format_experience_context(experiences)
+
+
+def format_experience_context(experiences: list[dict[str, Any]]) -> str:
+    if not experiences:
+        return ""
+
+    sections = [
+        "## Relevant historical experience",
+        "",
+        "Historical experience is not current fact.",
+        "If similarity and confidence are high, first verify the historical root cause.",
+        "If verification fails, continue normal investigation.",
+        "",
+    ]
+    for item in experiences:
+        sections.extend(
+            [
+                f"[{item['experience_id']}]",
+                f"similarity: {item.get('similarity', 0):.2f}",
+                f"confidence: {item.get('confidence', 0):.2f}",
+                f"historical symptoms: {item['symptoms']}",
+                f"verified root cause: {item['root_cause']}",
+                f"effective resolution: {item['resolution']}",
+                f"key evidence: {item['evidence_summary']}",
+                f"source cases: {', '.join(item.get('source_case_ids', []))}",
+                "",
+            ]
+        )
+    return "\n".join(sections).strip()
+
+
 planner_prompt = ChatPromptTemplate.from_messages(
     [
         (
@@ -75,6 +118,7 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
     try:
         # 步骤1: 查询内部文档获取相关经验
         logger.info("查询内部文档，寻找相关经验...")
+        memory_context = load_experience_context(input_text)
         experience_docs = ""
         try:
             # retrieve_knowledge 使用 response_format="content_and_artifact"
@@ -116,6 +160,11 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
             """).strip()
         else:
             experience_context = ""
+        if memory_context:
+            context_blocks = [memory_context]
+            if experience_context:
+                context_blocks.append(experience_context)
+            experience_context = "\n\n---\n\n".join(context_blocks)
 
         # 步骤4: 创建 LLM 并生成计划
         llm = ChatQwen(
