@@ -34,6 +34,7 @@ class _FakeDiagnosisMemoryService:
                 "comment": comment,
             }
         )
+        return f"feedback-{len(self.feedback)}"
 
     def list_feedback(self, case_id):
         if self.raise_unexpected_on_list:
@@ -43,6 +44,33 @@ class _FakeDiagnosisMemoryService:
 
         return [item for item in self.feedback if item["case_id"] == case_id]
 
+
+class _FakeExperienceMemoryService:
+    def __init__(self):
+        self.calls = []
+        self.raise_on_create = False
+
+    def create_or_merge_from_feedback(
+        self,
+        *,
+        case_id,
+        feedback_id,
+        project_id,
+        environment="",
+        service_name="",
+    ):
+        if self.raise_on_create:
+            raise RuntimeError("milvus unavailable")
+        self.calls.append(
+            {
+                "case_id": case_id,
+                "feedback_id": feedback_id,
+                "project_id": project_id,
+                "environment": environment,
+                "service_name": service_name,
+            }
+        )
+        return "exp-1"
 
 @pytest.mark.asyncio
 async def test_record_diagnosis_feedback_endpoint(monkeypatch, api_client):
@@ -75,6 +103,75 @@ async def test_record_diagnosis_feedback_endpoint(monkeypatch, api_client):
         },
     }
     assert fake_memory.feedback == [response.json()["data"]]
+
+
+@pytest.mark.asyncio
+async def test_record_diagnosis_feedback_creates_experience_for_accepted_feedback(
+    monkeypatch, api_client
+):
+    fake_memory = _FakeDiagnosisMemoryService()
+    fake_experience = _FakeExperienceMemoryService()
+    monkeypatch.setattr(aiops_api, "diagnosis_memory_service", fake_memory, raising=False)
+    monkeypatch.setattr(aiops_api, "experience_memory_service", fake_experience, raising=False)
+
+    response = await api_client.post(
+        "/api/aiops/feedback",
+        json={
+            "case_id": "case-1",
+            "session_id": "session-1",
+            "user_accepted": True,
+            "actual_root_cause": "Milvus connection exhausted",
+            "final_resolution": "Restarted Milvus",
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake_experience.calls == [
+        {
+            "case_id": "case-1",
+            "feedback_id": "feedback-1",
+            "project_id": "super_biz_agent",
+            "environment": "",
+            "service_name": "",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_record_diagnosis_feedback_skips_experience_for_rejected_feedback(
+    monkeypatch, api_client
+):
+    fake_memory = _FakeDiagnosisMemoryService()
+    fake_experience = _FakeExperienceMemoryService()
+    monkeypatch.setattr(aiops_api, "diagnosis_memory_service", fake_memory, raising=False)
+    monkeypatch.setattr(aiops_api, "experience_memory_service", fake_experience, raising=False)
+
+    response = await api_client.post(
+        "/api/aiops/feedback",
+        json={"case_id": "case-1", "session_id": "session-1", "user_accepted": False},
+    )
+
+    assert response.status_code == 200
+    assert fake_experience.calls == []
+
+
+@pytest.mark.asyncio
+async def test_record_diagnosis_feedback_ignores_experience_memory_errors(
+    monkeypatch, api_client
+):
+    fake_memory = _FakeDiagnosisMemoryService()
+    fake_experience = _FakeExperienceMemoryService()
+    fake_experience.raise_on_create = True
+    monkeypatch.setattr(aiops_api, "diagnosis_memory_service", fake_memory, raising=False)
+    monkeypatch.setattr(aiops_api, "experience_memory_service", fake_experience, raising=False)
+
+    response = await api_client.post(
+        "/api/aiops/feedback",
+        json={"case_id": "case-1", "session_id": "session-1", "user_accepted": True},
+    )
+
+    assert response.status_code == 200
+    assert fake_memory.feedback[0]["case_id"] == "case-1"
 
 
 @pytest.mark.asyncio

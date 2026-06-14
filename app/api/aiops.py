@@ -9,9 +9,11 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 from sse_starlette.sse import EventSourceResponse
 
+from app.config import config
 from app.models.aiops import AIOpsRequest, DiagnosisFeedbackRequest
 from app.services.aiops_service import aiops_service
 from app.services.diagnosis_memory_service import diagnosis_memory_service
+from app.services.experience_memory_service import experience_memory_service
 
 router = APIRouter()
 
@@ -20,7 +22,7 @@ router = APIRouter()
 async def record_diagnosis_feedback(request: DiagnosisFeedbackRequest):
     """Persist user feedback for a diagnosis case."""
     try:
-        diagnosis_memory_service.record_feedback(
+        feedback_id = diagnosis_memory_service.record_feedback(
             case_id=request.case_id,
             session_id=request.session_id,
             user_accepted=request.user_accepted,
@@ -28,6 +30,15 @@ async def record_diagnosis_feedback(request: DiagnosisFeedbackRequest):
             final_resolution=request.final_resolution,
             comment=request.comment,
         )
+        if request.user_accepted:
+            try:
+                experience_memory_service.create_or_merge_from_feedback(
+                    case_id=request.case_id,
+                    feedback_id=feedback_id,
+                    project_id=config.project_id,
+                )
+            except Exception as exc:
+                logger.warning(f"long-term experience memory write failed: {exc}")
     except ValueError as exc:
         return JSONResponse(
             status_code=404,
