@@ -15,6 +15,7 @@ from app.config import config
 from app.services.diagnosis_memory_service import (
     diagnosis_memory_service as default_diagnosis_memory_service,
 )
+from app.services.experience_memory_index_service import experience_memory_index_service
 
 
 class ExperienceMemoryService:
@@ -234,7 +235,10 @@ class ExperienceMemoryService:
                 """,
                 (1 if enabled else 0, _utc_now(), experience_id),
             )
-        return cursor.rowcount > 0
+        changed = cursor.rowcount > 0
+        if changed and not enabled and self.index_service is not None:
+            self.index_service.disable_memory(experience_id)
+        return changed
 
     def increment_hit_count(self, experience_id: str) -> None:
         with self._connection() as connection:
@@ -246,6 +250,44 @@ class ExperienceMemoryService:
                 """,
                 (_utc_now(), experience_id),
             )
+
+    def search_relevant_experiences(
+        self,
+        *,
+        query: str,
+        project_id: str,
+        top_k: int,
+    ) -> list[dict[str, Any]]:
+        if self.index_service is None:
+            return []
+
+        candidates = self.index_service.find_similar(
+            query=query,
+            project_id=project_id,
+            top_k=top_k,
+        )
+        memories = []
+        for candidate in candidates:
+            similarity = float(candidate.get("similarity") or 0)
+            if similarity < config.experience_memory_similarity_threshold:
+                continue
+
+            memory = self.get_memory(str(candidate.get("experience_id") or ""))
+            if memory is None or not memory["enabled"]:
+                continue
+            if memory["confidence"] < config.experience_memory_high_confidence_threshold:
+                continue
+
+            memory["similarity"] = similarity
+            self.increment_hit_count(memory["experience_id"])
+            memories.append(memory)
+        return memories
+
+    def rebuild_index(self, *, project_id: str | None = None) -> int:
+        if self.index_service is None:
+            return 0
+        memories = self.list_memories(project_id=project_id, enabled=True, limit=10000)
+        return int(self.index_service.rebuild(memories))
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -372,4 +414,4 @@ def _json_loads(value: str, default: Any) -> Any:
         return default
 
 
-experience_memory_service = ExperienceMemoryService()
+experience_memory_service = ExperienceMemoryService(index_service=experience_memory_index_service)

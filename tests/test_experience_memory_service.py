@@ -108,6 +108,27 @@ class _NoopIndex:
         return memory["experience_id"]
 
 
+class _SearchIndex:
+    def __init__(self):
+        self.search_calls = []
+        self.disabled = []
+        self.rebuilt = []
+
+    def find_similar(self, *, query, project_id, top_k):
+        self.search_calls.append({"query": query, "project_id": project_id, "top_k": top_k})
+        return []
+
+    def upsert_memory(self, memory):
+        return memory["experience_id"]
+
+    def disable_memory(self, experience_id):
+        self.disabled.append(experience_id)
+
+    def rebuild(self, memories):
+        self.rebuilt.append(list(memories))
+        return len(self.rebuilt[-1])
+
+
 def test_create_or_merge_from_feedback_builds_rule_based_card(tmp_path):
     diagnosis = DiagnosisMemoryService(tmp_path / "diagnosis.sqlite3")
     case_id = diagnosis.create_case(
@@ -209,6 +230,72 @@ def test_create_or_merge_from_feedback_uses_latest_accepted_feedback(tmp_path):
     memory = service.get_memory(experience_id)
     assert memory["root_cause"] == "Latest root cause"
     assert memory["resolution"] == "Latest resolution"
+
+
+def test_search_relevant_experiences_uses_project_filter_and_increments_hits(tmp_path):
+    index = _SearchIndex()
+    service = ExperienceMemoryService(db_path=tmp_path / "experience.sqlite3", index_service=index)
+    memory_id = service.create_memory(
+        project_id="super_biz_agent",
+        environment="local",
+        service_name="milvus",
+        symptoms="Milvus timeout",
+        root_cause="connection pool exhausted",
+        resolution="reuse client",
+        evidence_summary="evidence cls-1",
+        source_case_id="case-1",
+        source_feedback_id="feedback-1",
+        confidence=0.8,
+    )
+    index.find_similar = lambda *, query, project_id, top_k: [
+        {"experience_id": memory_id, "similarity": 0.9}
+    ]
+
+    results = service.search_relevant_experiences(
+        query="API slow with Milvus timeout",
+        project_id="super_biz_agent",
+        top_k=3,
+    )
+
+    assert results[0]["experience_id"] == memory_id
+    assert results[0]["similarity"] == 0.9
+    assert service.get_memory(memory_id)["hit_count"] == 1
+
+
+def test_disable_syncs_index_and_rebuild_indexes_enabled_memories(tmp_path):
+    index = _SearchIndex()
+    service = ExperienceMemoryService(db_path=tmp_path / "experience.sqlite3", index_service=index)
+    enabled_id = service.create_memory(
+        project_id="super_biz_agent",
+        environment="local",
+        service_name="milvus",
+        symptoms="Milvus timeout",
+        root_cause="connection pool exhausted",
+        resolution="reuse client",
+        evidence_summary="evidence cls-1",
+        source_case_id="case-1",
+        source_feedback_id="feedback-1",
+        confidence=0.8,
+    )
+    disabled_id = service.create_memory(
+        project_id="super_biz_agent",
+        environment="local",
+        service_name="api",
+        symptoms="API disk full",
+        root_cause="disk saturation",
+        resolution="expand disk",
+        evidence_summary="evidence metric-1",
+        source_case_id="case-2",
+        source_feedback_id="feedback-2",
+        confidence=0.8,
+    )
+
+    assert service.set_enabled(disabled_id, enabled=False) is True
+    rebuilt_count = service.rebuild_index(project_id="super_biz_agent")
+
+    assert index.disabled == [disabled_id]
+    assert rebuilt_count == 1
+    assert index.rebuilt[0][0]["experience_id"] == enabled_id
 
 
 def test_experience_memory_service_lists_filters_and_disables(tmp_path):
