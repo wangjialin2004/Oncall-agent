@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from app.api import aiops, assistant, chat, file, health
+from app.api import aiops, assistant, chat, file, health, memory
 from app.config import config
 from app.core.milvus_client import milvus_manager
 
@@ -65,6 +65,7 @@ app.include_router(assistant.router, prefix="/api", tags=["统一助手"])
 app.include_router(chat.router, prefix="/api", tags=["对话"])
 app.include_router(file.router, prefix="/api", tags=["文件管理"])
 app.include_router(aiops.router, prefix="/api", tags=["AIOps智能运维"])
+app.include_router(memory.router, prefix="/api", tags=["长期经验记忆"])
 
 # 挂载静态文件
 static_dir = "static"
