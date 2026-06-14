@@ -244,6 +244,23 @@ def test_diagnosis_memory_service_persists_feedback(tmp_path):
     ]
 
 
+def test_diagnosis_memory_service_record_feedback_returns_feedback_id(tmp_path):
+    db_path = tmp_path / "diagnosis-memory.sqlite3"
+    service = DiagnosisMemoryService(db_path)
+    service.create_case(session_id="session-1", user_input="diagnose", case_id="case-1")
+
+    feedback_id = service.record_feedback(
+        case_id="case-1",
+        session_id="session-1",
+        user_accepted=True,
+        actual_root_cause="Milvus connection exhausted",
+        final_resolution="Restarted Milvus",
+    )
+
+    assert isinstance(feedback_id, str)
+    assert feedback_id.startswith("feedback-")
+
+
 def test_diagnosis_memory_service_rejects_feedback_for_missing_case(tmp_path):
     db_path = tmp_path / "diagnosis-memory.sqlite3"
     service = DiagnosisMemoryService(db_path)

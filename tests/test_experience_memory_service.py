@@ -2,6 +2,7 @@ import sqlite3
 from pathlib import Path
 
 from app.config import config
+from app.services.diagnosis_memory_service import DiagnosisMemoryService
 from app.services.experience_memory_service import ExperienceMemoryService
 
 
@@ -93,6 +94,121 @@ def test_experience_memory_service_creates_and_reads_memory(tmp_path):
     assert memory["source_feedback_ids"] == ["feedback-1"]
     assert memory["hit_count"] == 0
     assert memory["success_count"] == 0
+
+
+class _NoopIndex:
+    def __init__(self):
+        self.upserts = []
+
+    def find_similar(self, *, query, project_id, top_k):
+        return []
+
+    def upsert_memory(self, memory):
+        self.upserts.append(memory)
+        return memory["experience_id"]
+
+
+def test_create_or_merge_from_feedback_builds_rule_based_card(tmp_path):
+    diagnosis = DiagnosisMemoryService(tmp_path / "diagnosis.sqlite3")
+    case_id = diagnosis.create_case(
+        session_id="session-1",
+        user_input="diagnose Milvus timeout and slow API",
+        case_id="case-1",
+    )
+    diagnosis.record_tool_evidence(
+        case_id=case_id,
+        session_id="session-1",
+        evidence_records=[
+            {
+                "tool_name": "search_app_logs",
+                "tool_call_id": "call-1",
+                "evidence_id": "cls-1",
+                "source": "local_logs",
+                "success": True,
+                "duration_ms": 5,
+                "summary": "Milvus connection timeout repeated",
+                "arguments": {"keyword": "timeout"},
+                "raw_result": "timeout",
+            }
+        ],
+    )
+    diagnosis.complete_case(
+        case_id,
+        executed_steps=[("inspect logs", "timeout found")],
+        final_report="Root cause: Milvus connection exhausted. Resolution: restart Milvus.",
+    )
+    feedback_id = diagnosis.record_feedback(
+        case_id=case_id,
+        session_id="session-1",
+        user_accepted=True,
+        actual_root_cause="Milvus connection exhausted",
+        final_resolution="Restarted Milvus and reused client connections",
+    )
+    index = _NoopIndex()
+    service = ExperienceMemoryService(
+        db_path=tmp_path / "experience.sqlite3",
+        diagnosis_memory_service=diagnosis,
+        index_service=index,
+    )
+
+    experience_id = service.create_or_merge_from_feedback(
+        case_id=case_id,
+        feedback_id=feedback_id,
+        project_id="super_biz_agent",
+        environment="local",
+        service_name="milvus",
+    )
+
+    memory = service.get_memory(experience_id)
+    assert memory["symptoms"].startswith("diagnose Milvus timeout")
+    assert memory["root_cause"] == "Milvus connection exhausted"
+    assert memory["resolution"] == "Restarted Milvus and reused client connections"
+    assert "search_app_logs" in memory["evidence_summary"]
+    assert "cls-1" in memory["evidence_summary"]
+    assert index.upserts[0]["experience_id"] == experience_id
+
+
+def test_create_or_merge_from_feedback_uses_latest_accepted_feedback(tmp_path):
+    diagnosis = DiagnosisMemoryService(tmp_path / "diagnosis.sqlite3")
+    case_id = diagnosis.create_case(
+        session_id="session-1",
+        user_input="diagnose repeated timeout",
+        case_id="case-1",
+    )
+    diagnosis.complete_case(
+        case_id,
+        executed_steps=[("inspect logs", "timeout found")],
+        final_report="Root cause: earlier report. Resolution: earlier fix.",
+    )
+    diagnosis.record_feedback(
+        case_id=case_id,
+        session_id="session-1",
+        user_accepted=True,
+        actual_root_cause="Old root cause",
+        final_resolution="Old resolution",
+    )
+    latest_feedback_id = diagnosis.record_feedback(
+        case_id=case_id,
+        session_id="session-1",
+        user_accepted=True,
+        actual_root_cause="Latest root cause",
+        final_resolution="Latest resolution",
+    )
+    service = ExperienceMemoryService(
+        db_path=tmp_path / "experience.sqlite3",
+        diagnosis_memory_service=diagnosis,
+        index_service=_NoopIndex(),
+    )
+
+    experience_id = service.create_or_merge_from_feedback(
+        case_id=case_id,
+        feedback_id=latest_feedback_id,
+        project_id="super_biz_agent",
+    )
+
+    memory = service.get_memory(experience_id)
+    assert memory["root_cause"] == "Latest root cause"
+    assert memory["resolution"] == "Latest resolution"
 
 
 def test_experience_memory_service_lists_filters_and_disables(tmp_path):

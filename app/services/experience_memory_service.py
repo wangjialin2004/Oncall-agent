@@ -12,13 +12,24 @@ from pathlib import Path
 from typing import Any
 
 from app.config import config
+from app.services.diagnosis_memory_service import (
+    diagnosis_memory_service as default_diagnosis_memory_service,
+)
 
 
 class ExperienceMemoryService:
     """Persist reusable diagnosis experience memories in SQLite."""
 
-    def __init__(self, db_path: str | Path | None = None, index_service: Any | None = None):
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        diagnosis_memory_service: Any | None = None,
+        index_service: Any | None = None,
+    ):
         self.db_path = Path(db_path or config.experience_memory_db_path)
+        self.diagnosis_memory_service = (
+            diagnosis_memory_service or default_diagnosis_memory_service
+        )
         self.index_service = index_service
         self._initialized = False
 
@@ -72,6 +83,83 @@ class ExperienceMemoryService:
                     now,
                 ),
             )
+        return experience_id
+
+    def create_or_merge_from_feedback(
+        self,
+        case_id: str,
+        feedback_id: str,
+        project_id: str,
+        environment: str = "",
+        service_name: str = "",
+    ) -> str:
+        case = self.diagnosis_memory_service.get_case(case_id)
+        if case is None:
+            raise ValueError(f"Diagnosis case not found: {case_id}")
+
+        feedback_items = self.diagnosis_memory_service.list_feedback(case_id)
+        accepted_feedback = next(
+            (item for item in reversed(feedback_items) if item.get("user_accepted")),
+            feedback_items[-1] if feedback_items else {},
+        )
+        evidence_items = self.diagnosis_memory_service.list_tool_evidence(case_id)
+
+        evidence_summary = " | ".join(
+            _compact_text(
+                " ".join(
+                    [
+                        f"tool={item.get('tool_name') or 'unknown_tool'}",
+                        f"evidence_id={item.get('evidence_id') or ''}",
+                        item.get("summary") or "",
+                    ]
+                )
+            )
+            for item in evidence_items
+        )
+        final_report = case.get("final_report") or ""
+        evidence_text = " ".join(item.get("summary") or "" for item in evidence_items)
+        symptoms = _compact_text(
+            " ".join([case.get("user_input") or "", final_report, evidence_text])
+        )
+        root_cause = _compact_text(
+            accepted_feedback.get("actual_root_cause")
+            or _extract_after_label(
+                final_report,
+                ["Root cause:", "根因:", "根因分析:"],
+                ["Resolution:", "处理方案:", "处置方案:"],
+            )
+        )
+        resolution = _compact_text(
+            accepted_feedback.get("final_resolution")
+            or _extract_after_label(
+                final_report,
+                ["Resolution:", "处理方案:", "处置方案:"],
+                ["Root cause:", "根因:", "根因分析:"],
+            )
+        )
+
+        if self.index_service is not None:
+            self.index_service.find_similar(
+                query=symptoms,
+                project_id=project_id,
+                top_k=config.experience_memory_top_k,
+            )
+
+        experience_id = self.create_memory(
+            project_id=project_id,
+            environment=environment,
+            service_name=service_name,
+            symptoms=symptoms,
+            root_cause=root_cause,
+            resolution=resolution,
+            evidence_summary=evidence_summary,
+            source_case_id=case_id,
+            source_feedback_id=feedback_id,
+            confidence=config.experience_memory_initial_confidence,
+        )
+        memory = self.get_memory(experience_id)
+        if self.index_service is not None and memory is not None:
+            self.index_service.upsert_memory(memory)
         return experience_id
 
     def get_memory(self, experience_id: str) -> dict[str, Any] | None:
@@ -234,6 +322,39 @@ def _memory_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def _compact_text(*parts: Any) -> str:
+    return " ".join(" ".join(str(part) for part in parts if part).split())
+
+
+def _extract_after_label(
+    text: str,
+    labels: list[str],
+    stop_labels: list[str] | None = None,
+) -> str:
+    if not text:
+        return ""
+
+    lowered_text = text.lower()
+    start = -1
+    for label in labels:
+        label_index = lowered_text.find(label.lower())
+        if label_index >= 0:
+            start = label_index + len(label)
+            break
+    if start < 0:
+        return ""
+
+    end = len(text)
+    for stop_label in stop_labels or []:
+        stop_index = lowered_text.find(stop_label.lower(), start)
+        if stop_index >= 0:
+            end = min(end, stop_index)
+    newline_index = text.find("\n", start)
+    if newline_index >= 0:
+        end = min(end, newline_index)
+    return _compact_text(text[start:end].strip(" .:：;-"))
 
 
 def _utc_now() -> str:

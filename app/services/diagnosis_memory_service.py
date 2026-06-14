@@ -185,7 +185,8 @@ class DiagnosisMemoryService:
         actual_root_cause: str = "",
         final_resolution: str = "",
         comment: str = "",
-    ) -> None:
+    ) -> str:
+        feedback_id = f"feedback-{uuid.uuid4().hex}"
         with self._connection() as connection:
             if not self._case_exists(connection, case_id):
                 raise ValueError(f"Diagnosis case not found: {case_id}")
@@ -193,12 +194,13 @@ class DiagnosisMemoryService:
             connection.execute(
                 """
                 INSERT INTO diagnosis_feedback (
-                    case_id, session_id, user_accepted, actual_root_cause,
+                    feedback_id, case_id, session_id, user_accepted, actual_root_cause,
                     final_resolution, comment, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    feedback_id,
                     case_id,
                     session_id,
                     1 if user_accepted else 0,
@@ -208,6 +210,7 @@ class DiagnosisMemoryService:
                     _utc_now(),
                 ),
             )
+        return feedback_id
 
     def list_feedback(self, case_id: str) -> list[dict[str, Any]]:
         with self._connection() as connection:
@@ -313,6 +316,7 @@ class DiagnosisMemoryService:
                 """
                 CREATE TABLE IF NOT EXISTS diagnosis_feedback (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    feedback_id TEXT,
                     case_id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
                     user_accepted INTEGER NOT NULL,
@@ -324,6 +328,11 @@ class DiagnosisMemoryService:
                 )
                 """
             )
+            feedback_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(diagnosis_feedback)")
+            }
+            if "feedback_id" not in feedback_columns:
+                connection.execute("ALTER TABLE diagnosis_feedback ADD COLUMN feedback_id TEXT")
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_diagnosis_feedback_case_id
