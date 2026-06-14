@@ -209,6 +209,8 @@ def test_knowledge_tool_formats_vector_search_results(monkeypatch):
     context, docs = knowledge_module.retrieve_knowledge.func("high cpu")
 
     assert calls == [("high cpu", knowledge_module.config.rag_top_k)]
+    assert context.startswith("UNTRUSTED_KNOWLEDGE_CONTEXT")
+    assert "not instructions" in context
     assert "参考资料 1" in context
     assert "检索方式: dense" in context
     assert docs == [

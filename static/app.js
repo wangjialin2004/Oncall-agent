@@ -4,6 +4,7 @@ class AIOpsAssistantApp {
         this.apiBaseUrl = 'http://localhost:9900/api';
         this.currentMode = 'quick'; // 'quick' 或 'stream'
         this.sessionId = this.generateSessionId();
+        this.sessionOwnerToken = this.getSessionOwnerToken();
         this.isStreaming = false;
         this.currentChatHistory = []; // 当前对话的消息历史
         this.chatHistories = this.loadChatHistories(); // 所有历史对话
@@ -439,7 +440,10 @@ class AIOpsAssistantApp {
         
         try {
             // 从后端获取会话历史
-            const response = await fetch(`/api/chat/session/${historyId}`);
+            const response = await fetch(
+                `/api/chat/session/${historyId}`,
+                { headers: this.sessionHeaders() }
+            );
             if (response.ok) {
                 const data = await response.json();
                 const backendHistory = data.history || [];
@@ -508,9 +512,9 @@ class AIOpsAssistantApp {
             // 调用后端API清空会话
             const response = await fetch('/api/chat/clear', {
                 method: 'POST',
-                headers: {
+                headers: this.sessionHeaders({
                     'Content-Type': 'application/json',
-                },
+                }),
                 body: JSON.stringify({
                     session_id: historyId
                 })
@@ -625,6 +629,34 @@ class AIOpsAssistantApp {
         return 'session_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
     }
 
+    getSessionOwnerToken() {
+        const existing = localStorage.getItem('sessionOwnerToken');
+        if (existing) return existing;
+
+        const randomValues = new Uint32Array(4);
+        if (window.crypto && window.crypto.getRandomValues) {
+            window.crypto.getRandomValues(randomValues);
+        } else {
+            randomValues.set([
+                Math.floor(Math.random() * 0xffffffff),
+                Math.floor(Math.random() * 0xffffffff),
+                Math.floor(Math.random() * 0xffffffff),
+                Date.now(),
+            ]);
+        }
+
+        const token = Array.from(randomValues, value => value.toString(36)).join('');
+        localStorage.setItem('sessionOwnerToken', token);
+        return token;
+    }
+
+    sessionHeaders(headers = {}) {
+        return {
+            ...headers,
+            'X-Session-Owner': this.sessionOwnerToken,
+        };
+    }
+
     // 发送消息
     async sendMessage() {
         let message = '';
@@ -683,9 +715,9 @@ class AIOpsAssistantApp {
         try {
             const response = await fetch(`${this.apiBaseUrl}/chat`, {
                 method: 'POST',
-                headers: {
+                headers: this.sessionHeaders({
                     'Content-Type': 'application/json',
-                },
+                }),
                 body: JSON.stringify({
                     Id: this.sessionId,
                     Question: message
@@ -739,9 +771,9 @@ class AIOpsAssistantApp {
         try {
             const response = await fetch(`${this.apiBaseUrl}/chat_stream`, {
                 method: 'POST',
-                headers: {
+                headers: this.sessionHeaders({
                     'Content-Type': 'application/json',
-                },
+                }),
                 body: JSON.stringify({
                     Id: this.sessionId,
                     Question: message
@@ -1180,9 +1212,9 @@ class AIOpsAssistantApp {
         try {
             const response = await fetch(`${this.apiBaseUrl}/aiops`, {
                 method: 'POST',
-                headers: {
+                headers: this.sessionHeaders({
                     'Content-Type': 'application/json',
-                },
+                }),
                 body: JSON.stringify({
                     session_id: this.sessionId
                 })
