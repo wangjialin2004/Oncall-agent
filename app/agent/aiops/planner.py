@@ -13,6 +13,8 @@ from app.config import config
 from app.services.experience_memory_service import experience_memory_service
 from app.tools import DEFAULT_LOCAL_AGENT_TOOLS, retrieve_knowledge
 
+from .events import make_agent_event
+from .plan_utils import normalize_plan_steps
 from .state import PlanExecuteState
 from .utils import format_tools_description
 
@@ -193,15 +195,43 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
         for i, step in enumerate(plan_steps, 1):
             logger.info(f"  步骤{i}: {step}")
 
-        return {"plan": plan_steps}
+        structured_steps = normalize_plan_steps(plan_steps)
+        event = make_agent_event(
+            agent="planner",
+            stage="planning",
+            status="completed",
+            summary=f"Generated {len(structured_steps)} investigation steps.",
+            payload={"plan": structured_steps},
+        )
+        return {"plan": structured_steps, "events": list(state.get("events", [])) + [event]}
 
     except Exception as e:
         logger.error(f"生成计划失败: {e}", exc_info=True)
         # 返回一个默认计划
-        return {
-            "plan": [
-                "收集相关信息",
-                "分析数据",
-                "生成报告"
+        fallback_steps = normalize_plan_steps(
+            [
+                {
+                    "description": "Collect current metrics for the affected service or system.",
+                    "tool_category": "monitor",
+                    "expected_evidence": "CPU, memory, latency, error-rate, or disk anomaly summary.",
+                },
+                {
+                    "description": "Search recent application logs for errors related to the incident.",
+                    "tool_category": "logs",
+                    "expected_evidence": "Error messages, exception stack traces, or timeout records.",
+                },
+                {
+                    "description": "Retrieve relevant runbook knowledge for the detected incident type.",
+                    "tool_category": "knowledge",
+                    "expected_evidence": "Known causes and recommended handling steps.",
+                },
             ]
-        }
+        )
+        event = make_agent_event(
+            agent="planner",
+            stage="planning",
+            status="degraded",
+            summary="Generated fallback investigation plan.",
+            payload={"plan": fallback_steps, "error": str(e)},
+        )
+        return {"plan": fallback_steps, "events": list(state.get("events", [])) + [event]}
