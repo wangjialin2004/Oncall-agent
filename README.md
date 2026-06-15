@@ -176,6 +176,31 @@ curl -X POST "http://localhost:9900/api/aiops/feedback" \
 curl "http://localhost:9900/api/aiops/cases/case-xxx/feedback"
 ```
 
+### `/api/assistant` AIOps 响应结构
+
+当请求被路由到 AIOps（OnCall 多智能体诊断）时，响应在 `answer` 之外还会附带 `events`——一个规范化的诊断时间线（Triage / Planner / Evidence Collector / Diagnosis / Report 各阶段的 `agent_event`、`tool_event`、`decision_event`）。RAG 路由的响应不包含 `events` 字段。
+
+```json
+{
+  "success": true,
+  "route": "aiops",
+  "route_reason": "llm_semantic_aiops",
+  "case_id": "case-xxx",
+  "answer": "# OnCall Diagnosis Report...",
+  "events": [
+    {
+      "type": "agent_event",
+      "agent": "triage",
+      "stage": "triage",
+      "status": "completed",
+      "summary": "Structured incident",
+      "payload": {}
+    }
+  ],
+  "errorMessage": null
+}
+```
+
 ## 📁 项目结构
 
 ```

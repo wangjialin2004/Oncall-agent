@@ -57,6 +57,7 @@ async def test_aiops_service_execute_persists_case_lifecycle(tmp_path):
         "message": "任务执行完成",
         "case_id": case_id,
         "response": "# final report",
+        "events": [],
     }
     assert graph.input_state["session_id"] == "session-1"
     assert case["status"] == "completed"
