@@ -16,6 +16,8 @@ from app.services.diagnosis_memory_service import diagnosis_memory_service
 from app.tools import DEFAULT_LOCAL_AGENT_TOOLS
 
 from .evidence import append_evidence_summary, build_persistent_tool_evidence, build_tool_evidence
+from .events import make_tool_event
+from .plan_utils import plan_step_text, pop_next_plan_step
 from .state import PlanExecuteState
 
 
@@ -26,6 +28,109 @@ def format_executor_result(result: str, tool_messages: list | None = None) -> st
         return result
     evidence_items = build_tool_evidence(tool_messages)
     return append_evidence_summary(result, evidence_items)
+
+
+def _step_id(step: Any) -> str:
+    if isinstance(step, dict):
+        return str(step.get("step_id") or step.get("description") or "step")
+    return str(step)
+
+
+def build_success_step_update(
+    *,
+    state: dict[str, Any],
+    step: Any,
+    remaining_plan: list[Any],
+    result: str,
+    evidence_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    evidence_items = []
+    events = list(state.get("events", []))
+    for record in evidence_records:
+        evidence = {
+            "step_id": _step_id(step),
+            "tool_name": record.get("tool_name", ""),
+            "evidence_id": record.get("evidence_id", ""),
+            "status": "completed" if record.get("success", True) else "failed",
+            "summary": record.get("summary", ""),
+            "source": record.get("source", ""),
+        }
+        evidence_items.append(evidence)
+        events.append(
+            make_tool_event(
+                agent="evidence_collector",
+                tool=evidence["tool_name"],
+                status=evidence["status"],
+                evidence_id=evidence["evidence_id"],
+                summary=evidence["summary"],
+                payload=evidence,
+            )
+        )
+
+    if not evidence_items:
+        evidence_items.append(
+            {
+                "step_id": _step_id(step),
+                "tool_name": "",
+                "evidence_id": "",
+                "status": "completed",
+                "summary": result,
+                "source": "llm",
+            }
+        )
+
+    return {
+        "plan": remaining_plan,
+        "past_steps": [
+            {
+                "step_id": _step_id(step),
+                "description": plan_step_text(step),
+                "status": "completed",
+                "result": result,
+            }
+        ],
+        "evidence": evidence_items,
+        "events": events,
+    }
+
+
+def build_failed_step_update(
+    *,
+    state: dict[str, Any],
+    step: Any,
+    remaining_plan: list[Any],
+    error: Exception,
+) -> dict[str, Any]:
+    summary = f"Step execution failed: {error}"
+    evidence = {
+        "step_id": _step_id(step),
+        "tool_name": "",
+        "evidence_id": "",
+        "status": "failed",
+        "summary": summary,
+        "source": "executor",
+    }
+    event = make_tool_event(
+        agent="evidence_collector",
+        tool="",
+        status="failed",
+        evidence_id="",
+        summary=summary,
+        payload=evidence,
+    )
+    return {
+        "plan": remaining_plan,
+        "past_steps": [
+            {
+                "step_id": _step_id(step),
+                "description": plan_step_text(step),
+                "status": "failed",
+                "result": summary,
+            }
+        ],
+        "evidence": [evidence],
+        "events": list(state.get("events", [])) + [event],
+    }
 
 
 async def executor(state: PlanExecuteState) -> dict[str, Any]:
@@ -44,10 +149,14 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
         return {}
 
     # 取出第一个步骤
-    task = plan[0]
+    task, remaining_plan = pop_next_plan_step(plan)
+    if task is None:
+        logger.info("Plan is empty; executor skipped")
+        return {}
     logger.info(f"当前任务: {task}")
 
     try:
+        evidence_records: list[dict[str, Any]] = []
         # 获取本地工具
         local_tools = list(DEFAULT_LOCAL_AGENT_TOOLS)
 
@@ -123,15 +232,20 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
         logger.info(f"步骤执行完成，结果长度: {len(result)}")
 
-        # 返回更新：移除已执行的步骤，添加执行历史
-        return {
-            "plan": plan[1:],  # 移除第一个步骤
-            "past_steps": [(task, result)],  # 使用 operator.add 追加
-        }
+        # 返回更新：移除已执行的步骤，记录证据与时间线事件
+        return build_success_step_update(
+            state=state,
+            step=task,
+            remaining_plan=remaining_plan,
+            result=result,
+            evidence_records=evidence_records,
+        )
 
     except Exception as e:
         logger.error(f"执行步骤失败: {e}", exc_info=True)
-        return {
-            "plan": plan[1:],
-            "past_steps": [(task, f"执行失败: {str(e)}")],
-        }
+        return build_failed_step_update(
+            state=state,
+            step=task,
+            remaining_plan=remaining_plan,
+            error=e,
+        )
