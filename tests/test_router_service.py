@@ -1,7 +1,7 @@
 import pytest
 
 import app.services.router_service as router_module
-from app.services.router_service import RouterService
+from app.services.router_service import RouteDecision, RouterService
 
 
 def test_route_message_detects_aiops_intent():
@@ -41,6 +41,87 @@ def test_route_message_clarifies_punctuation_only_input():
 
 
 @pytest.mark.asyncio
+async def test_answer_uses_llm_semantic_route_for_aiops_without_keywords(monkeypatch):
+    service = RouterService(semantic_router=lambda message: RouteDecision("aiops", "llm_semantic_aiops"))
+
+    async def fake_execute(message, session_id):
+        yield {"type": "complete", "case_id": "case-1", "response": "# diagnosis"}
+
+    monkeypatch.setattr(router_module.aiops_service, "execute", fake_execute)
+
+    result = await service.answer("用户下单一直转圈，帮忙看下", session_id="s1")
+
+    assert result == {
+        "success": True,
+        "route": "aiops",
+        "route_reason": "llm_semantic_aiops",
+        "case_id": "case-1",
+        "answer": "# diagnosis",
+        "events": [],
+        "errorMessage": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_answer_uses_structured_llm_for_default_route(monkeypatch):
+    class FakeClassifier:
+        async def ainvoke(self, messages):
+            return RouteDecision("aiops", "用户描述了交易卡顿")
+
+    class FakeModel:
+        def with_structured_output(self, schema):
+            self.schema = schema
+            return FakeClassifier()
+
+    service = RouterService(semantic_model=FakeModel())
+
+    async def fake_execute(message, session_id):
+        yield {"type": "complete", "case_id": "case-2", "response": "# semantic diagnosis"}
+
+    monkeypatch.setattr(router_module.aiops_service, "execute", fake_execute)
+
+    result = await service.answer("用户下单一直转圈，帮忙看下", session_id="s1")
+
+    assert result["route"] == "aiops"
+    assert result["route_reason"] == "llm_semantic_aiops"
+    assert result["case_id"] == "case-2"
+    assert result["answer"] == "# semantic diagnosis"
+
+
+@pytest.mark.asyncio
+async def test_answer_falls_back_to_rag_when_semantic_route_fails(monkeypatch):
+    def failing_semantic_router(message):
+        raise RuntimeError("llm unavailable")
+
+    service = RouterService(semantic_router=failing_semantic_router)
+
+    async def fake_query(message, session_id):
+        return "rag fallback"
+
+    monkeypatch.setattr(router_module.rag_agent_service, "query", fake_query)
+
+    result = await service.answer("用户下单一直转圈，帮忙看下", session_id="s1")
+
+    assert result == {
+        "success": True,
+        "route": "rag",
+        "route_reason": "semantic_route_failed_default_rag",
+        "answer": "rag fallback",
+        "errorMessage": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_answer_includes_route_reason_for_clarification():
+    service = RouterService()
+
+    result = await service.answer("   ", session_id="s1")
+
+    assert result["route"] == "clarify"
+    assert result["route_reason"] == "empty_message"
+
+
+@pytest.mark.asyncio
 async def test_answer_dispatches_to_rag(monkeypatch):
     service = RouterService()
 
@@ -54,6 +135,7 @@ async def test_answer_dispatches_to_rag(monkeypatch):
     assert result == {
         "success": True,
         "route": "rag",
+        "route_reason": "matched_rag_keyword",
         "answer": "rag:s1:怎么处理慢响应",
         "errorMessage": None,
     }
@@ -65,7 +147,16 @@ async def test_answer_collects_aiops_final_response(monkeypatch):
 
     async def fake_execute(message, session_id):
         yield {"type": "status", "message": "running"}
-        yield {"type": "complete", "case_id": "case-1", "response": "# report"}
+        yield {"type": "agent_event", "agent": "triage", "summary": "started"}
+        yield {
+            "type": "complete",
+            "case_id": "case-1",
+            "response": "# report",
+            "events": [
+                {"type": "agent_event", "agent": "triage", "summary": "started"},
+                {"type": "decision_event", "decision": "report", "summary": "done"},
+            ],
+        }
 
     monkeypatch.setattr(router_module.aiops_service, "execute", fake_execute)
 
@@ -74,8 +165,13 @@ async def test_answer_collects_aiops_final_response(monkeypatch):
     assert result == {
         "success": True,
         "route": "aiops",
+        "route_reason": "matched_aiops_keyword",
         "case_id": "case-1",
         "answer": "# report",
+        "events": [
+            {"type": "agent_event", "agent": "triage", "summary": "started"},
+            {"type": "decision_event", "decision": "report", "summary": "done"},
+        ],
         "errorMessage": None,
     }
 
@@ -86,6 +182,7 @@ async def test_answer_reports_aiops_error_event(monkeypatch):
 
     async def fake_execute(message, session_id):
         yield {"type": "status", "message": "running"}
+        yield {"type": "tool_event", "tool": "logs", "summary": "queried"}
         yield {"type": "error", "message": "diagnosis failed"}
 
     monkeypatch.setattr(router_module.aiops_service, "execute", fake_execute)
@@ -95,7 +192,9 @@ async def test_answer_reports_aiops_error_event(monkeypatch):
     assert result == {
         "success": False,
         "route": "aiops",
+        "route_reason": "matched_aiops_keyword",
         "case_id": "",
         "answer": None,
+        "events": [{"type": "tool_event", "tool": "logs", "summary": "queried"}],
         "errorMessage": "diagnosis failed",
     }
