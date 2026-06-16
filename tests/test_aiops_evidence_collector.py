@@ -46,5 +46,6 @@ def test_build_failed_step_update_records_failure_event():
 
     assert update["past_steps"][0]["status"] == "failed"
     assert update["evidence"][0]["status"] == "failed"
+    assert update["evidence"][0]["summary"].startswith("步骤执行失败：")
     assert "tool unavailable" in update["evidence"][0]["summary"]
     assert update["events"][-1]["status"] == "failed"

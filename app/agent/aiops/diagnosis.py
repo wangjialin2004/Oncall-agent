@@ -52,9 +52,10 @@ async def generate_diagnosis(state: dict[str, Any]) -> dict[str, Any]:
         [
             SystemMessage(
                 content=(
-                    "You are an OnCall diagnosis agent. Decide whether evidence is sufficient. "
-                    "Return evidence_insufficient when important evidence is missing. "
-                    "Return root_cause_ready only when evidence supports the conclusion."
+                    "你是 OnCall 诊断智能体。判断当前证据是否充分。"
+                    "缺少关键证据时返回 evidence_insufficient。"
+                    "只有证据支持结论时才返回 root_cause_ready。"
+                    "root_cause_candidates、missing_evidence 和 next_focus 必须使用中文。"
                 )
             ),
             HumanMessage(content=f"Incident: {state.get('incident', {})}"),
@@ -75,16 +76,16 @@ async def diagnosis(state: dict[str, Any]) -> dict[str, Any]:
         result = {
             "status": "evidence_insufficient",
             "root_cause_candidates": [],
-            "missing_evidence": ["Diagnosis model was unavailable."],
-            "next_focus": "collect metrics, logs, and relevant runbook evidence",
+            "missing_evidence": ["诊断模型不可用。"],
+            "next_focus": "收集指标、日志和相关预案证据",
             "confidence": 0.0,
         }
 
     next_iteration = int(state.get("iteration", 0)) + 1
     summary = (
-        "Root cause is ready."
+        "根因判断已就绪。"
         if result.get("status") == "root_cause_ready"
-        else result.get("next_focus") or "More evidence is needed."
+        else result.get("next_focus") or "仍需补充更多证据。"
     )
     event = make_decision_event(
         agent="diagnosis",

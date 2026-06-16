@@ -101,7 +101,7 @@ def build_failed_step_update(
     remaining_plan: list[Any],
     error: Exception,
 ) -> dict[str, Any]:
-    summary = f"Step execution failed: {error}"
+    summary = f"步骤执行失败：{error}"
     evidence = {
         "step_id": _step_id(step),
         "tool_name": "",

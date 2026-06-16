@@ -59,4 +59,6 @@ async def test_diagnosis_node_falls_back_to_insufficient_evidence(monkeypatch):
     update = await diagnosis_node({"events": [], "iteration": 0, "max_iterations": 2})
 
     assert update["diagnosis"]["status"] == "evidence_insufficient"
+    assert update["diagnosis"]["missing_evidence"] == ["诊断模型不可用。"]
+    assert update["events"][-1]["summary"] == "收集指标、日志和相关预案证据"
     assert update["events"][-1]["status"] == "evidence_insufficient"
