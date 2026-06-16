@@ -8,8 +8,12 @@ export type StreamAgentArgs = {
   onEvent: (event: AgentStreamEvent) => void;
 };
 
+function normalizeSseNewlines(chunk: string): string {
+  return chunk.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
 export function parseSseChunk(chunk: string): AgentStreamEvent[] {
-  return chunk
+  return normalizeSseNewlines(chunk)
     .split("\n\n")
     .map((frame) => frame.trim())
     .filter(Boolean)
@@ -53,6 +57,7 @@ export async function streamAgent(args: StreamAgentArgs): Promise<void> {
     }
 
     buffer += decoder.decode(value, { stream: true });
+    buffer = normalizeSseNewlines(buffer);
     const frames = buffer.split("\n\n");
     buffer = frames.pop() ?? "";
     for (const event of parseSseChunk(frames.join("\n\n"))) {

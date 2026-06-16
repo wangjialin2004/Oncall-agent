@@ -127,6 +127,35 @@ python -c "import requests, os, time; [requests.post('http://localhost:9900/api/
 - **Web 界面**: http://localhost:9900
 - **API 文档**: http://localhost:9900/docs
 
+### New Agent Gateway UI
+
+Backend:
+
+```powershell
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+```
+
+Frontend:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. The frontend calls `POST /api/agent/stream` through the Vite
+dev proxy and displays realtime agent events in the right-side process panel.
+
+If port `8000` is already occupied, run the backend on another port and point the frontend proxy
+at it:
+
+```powershell
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8001
+cd frontend
+$env:AGENT_GATEWAY_API_TARGET="http://localhost:8001"
+npm run dev
+```
+
 ## 📡 API 接口
 
 ### 核心接口
