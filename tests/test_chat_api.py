@@ -1,5 +1,7 @@
 import pytest
 
+SESSION_HEADERS = {"X-Session-Owner": "owner-a"}
+
 
 @pytest.mark.asyncio
 async def test_chat_endpoint_reports_service_exception_as_http_error(
@@ -13,6 +15,7 @@ async def test_chat_endpoint_reports_service_exception_as_http_error(
 
     response = await api_client.post(
         "/api/chat",
+        headers=SESSION_HEADERS,
         json={"Id": "s1", "Question": "diagnose slow response"},
     )
 
@@ -40,15 +43,50 @@ async def test_clear_session_reports_service_exception_as_api_response(
 
     response = await api_client.post(
         "/api/chat/clear",
+        headers=SESSION_HEADERS,
         json={"sessionId": "s1"},
     )
 
     assert response.status_code == 500
     assert response.json() == {
         "status": "error",
-        "message": "cannot clear s1",
+        "message": "cannot clear owner:95256875:s1",
         "data": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_get_session_info_requires_session_owner(api_client):
+    response = await api_client.get("/api/chat/session/s1")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "X-Session-Owner header is required"
+
+
+@pytest.mark.asyncio
+async def test_get_session_info_scopes_same_session_id_by_owner(monkeypatch, api_client):
+    seen_session_ids = []
+
+    def fake_get_session_history(session_id):
+        seen_session_ids.append(session_id)
+        return []
+
+    monkeypatch.setattr(
+        "app.api.chat.rag_agent_service.get_session_history",
+        fake_get_session_history,
+    )
+
+    for owner in ("owner-a", "owner-b"):
+        response = await api_client.get(
+            "/api/chat/session/s1",
+            headers={"X-Session-Owner": owner},
+        )
+        assert response.status_code == 200
+
+    assert len(seen_session_ids) == 2
+    assert seen_session_ids[0].endswith(":s1")
+    assert seen_session_ids[1].endswith(":s1")
+    assert seen_session_ids[0] != seen_session_ids[1]
 
 
 @pytest.mark.asyncio
@@ -64,11 +102,11 @@ async def test_get_session_info_reports_service_exception_as_api_response(
         fake_get_session_history,
     )
 
-    response = await api_client.get("/api/chat/session/s1")
+    response = await api_client.get("/api/chat/session/s1", headers=SESSION_HEADERS)
 
     assert response.status_code == 500
     assert response.json() == {
         "status": "error",
-        "message": "cannot load s1",
+        "message": "cannot load owner:95256875:s1",
         "data": None,
     }

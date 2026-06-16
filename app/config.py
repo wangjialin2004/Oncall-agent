@@ -66,6 +66,7 @@ class Settings(BaseSettings):
 
     # Diagnosis memory
     diagnosis_memory_db_path: str = "data/diagnosis_memory.sqlite3"
+    checkpoint_db_path: str = "volumes/checkpoints.db"
 
     # Long-term experience memory
     project_id: str = "super_biz_agent"

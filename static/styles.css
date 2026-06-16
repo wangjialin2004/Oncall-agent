@@ -992,6 +992,115 @@ body {
     border: 1px solid rgba(26, 115, 232, 0.2);
 }
 
+.oncall-result-message .message-content-wrapper {
+    width: min(860px, 100%);
+}
+
+.oncall-section-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #263238;
+    margin: 0 0 10px;
+}
+
+.oncall-timeline {
+    border: 1px solid #dde5ec;
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 12px;
+    background: #f8fafc;
+}
+
+.oncall-timeline-item {
+    display: grid;
+    grid-template-columns: 28px 1fr;
+    gap: 10px;
+    padding: 8px 0;
+}
+
+.oncall-timeline-item + .oncall-timeline-item {
+    border-top: 1px solid #e6edf3;
+}
+
+.oncall-timeline-marker {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: #2563eb;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.oncall-timeline-meta {
+    font-size: 12px;
+    color: #607080;
+    margin-bottom: 2px;
+}
+
+.oncall-timeline-summary {
+    font-size: 14px;
+    color: #1f2933;
+    line-height: 1.5;
+}
+
+.oncall-empty {
+    font-size: 13px;
+    color: #718096;
+}
+
+.oncall-feedback {
+    border: 1px solid #dde5ec;
+    border-radius: 8px;
+    padding: 12px;
+    margin-top: 12px;
+    background: #ffffff;
+}
+
+.oncall-feedback-row {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    font-size: 13px;
+    margin-bottom: 10px;
+}
+
+.oncall-feedback-input {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid #cfd8e3;
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    font: inherit;
+    resize: vertical;
+}
+
+.oncall-feedback-submit {
+    border: 0;
+    border-radius: 6px;
+    background: #2563eb;
+    color: #fff;
+    padding: 8px 14px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.oncall-feedback-submit:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.oncall-feedback-status {
+    display: inline-block;
+    margin-left: 10px;
+    font-size: 13px;
+    color: #52616f;
+}
+
 /* 详情折叠区域 */
 .aiops-details {
     margin-bottom: 16px;

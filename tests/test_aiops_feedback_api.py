@@ -2,6 +2,8 @@ import pytest
 
 from app.api import aiops as aiops_api
 
+SESSION_HEADERS = {"X-Session-Owner": "owner-a"}
+
 
 class _FakeDiagnosisMemoryService:
     def __init__(self):
@@ -72,6 +74,7 @@ class _FakeExperienceMemoryService:
         )
         return "exp-1"
 
+
 @pytest.mark.asyncio
 async def test_record_diagnosis_feedback_endpoint(monkeypatch, api_client):
     fake_memory = _FakeDiagnosisMemoryService()
@@ -79,6 +82,7 @@ async def test_record_diagnosis_feedback_endpoint(monkeypatch, api_client):
 
     response = await api_client.post(
         "/api/aiops/feedback",
+        headers=SESSION_HEADERS,
         json={
             "case_id": "case-1",
             "session_id": "session-1",
@@ -102,7 +106,12 @@ async def test_record_diagnosis_feedback_endpoint(monkeypatch, api_client):
             "comment": "Diagnosis was accurate",
         },
     }
-    assert fake_memory.feedback == [response.json()["data"]]
+    assert fake_memory.feedback == [
+        {
+            **response.json()["data"],
+            "session_id": "owner:95256875:session-1",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -116,6 +125,7 @@ async def test_record_diagnosis_feedback_creates_experience_for_accepted_feedbac
 
     response = await api_client.post(
         "/api/aiops/feedback",
+        headers=SESSION_HEADERS,
         json={
             "case_id": "case-1",
             "session_id": "session-1",
@@ -148,6 +158,7 @@ async def test_record_diagnosis_feedback_skips_experience_for_rejected_feedback(
 
     response = await api_client.post(
         "/api/aiops/feedback",
+        headers=SESSION_HEADERS,
         json={"case_id": "case-1", "session_id": "session-1", "user_accepted": False},
     )
 
@@ -167,11 +178,31 @@ async def test_record_diagnosis_feedback_ignores_experience_memory_errors(
 
     response = await api_client.post(
         "/api/aiops/feedback",
+        headers=SESSION_HEADERS,
         json={"case_id": "case-1", "session_id": "session-1", "user_accepted": True},
     )
 
     assert response.status_code == 200
     assert fake_memory.feedback[0]["case_id"] == "case-1"
+
+
+@pytest.mark.asyncio
+async def test_record_diagnosis_feedback_endpoint_requires_session_owner(monkeypatch, api_client):
+    fake_memory = _FakeDiagnosisMemoryService()
+    monkeypatch.setattr(aiops_api, "diagnosis_memory_service", fake_memory, raising=False)
+
+    response = await api_client.post(
+        "/api/aiops/feedback",
+        json={
+            "case_id": "case-1",
+            "session_id": "session-1",
+            "user_accepted": True,
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "X-Session-Owner header is required"
+    assert fake_memory.feedback == []
 
 
 @pytest.mark.asyncio
@@ -182,6 +213,7 @@ async def test_record_diagnosis_feedback_endpoint_reports_missing_case(monkeypat
 
     response = await api_client.post(
         "/api/aiops/feedback",
+        headers=SESSION_HEADERS,
         json={
             "case_id": "missing-case",
             "session_id": "session-1",
@@ -207,6 +239,7 @@ async def test_record_diagnosis_feedback_endpoint_reports_unexpected_error(
 
     response = await api_client.post(
         "/api/aiops/feedback",
+        headers=SESSION_HEADERS,
         json={
             "case_id": "case-1",
             "session_id": "session-1",

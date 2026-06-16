@@ -97,6 +97,25 @@ def test_static_quick_chat_uses_assistant_error_envelope_on_http_error():
     assert "throw new Error(errorMessage)" in quick_chat
 
 
+def test_static_frontend_sends_session_owner_header_for_session_requests():
+    app_js = Path("static/app.js").read_text(encoding="utf-8")
+
+    assert "this.sessionOwnerToken = this.getSessionOwnerToken();" in app_js
+    assert "localStorage.getItem('sessionOwnerToken')" in app_js
+    assert "'X-Session-Owner': this.sessionOwnerToken" in app_js
+
+    for marker in [
+        "fetch(`${this.apiBaseUrl}/assistant`",
+        "fetch(`${this.apiBaseUrl}/chat_stream`",
+        "fetch(`/api/chat/session/${historyId}`",
+        "fetch('/api/chat/clear'",
+        "fetch(`${this.apiBaseUrl}/aiops`",
+    ]:
+        start = app_js.index(marker)
+        snippet = app_js[start : start + 500]
+        assert "this.sessionHeaders" in snippet
+
+
 def test_static_backend_history_maps_assistant_role_to_assistant_message_type():
     app_js = Path("static/app.js").read_text(encoding="utf-8")
 

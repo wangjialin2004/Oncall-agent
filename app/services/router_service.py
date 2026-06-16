@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import inspect
 from collections.abc import Awaitable, Callable
@@ -19,6 +20,7 @@ from app.services.rag_agent_service import rag_agent_service
 
 
 TIMELINE_EVENT_TYPES = {"agent_event", "tool_event", "decision_event"}
+DEFAULT_AIOPS_TIMEOUT_SECONDS = 20.0
 
 
 @dataclass(slots=True)
@@ -67,9 +69,11 @@ class RouterService:
         self,
         semantic_router: SemanticRouter | None = None,
         semantic_model: ChatQwen | None = None,
+        aiops_timeout_seconds: float = DEFAULT_AIOPS_TIMEOUT_SECONDS,
     ):
         self.semantic_router = semantic_router
         self.semantic_model = semantic_model
+        self.aiops_timeout_seconds = aiops_timeout_seconds
 
     @staticmethod
     def _normalize_timeline_event(event: object) -> dict[str, object] | None:
@@ -137,6 +141,43 @@ class RouterService:
             logger.warning(f"LLM 语义路由失败，回退到 RAG: {exc}")
             return RouteDecision(route="rag", reason="semantic_route_failed_default_rag")
 
+    async def _iter_aiops_events(self, message: str, session_id: str):
+        generator = aiops_service.execute(message, session_id=session_id)
+        try:
+            async with asyncio.timeout(self.aiops_timeout_seconds):
+                async for event in generator:
+                    yield event
+        finally:
+            aclose = getattr(generator, "aclose", None)
+            if aclose:
+                await aclose()
+
+    def _create_timeout_case(self, message: str, session_id: str, report: str) -> str:
+        fallback_case_id = f"case-timeout-{abs(hash((session_id, message))) % 10_000_000}"
+        memory_service = getattr(aiops_service, "memory_service", None)
+        create_case = getattr(memory_service, "create_case", None)
+        complete_case = getattr(memory_service, "complete_case", None)
+        if not create_case:
+            return fallback_case_id
+
+        try:
+            case_id = create_case(session_id=session_id, user_input=message)
+            if complete_case:
+                complete_case(case_id, executed_steps=[], final_report=report)
+            return str(case_id)
+        except Exception as exc:
+            logger.warning(f"AIOps 超时降级 case 持久化失败: {exc}")
+            return fallback_case_id
+
+    def _build_timeout_report(self, message: str) -> str:
+        return (
+            "# OnCall 降级诊断报告\n\n"
+            f"- AIOps 智能体执行超过 {self.aiops_timeout_seconds:g} 秒，已先返回可追踪的降级结果。\n"
+            "- 当前前后端链路已连通，诊断时间线与反馈入口可继续使用。\n"
+            "- 建议检查 DashScope、MCP、监控/日志数据源状态后重试完整诊断。\n\n"
+            f"原始请求：{message}"
+        )
+
     async def answer(self, message: str, session_id: str) -> dict[str, object]:
         decision = await self._resolve_route(message)
         if decision.route == "clarify":
@@ -152,7 +193,7 @@ class RouterService:
             final_answer = ""
             case_id = ""
             events: list[dict[str, object]] = []
-            seen_event_keys: set[tuple[tuple[str, object], ...]] = set()
+            seen_event_keys: set[str] = set()
 
             def append_event(candidate: object) -> None:
                 normalized_event = self._normalize_timeline_event(candidate)
@@ -164,25 +205,47 @@ class RouterService:
                 seen_event_keys.add(event_key)
                 events.append(normalized_event)
 
-            async for event in aiops_service.execute(message, session_id=session_id):
-                event_type = event.get("type")
-                if event_type in TIMELINE_EVENT_TYPES:
-                    append_event(event)
-                elif event_type == "complete":
-                    case_id = str(event.get("case_id") or "")
-                    final_answer = str(event.get("response") or event.get("message") or "")
-                    for final_event in event.get("events") or []:
-                        append_event(final_event)
-                elif event_type == "error":
-                    return {
-                        "success": False,
-                        "route": "aiops",
-                        "route_reason": decision.reason,
-                        "case_id": str(event.get("case_id") or ""),
-                        "answer": None,
-                        "events": events,
-                        "errorMessage": str(event.get("message") or event.get("response") or ""),
-                    }
+            try:
+                async for event in self._iter_aiops_events(message, session_id=session_id):
+                    event_type = event.get("type")
+                    if event_type in TIMELINE_EVENT_TYPES:
+                        append_event(event)
+                    elif event_type == "complete":
+                        case_id = str(event.get("case_id") or "")
+                        final_answer = str(event.get("response") or event.get("message") or "")
+                        for final_event in event.get("events") or []:
+                            append_event(final_event)
+                    elif event_type == "error":
+                        return {
+                            "success": False,
+                            "route": "aiops",
+                            "route_reason": decision.reason,
+                            "case_id": str(event.get("case_id") or ""),
+                            "answer": None,
+                            "events": events,
+                            "errorMessage": str(event.get("message") or event.get("response") or ""),
+                        }
+            except TimeoutError:
+                timeout_event = {
+                    "type": "agent_event",
+                    "agent": "router",
+                    "stage": "timeout_fallback",
+                    "status": "degraded",
+                    "summary": "AIOps 智能体执行超时，已返回降级诊断报告。",
+                    "payload": {"timeout_seconds": self.aiops_timeout_seconds},
+                }
+                append_event(timeout_event)
+                final_answer = self._build_timeout_report(message)
+                case_id = case_id or self._create_timeout_case(message, session_id, final_answer)
+                return {
+                    "success": True,
+                    "route": "aiops",
+                    "route_reason": decision.reason,
+                    "case_id": case_id,
+                    "answer": final_answer,
+                    "events": events,
+                    "errorMessage": None,
+                }
             return {
                 "success": True,
                 "route": "aiops",

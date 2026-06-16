@@ -5,7 +5,7 @@
 
 import json
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from loguru import logger
 from sse_starlette.sse import EventSourceResponse
@@ -14,12 +14,16 @@ from app.agent.mcp_client import format_exception_chain
 from app.models.request import ChatRequest, ClearRequest
 from app.models.response import ApiResponse, SessionInfoResponse
 from app.services.rag_agent_service import rag_agent_service
+from app.services.session_scope_service import require_session_owner, scope_session_id
 
 router = APIRouter()
 
 
 @router.post("/chat")
-async def chat(request: ChatRequest):
+async def chat(
+    request: ChatRequest,
+    owner_key: str = Depends(require_session_owner),
+):
     """快速对话接口
     {
         "code": 200,
@@ -38,10 +42,11 @@ async def chat(request: ChatRequest):
         统一格式的对话响应
     """
     try:
+        scoped_session_id = scope_session_id(request.id, owner_key)
         logger.info(f"[会话 {request.id}] 收到快速对话请求: {request.question}")
         answer = await rag_agent_service.query(
             request.question,
-            session_id=request.id
+            session_id=scoped_session_id
         )
 
         logger.info(f"[会话 {request.id}] 快速对话完成")
@@ -73,7 +78,10 @@ async def chat(request: ChatRequest):
 
 
 @router.post("/chat_stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(
+    request: ChatRequest,
+    owner_key: str = Depends(require_session_owner),
+):
     """流式对话接口（基于 RAG Agent，SSE）
 
     返回 SSE 格式，data 字段为 JSON：
@@ -96,11 +104,12 @@ async def chat_stream(request: ChatRequest):
     Returns:
         SSE 事件流
     """
+    scoped_session_id = scope_session_id(request.id, owner_key)
     logger.info(f"[会话 {request.id}] 收到流式对话请求: {request.question}")
 
     async def event_generator():
         try:
-            async for chunk in rag_agent_service.query_stream(request.question, session_id=request.id):
+            async for chunk in rag_agent_service.query_stream(request.question, session_id=scoped_session_id):
                 chunk_type = chunk.get("type", "unknown")
                 chunk_data = chunk.get("data", None)
 
@@ -177,7 +186,10 @@ async def chat_stream(request: ChatRequest):
 
 
 @router.post("/chat/clear", response_model=ApiResponse)
-async def clear_session(request: ClearRequest):
+async def clear_session(
+    request: ClearRequest,
+    owner_key: str = Depends(require_session_owner),
+):
     """清空会话历史
 
     Args:
@@ -187,7 +199,8 @@ async def clear_session(request: ClearRequest):
         操作结果
     """
     try:
-        success = rag_agent_service.clear_session(request.session_id)
+        scoped_session_id = scope_session_id(request.session_id, owner_key)
+        success = rag_agent_service.clear_session(scoped_session_id)
         logger.info(f"清空会话: {request.session_id}, 结果: {success}")
 
         return ApiResponse(
@@ -205,7 +218,10 @@ async def clear_session(request: ClearRequest):
 
 
 @router.get("/chat/session/{session_id}", response_model=SessionInfoResponse)
-async def get_session_info(session_id: str) -> SessionInfoResponse | JSONResponse:
+async def get_session_info(
+    session_id: str,
+    owner_key: str = Depends(require_session_owner),
+) -> SessionInfoResponse | JSONResponse:
     """查询会话历史
 
     Args:
@@ -215,7 +231,8 @@ async def get_session_info(session_id: str) -> SessionInfoResponse | JSONRespons
         会话信息
     """
     try:
-        history = rag_agent_service.get_session_history(session_id)
+        scoped_session_id = scope_session_id(session_id, owner_key)
+        history = rag_agent_service.get_session_history(scoped_session_id)
 
         return SessionInfoResponse(
             session_id=session_id,

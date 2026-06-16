@@ -343,7 +343,8 @@ class AIOpsService:
                         "status": "completed",
                         "case_id": event.get("case_id", ""),
                         "report": event.get("response", "")
-                    }
+                    },
+                    "events": event.get("events", []),
                 }
             else:
                 yield event

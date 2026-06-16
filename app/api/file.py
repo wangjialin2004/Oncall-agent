@@ -13,6 +13,7 @@ router = APIRouter()
 
 # 文件上传后存储的路径
 UPLOAD_DIR = Path("./uploads")
+TRUSTED_INDEX_DIRS = (Path("./aiops-docs"),)
 # 支持的文件类型
 ALLOWED_EXTENSIONS = sorted(extension.lstrip(".") for extension in SUPPORTED_EXTENSIONS)
 # 单个文件支持最大大小
@@ -74,7 +75,7 @@ async def upload_file(file: UploadFile = File(...)):
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
         # 5. 保存文件
-        file_path = UPLOAD_DIR / safe_filename
+        file_path = _unique_upload_path(UPLOAD_DIR, safe_filename)
 
         # 读取并保存文件内容
         content = await file.read()
@@ -85,10 +86,7 @@ async def upload_file(file: UploadFile = File(...)):
                 status_code=400, detail=f"文件大小超过限制（最大 {MAX_FILE_SIZE} 字节）"
             )
 
-        if file_path.exists():
-            logger.info(f"文件已存在，将覆盖: {file_path}")
-            file_path.unlink()
-
+        safe_filename = file_path.name
         file_path.write_bytes(content)
 
         logger.info(f"文件上传成功: {file_path}")
@@ -153,10 +151,11 @@ async def index_directory(directory_path: str = None):
         JSONResponse: 索引结果
     """
     try:
-        logger.info(f"开始索引目录: {directory_path or 'uploads'}")
+        trusted_directory = _resolve_trusted_index_directory(directory_path)
+        logger.info(f"开始索引目录: {trusted_directory}")
 
         # 执行索引
-        result = vector_index_service.index_directory(directory_path)
+        result = vector_index_service.index_directory(str(trusted_directory))
         if result.error_message:
             raise HTTPException(status_code=400, detail=result.error_message)
 
@@ -190,6 +189,50 @@ def _get_file_extension(filename: str) -> str:
     if len(parts) == 2:
         return parts[1].lower()
     return ""
+
+
+def _unique_upload_path(upload_dir: Path, filename: str) -> Path:
+    """Return a non-overwriting path inside the upload directory."""
+
+    candidate = upload_dir / filename
+    if not candidate.exists():
+        return candidate
+
+    stem = candidate.stem
+    suffix = candidate.suffix
+    counter = 1
+    while True:
+        next_candidate = upload_dir / f"{stem}_{counter}{suffix}"
+        if not next_candidate.exists():
+            return next_candidate
+        counter += 1
+
+
+def _resolve_trusted_index_directory(directory_path: str | None) -> Path:
+    """Resolve index_directory input and keep it inside trusted roots."""
+
+    target = Path(directory_path).resolve() if directory_path else UPLOAD_DIR.resolve()
+    if not target.exists() or not target.is_dir():
+        raise HTTPException(status_code=400, detail=f"目录不存在或不是有效目录: {target}")
+
+    trusted_roots = [UPLOAD_DIR.resolve()]
+    trusted_roots.extend(root.resolve() for root in TRUSTED_INDEX_DIRS)
+
+    if not any(_is_relative_to(target, root) for root in trusted_roots):
+        roots = ", ".join(str(root) for root in trusted_roots)
+        raise HTTPException(
+            status_code=400,
+            detail=f"directory_path must stay within trusted knowledge roots: {roots}",
+        )
+    return target
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _sanitize_filename(filename: str) -> str:
