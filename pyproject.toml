@@ -58,7 +58,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["app*"]
+include = ["app*", "backend*"]
 
 
 
@@ -133,7 +133,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.coverage.run]
-source = ["app"]
+source = ["app", "backend"]
 omit = [
     "*/tests/*",
     "*/test_*.py",
