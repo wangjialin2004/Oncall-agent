@@ -202,8 +202,12 @@ class AIOpsService:
                             "report": node_output.get("response", "") if node_output else "",
                         }
 
-            # 获取最终状态
-            final_state = self.graph.get_state(config_dict)
+            # 获取最终状态。AsyncSqliteSaver 必须通过 async graph API 读取检查点。
+            aget_state = getattr(self.graph, "aget_state", None)
+            if aget_state is not None:
+                final_state = await aget_state(config_dict)
+            else:
+                final_state = self.graph.get_state(config_dict)
             final_response = ""
 
             # 安全地获取响应（处理 values 可能为 None 的情况）

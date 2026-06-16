@@ -6,6 +6,7 @@ from app.services.aiops_service import AIOpsService
 class _FakeMemoryService:
     def __init__(self):
         self.completed = None
+        self.failed = None
 
     def create_case(self, session_id, user_input):
         return "case-1"
@@ -21,7 +22,7 @@ class _FakeMemoryService:
         }
 
     def fail_case(self, case_id, error_message):
-        raise AssertionError(error_message)
+        self.failed = {"case_id": case_id, "error_message": error_message}
 
 
 @pytest.mark.asyncio
@@ -86,3 +87,43 @@ async def test_aiops_execute_emits_complete_event_with_events(monkeypatch, tmp_p
     assert complete["response"] == "# Report"
     assert any(event.get("agent") == "triage" for event in complete["events"])
     assert memory.completed["final_report"] == "# Report"
+
+
+@pytest.mark.asyncio
+async def test_aiops_execute_reads_final_state_with_async_graph_api():
+    class _StateSnapshot:
+        values = {
+            "response": "# Async Report",
+            "events": [{"type": "agent_event", "agent": "report", "summary": "reported"}],
+            "past_steps": [{"step_id": "plan-1", "status": "completed"}],
+        }
+
+    class _AsyncOnlyGraph:
+        async def astream(self, input, config, stream_mode):
+            yield {
+                "report": {
+                    "response": "# Async Report",
+                    "events": [{"type": "agent_event", "agent": "report", "summary": "reported"}],
+                }
+            }
+
+        def get_state(self, config):
+            raise RuntimeError(
+                "Synchronous calls to AsyncSqliteSaver are only allowed from a different thread"
+            )
+
+        async def aget_state(self, config):
+            return _StateSnapshot()
+
+    memory = _FakeMemoryService()
+    service = AIOpsService(memory_service=memory, checkpointer=None)
+    service.checkpointer = object()
+    service.graph = _AsyncOnlyGraph()
+
+    events = [event async for event in service.execute("checkout-api slow", session_id="s1")]
+
+    complete = events[-1]
+    assert complete["type"] == "complete"
+    assert complete["response"] == "# Async Report"
+    assert memory.completed["final_report"] == "# Async Report"
+    assert memory.failed is None
