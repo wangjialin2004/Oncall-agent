@@ -1,5 +1,5 @@
 export type AgentMode = "auto" | "rag" | "oncall";
-export type AgentRoute = "rag" | "oncall" | "unknown";
+export type AgentRoute = "rag" | "aiops" | "clarify" | "unknown";
 export type RunStatus = "idle" | "running" | "completed" | "error" | "cancelled";
 
 export type RouteSelectedEvent = {

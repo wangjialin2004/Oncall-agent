@@ -1,7 +1,7 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
-const agentGatewayTarget = process.env.AGENT_GATEWAY_API_TARGET ?? "http://localhost:8000";
+const agentGatewayTarget = process.env.AGENT_GATEWAY_API_TARGET ?? "http://localhost:9900";
 
 export default defineConfig({
   plugins: [react()],

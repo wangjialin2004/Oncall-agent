@@ -1,5 +1,5 @@
 import { Send, Square } from "lucide-react";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import type { AgentMode, ChatMessage, RunStatus } from "../types/events";
 
@@ -22,6 +22,11 @@ export function ChatWorkspace({
 }: ChatWorkspaceProps) {
   const [message, setMessage] = useState("");
   const isRunning = runStatus === "running";
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -60,6 +65,7 @@ export function ChatWorkspace({
             </article>
           ))
         )}
+        <div ref={messagesEndRef} />
       </div>
 
       <form className="composer" onSubmit={submit}>
