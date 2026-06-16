@@ -1,27 +1,74 @@
 
 
 from textwrap import dedent
-from typing import Dict, Any, List
+from typing import Any
+
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_qwq import ChatQwen
-from pydantic import BaseModel, Field
 from loguru import logger
+from pydantic import BaseModel, Field
 
-from app.config import config
-from app.tools import DEFAULT_LOCAL_AGENT_TOOLS, retrieve_knowledge
 from app.agent.mcp_client import get_mcp_client_with_retry
+from app.config import config
+from app.services.experience_memory_service import experience_memory_service
+from app.tools import DEFAULT_LOCAL_AGENT_TOOLS, retrieve_knowledge
+
+from .events import make_agent_event
+from .plan_utils import normalize_plan_steps
 from .state import PlanExecuteState
 from .utils import format_tools_description
 
 
 class Plan(BaseModel):
     """计划的输出格式"""
-    steps: List[str] = Field(
+    steps: list[str] = Field(
         description="完成任务所需的不同步骤。这些步骤应该按顺序执行，每一步都建立在前一步的基础上。"
     )
 
 
 # Planner 提示词
+def load_experience_context(input_text: str) -> str:
+    try:
+        experiences = experience_memory_service.search_relevant_experiences(
+            query=input_text,
+            project_id=config.project_id,
+            top_k=config.experience_memory_top_k,
+        )
+    except Exception as exc:
+        logger.warning(f"experience memory recall failed: {exc}")
+        return ""
+    return format_experience_context(experiences)
+
+
+def format_experience_context(experiences: list[dict[str, Any]]) -> str:
+    if not experiences:
+        return ""
+
+    sections = [
+        "## Relevant historical experience",
+        "",
+        "Historical experience is not current fact.",
+        "If similarity and confidence are high, first verify the historical root cause.",
+        "If verification fails, continue normal investigation.",
+        "",
+    ]
+    for item in experiences:
+        sections.extend(
+            [
+                f"[{item['experience_id']}]",
+                f"similarity: {item.get('similarity', 0):.2f}",
+                f"confidence: {item.get('confidence', 0):.2f}",
+                f"historical symptoms: {item['symptoms']}",
+                f"verified root cause: {item['root_cause']}",
+                f"effective resolution: {item['resolution']}",
+                f"key evidence: {item['evidence_summary']}",
+                f"source cases: {', '.join(item.get('source_case_ids', []))}",
+                "",
+            ]
+        )
+    return "\n".join(sections).strip()
+
+
 planner_prompt = ChatPromptTemplate.from_messages(
     [
         (
@@ -57,7 +104,7 @@ planner_prompt = ChatPromptTemplate.from_messages(
 )
 
 
-async def planner(state: PlanExecuteState) -> Dict[str, Any]:
+async def planner(state: PlanExecuteState) -> dict[str, Any]:
     """
     规划节点：根据用户输入生成执行计划
 
@@ -73,6 +120,7 @@ async def planner(state: PlanExecuteState) -> Dict[str, Any]:
     try:
         # 步骤1: 查询内部文档获取相关经验
         logger.info("查询内部文档，寻找相关经验...")
+        memory_context = load_experience_context(input_text)
         experience_docs = ""
         try:
             # retrieve_knowledge 使用 response_format="content_and_artifact"
@@ -114,6 +162,11 @@ async def planner(state: PlanExecuteState) -> Dict[str, Any]:
             """).strip()
         else:
             experience_context = ""
+        if memory_context:
+            context_blocks = [memory_context]
+            if experience_context:
+                context_blocks.append(experience_context)
+            experience_context = "\n\n---\n\n".join(context_blocks)
 
         # 步骤4: 创建 LLM 并生成计划
         llm = ChatQwen(
@@ -142,15 +195,43 @@ async def planner(state: PlanExecuteState) -> Dict[str, Any]:
         for i, step in enumerate(plan_steps, 1):
             logger.info(f"  步骤{i}: {step}")
 
-        return {"plan": plan_steps}
+        structured_steps = normalize_plan_steps(plan_steps)
+        event = make_agent_event(
+            agent="planner",
+            stage="planning",
+            status="completed",
+            summary=f"Generated {len(structured_steps)} investigation steps.",
+            payload={"plan": structured_steps},
+        )
+        return {"plan": structured_steps, "events": list(state.get("events", [])) + [event]}
 
     except Exception as e:
         logger.error(f"生成计划失败: {e}", exc_info=True)
         # 返回一个默认计划
-        return {
-            "plan": [
-                "收集相关信息",
-                "分析数据",
-                "生成报告"
+        fallback_steps = normalize_plan_steps(
+            [
+                {
+                    "description": "Collect current metrics for the affected service or system.",
+                    "tool_category": "monitor",
+                    "expected_evidence": "CPU, memory, latency, error-rate, or disk anomaly summary.",
+                },
+                {
+                    "description": "Search recent application logs for errors related to the incident.",
+                    "tool_category": "logs",
+                    "expected_evidence": "Error messages, exception stack traces, or timeout records.",
+                },
+                {
+                    "description": "Retrieve relevant runbook knowledge for the detected incident type.",
+                    "tool_category": "knowledge",
+                    "expected_evidence": "Known causes and recommended handling steps.",
+                },
             ]
-        }
+        )
+        event = make_agent_event(
+            agent="planner",
+            stage="planning",
+            status="degraded",
+            summary="Generated fallback investigation plan.",
+            payload={"plan": fallback_steps, "error": str(e)},
+        )
+        return {"plan": fallback_steps, "events": list(state.get("events", [])) + [event]}

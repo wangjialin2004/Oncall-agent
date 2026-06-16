@@ -5,7 +5,8 @@
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 from loguru import logger
 from sse_starlette.sse import EventSourceResponse
 
@@ -62,15 +63,18 @@ async def chat(
 
     except Exception as e:
         logger.error(f"对话接口错误: {e}")
-        return {
-            "code": 500,
-            "message": "error",
-            "data": {
-                "success": False,
-                "answer": None,
-                "errorMessage": str(e)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "code": 500,
+                "message": "error",
+                "data": {
+                    "success": False,
+                    "answer": None,
+                    "errorMessage": str(e),
+                },
             }
-        }
+        )
 
 
 @router.post("/chat_stream")
@@ -207,14 +211,17 @@ async def clear_session(
 
     except Exception as e:
         logger.error(f"清空会话错误: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        return JSONResponse(
+            status_code=500,
+            content=ApiResponse(status="error", message=str(e), data=None).model_dump(),
+        )
 
 
 @router.get("/chat/session/{session_id}", response_model=SessionInfoResponse)
 async def get_session_info(
     session_id: str,
     owner_key: str = Depends(require_session_owner),
-) -> SessionInfoResponse:
+) -> SessionInfoResponse | JSONResponse:
     """查询会话历史
 
     Args:
@@ -235,4 +242,7 @@ async def get_session_info(
 
     except Exception as e:
         logger.error(f"获取会话信息错误: {e}")
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        return JSONResponse(
+            status_code=500,
+            content=ApiResponse(status="error", message=str(e), data=None).model_dump(),
+        )

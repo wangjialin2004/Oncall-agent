@@ -1,9 +1,10 @@
-from fastapi.testclient import TestClient
+import pytest
 
-from app.main import app
+from app.api.file import _sanitize_filename
 
 
-def test_upload_reports_completed_indexing(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_upload_reports_completed_indexing(monkeypatch, tmp_path, api_client):
     import app.api.file as file_api
 
     monkeypatch.setattr(file_api, "UPLOAD_DIR", tmp_path)
@@ -13,8 +14,7 @@ def test_upload_reports_completed_indexing(monkeypatch, tmp_path):
 
     monkeypatch.setattr(file_api.vector_index_service, "index_single_file", fake_index_single_file)
 
-    client = TestClient(app)
-    response = client.post(
+    response = await api_client.post(
         "/api/upload",
         files={"file": ("note.md", b"# hello", "text/markdown")},
     )
@@ -27,7 +27,10 @@ def test_upload_reports_completed_indexing(monkeypatch, tmp_path):
     assert data["indexing_error"] == ""
 
 
-def test_upload_reports_failed_indexing_without_failing_upload(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_upload_reports_failed_indexing_without_failing_upload(
+    monkeypatch, tmp_path, api_client
+):
     import app.api.file as file_api
 
     monkeypatch.setattr(file_api, "UPLOAD_DIR", tmp_path)
@@ -37,8 +40,7 @@ def test_upload_reports_failed_indexing_without_failing_upload(monkeypatch, tmp_
 
     monkeypatch.setattr(file_api.vector_index_service, "index_single_file", fake_index_single_file)
 
-    client = TestClient(app)
-    response = client.post(
+    response = await api_client.post(
         "/api/upload",
         files={"file": ("note.md", b"# hello", "text/markdown")},
     )
@@ -50,7 +52,30 @@ def test_upload_reports_failed_indexing_without_failing_upload(monkeypatch, tmp_
     assert data["indexing_error"] == "Milvus unavailable"
 
 
-def test_upload_keeps_existing_file_when_filename_collides(monkeypatch, tmp_path):
+@pytest.mark.asyncio
+async def test_upload_rejects_oversized_replacement_without_deleting_existing_file(
+    monkeypatch, tmp_path, api_client
+):
+    import app.api.file as file_api
+
+    existing_file = tmp_path / "note.md"
+    existing_file.write_bytes(b"original content")
+    monkeypatch.setattr(file_api, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(file_api, "MAX_FILE_SIZE", 4)
+
+    response = await api_client.post(
+        "/api/upload",
+        files={"file": ("note.md", b"too large", "text/markdown")},
+    )
+
+    assert response.status_code == 400
+    assert existing_file.read_bytes() == b"original content"
+
+
+@pytest.mark.asyncio
+async def test_upload_keeps_existing_file_when_filename_collides(
+    monkeypatch, tmp_path, api_client
+):
     import app.api.file as file_api
 
     existing_file = tmp_path / "note.md"
@@ -65,8 +90,7 @@ def test_upload_keeps_existing_file_when_filename_collides(monkeypatch, tmp_path
 
     monkeypatch.setattr(file_api.vector_index_service, "index_single_file", fake_index_single_file)
 
-    client = TestClient(app)
-    response = client.post(
+    response = await api_client.post(
         "/api/upload",
         files={"file": ("note.md", b"# new content", "text/markdown")},
     )
@@ -79,7 +103,19 @@ def test_upload_keeps_existing_file_when_filename_collides(monkeypatch, tmp_path
     assert indexed_paths == [str(tmp_path / "note_1.md")]
 
 
-def test_index_directory_rejects_paths_outside_trusted_roots(monkeypatch, tmp_path):
+def test_sanitize_filename_prefixes_windows_reserved_device_names():
+    assert _sanitize_filename("CON.md") == "_CON.md"
+    assert _sanitize_filename("nul.txt") == "_nul.txt"
+
+
+def test_sanitize_filename_replaces_control_characters():
+    assert _sanitize_filename("bad\n\tname.md") == "bad__name.md"
+
+
+@pytest.mark.asyncio
+async def test_index_directory_rejects_paths_outside_trusted_roots(
+    monkeypatch, tmp_path, api_client
+):
     import app.api.file as file_api
 
     trusted_uploads = tmp_path / "uploads"
@@ -92,11 +128,23 @@ def test_index_directory_rejects_paths_outside_trusted_roots(monkeypatch, tmp_pa
     )
     monkeypatch.setattr(file_api, "UPLOAD_DIR", trusted_uploads)
 
-    client = TestClient(app)
-    response = client.post(
+    response = await api_client.post(
         "/api/index_directory",
         params={"directory_path": str(untrusted_dir)},
     )
 
     assert response.status_code == 400
     assert "trusted knowledge roots" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_index_directory_reports_invalid_path_as_client_error(tmp_path, api_client):
+    missing_dir = tmp_path / "missing"
+
+    response = await api_client.post(
+        "/api/index_directory",
+        params={"directory_path": str(missing_dir)},
+    )
+
+    assert response.status_code == 400
+    assert "目录不存在或不是有效目录" in response.json()["detail"]

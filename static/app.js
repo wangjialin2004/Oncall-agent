@@ -1,7 +1,7 @@
 // 智能运维助手前端应用
 class AIOpsAssistantApp {
     constructor() {
-        this.apiBaseUrl = 'http://localhost:9900/api';
+        this.apiBaseUrl = '/api';
         this.currentMode = 'quick'; // 'quick' 或 'stream'
         this.sessionId = this.generateSessionId();
         this.sessionOwnerToken = this.getSessionOwnerToken();
@@ -440,10 +440,9 @@ class AIOpsAssistantApp {
         
         try {
             // 从后端获取会话历史
-            const response = await fetch(
-                `/api/chat/session/${historyId}`,
-                { headers: this.sessionHeaders() }
-            );
+            const response = await fetch(`/api/chat/session/${historyId}`, {
+                headers: this.sessionHeaders(),
+            });
             if (response.ok) {
                 const data = await response.json();
                 const backendHistory = data.history || [];
@@ -458,11 +457,13 @@ class AIOpsAssistantApp {
                     
                     // 如果后端有历史记录，使用后端的
                     if (backendHistory.length > 0) {
-                        this.currentChatHistory = [];
-                        backendHistory.forEach(msg => {
-                            // 后端返回格式: {role: "user|assistant", content: "...", timestamp: "..."}
-                            const messageType = msg.role === 'user' ? 'user' : 'bot';
-                            this.addMessage(messageType, msg.content, false, false);
+                        this.currentChatHistory = backendHistory.map(msg => ({
+                            type: msg.role === 'assistant' ? 'assistant' : 'user',
+                            content: msg.content,
+                            timestamp: msg.timestamp || new Date().toISOString()
+                        }));
+                        this.currentChatHistory.forEach(msg => {
+                            this.addMessage(msg.type, msg.content, false, false);
                         });
                     } else {
                         // 否则使用localStorage的历史记录
@@ -520,11 +521,12 @@ class AIOpsAssistantApp {
                 })
             });
 
-            if (!response.ok) {
-                throw new Error('清空会话失败');
-            }
-
             const result = await response.json();
+
+            if (!response.ok) {
+                const errorMessage = result?.detail || result?.message || '清空会话失败';
+                throw new Error(errorMessage);
+            }
             
             if (result.status === 'success') {
                 // 从本地存储中删除
@@ -630,8 +632,14 @@ class AIOpsAssistantApp {
     }
 
     getSessionOwnerToken() {
-        const existing = localStorage.getItem('sessionOwnerToken');
-        if (existing) return existing;
+        try {
+            const existing = window.localStorage && window.localStorage.getItem('sessionOwnerToken');
+            if (existing) {
+                return existing;
+            }
+        } catch (error) {
+            console.warn('session owner token storage unavailable:', error);
+        }
 
         const randomValues = new Uint32Array(4);
         if (window.crypto && window.crypto.getRandomValues) {
@@ -644,9 +652,14 @@ class AIOpsAssistantApp {
                 Date.now(),
             ]);
         }
-
         const token = Array.from(randomValues, value => value.toString(36)).join('');
-        localStorage.setItem('sessionOwnerToken', token);
+        try {
+            if (window.localStorage) {
+                window.localStorage.setItem('sessionOwnerToken', token);
+            }
+        } catch (error) {
+            console.warn('session owner token persistence unavailable:', error);
+        }
         return token;
     }
 
@@ -713,7 +726,7 @@ class AIOpsAssistantApp {
         const loadingMessage = this.addLoadingMessage('正在思考...');
         
         try {
-            const response = await fetch(`${this.apiBaseUrl}/chat`, {
+            const response = await fetch(`${this.apiBaseUrl}/assistant`, {
                 method: 'POST',
                 headers: this.sessionHeaders({
                     'Content-Type': 'application/json',
@@ -724,12 +737,13 @@ class AIOpsAssistantApp {
                 })
             });
 
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
-            }
-
             const data = await response.json();
             console.log('[sendQuickMessage] 响应数据:', JSON.stringify(data));
+
+            if (!response.ok) {
+                const errorMessage = data?.data?.errorMessage || data?.message || `HTTP错误: ${response.status}`;
+                throw new Error(errorMessage);
+            }
             
             // 移除等待提示消息
             if (loadingMessage && loadingMessage.parentNode) {
@@ -744,7 +758,15 @@ class AIOpsAssistantApp {
                 if (chatResponse && chatResponse.success) {
                     // 成功：添加实际响应消息（即使 answer 为空也显示）
                     const answer = chatResponse.answer || '（无回复内容）';
-                    this.addMessage('assistant', answer);
+                    if (chatResponse.route === 'aiops') {
+                        this.addOnCallAssistantMessage({
+                            answer,
+                            events: chatResponse.events || [],
+                            caseId: chatResponse.case_id || '',
+                        });
+                    } else {
+                        this.addMessage('assistant', answer);
+                    }
                 } else if (chatResponse && chatResponse.errorMessage) {
                     // 业务错误
                     throw new Error(chatResponse.errorMessage);
@@ -1124,7 +1146,7 @@ class AIOpsAssistantApp {
         if (file) {
             // 验证文件格式
             if (!this.validateFileType(file)) {
-                this.showNotification('只支持上传 TXT 或 Markdown (.md) 格式的文件', 'error');
+                this.showNotification('只支持上传 TXT、Markdown、PDF 或 Word (.docx) 文件', 'error');
                 this.fileInput.value = '';
                 return;
             }
@@ -1135,7 +1157,7 @@ class AIOpsAssistantApp {
     // 验证文件类型
     validateFileType(file) {
         const fileName = file.name.toLowerCase();
-        const allowedExtensions = ['.txt', '.md', '.markdown'];
+        const allowedExtensions = ['.docx', '.markdown', '.md', '.pdf', '.text', '.txt'];
         return allowedExtensions.some(ext => fileName.endsWith(ext));
     }
 
@@ -1143,14 +1165,14 @@ class AIOpsAssistantApp {
     async uploadFile(file) {
         // 再次验证文件类型（双重保险）
         if (!this.validateFileType(file)) {
-            this.showNotification('只支持上传 TXT 或 Markdown (.md) 格式的文件', 'error');
+            this.showNotification('只支持上传 TXT、Markdown、PDF 或 Word (.docx) 文件', 'error');
             return;
         }
 
-        // 验证文件大小（限制为50MB）
-        const maxSize = 50 * 1024 * 1024;
+        // 验证文件大小（限制为10MB）
+        const maxSize = 10 * 1024 * 1024;
         if (file.size > maxSize) {
-            this.showNotification('文件大小不能超过50MB', 'error');
+            this.showNotification('文件大小不能超过10MB', 'error');
             return;
         }
 
@@ -1170,16 +1192,26 @@ class AIOpsAssistantApp {
                 body: formData
             });
 
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
-            }
-
             const data = await response.json();
 
+            if (!response.ok) {
+                const errorMessage = data?.detail || data?.message || `HTTP错误: ${response.status}`;
+                throw new Error(errorMessage);
+            }
+
             if ((data.code === 200 || data.message === 'success') && data.data) {
-                // 在聊天界面显示上传成功消息
-                const successMessage = `${file.name} 上传到知识库成功`;
-                this.addMessage('assistant', successMessage, false, true);
+                // 在聊天界面显示上传与索引结果
+                const uploadResult = data.data;
+                let uploadMessage = `${file.name} 上传到知识库成功`;
+
+                if (uploadResult.indexing_status === 'failed') {
+                    const errorDetail = uploadResult.indexing_error ? `：${uploadResult.indexing_error}` : '';
+                    uploadMessage = `${file.name} 文件已上传，但知识库索引失败${errorDetail}`;
+                } else if (Number.isFinite(Number(uploadResult.indexed_chunks))) {
+                    uploadMessage = `${file.name} 上传到知识库成功，索引分片 ${uploadResult.indexed_chunks} 个`;
+                }
+
+                this.addMessage('assistant', uploadMessage, false, true);
             } else {
                 throw new Error(data.message || '上传失败');
             }
@@ -1225,12 +1257,46 @@ class AIOpsAssistantApp {
             }
 
             let fullResponse = '';
+            const timelineEvents = [];
+            let activeCaseId = '';
 
             // 处理 SSE 流式响应
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
             let currentEvent = 'message'; // 默认事件类型为 message
+
+            const applyAIOpsEvent = (sseMessage) => {
+                if (!sseMessage || !sseMessage.type) {
+                    return false;
+                }
+
+                if (['agent_event', 'tool_event', 'decision_event'].includes(sseMessage.type)) {
+                    timelineEvents.push(sseMessage);
+                    this.renderOnCallTimeline(loadingMessageElement, timelineEvents);
+                    return true;
+                }
+
+                if (sseMessage.type === 'complete') {
+                    activeCaseId = sseMessage.case_id || (sseMessage.diagnosis && sseMessage.diagnosis.case_id) || activeCaseId;
+                    const report = sseMessage.response || (sseMessage.diagnosis && sseMessage.diagnosis.report) || fullResponse;
+                    const finalEvents = sseMessage.events || timelineEvents;
+                    this.updateAIOpsMessage(loadingMessageElement, report, []);
+                    this.renderOnCallTimeline(loadingMessageElement, finalEvents);
+                    this.renderOnCallReport(loadingMessageElement, report, activeCaseId);
+                    this.renderOnCallFeedback(loadingMessageElement, activeCaseId);
+                    return true;
+                }
+
+                if (sseMessage.type === 'report') {
+                    const report = sseMessage.report || '';
+                    fullResponse += `\n\n${report}`;
+                    this.updateAIOpsStreamContent(loadingMessageElement, fullResponse);
+                    return true;
+                }
+
+                return false;
+            };
 
             try {
                 while (true) {
@@ -1279,6 +1345,9 @@ class AIOpsAssistantApp {
                                     for (const jsonStr of matches) {
                                         try {
                                             const sseMessage = JSON.parse(jsonStr);
+                                            if (applyAIOpsEvent(sseMessage)) {
+                                                return sseMessage.type === 'complete';
+                                            }
                                             if (sseMessage.type === 'content') {
                                                 fullResponse += sseMessage.data || '';
                                             } else if (sseMessage.type === 'plan') {
@@ -1334,6 +1403,9 @@ class AIOpsAssistantApp {
                                 try {
                                     const sseMessage = JSON.parse(rawData);
                                     if (sseMessage && sseMessage.type) {
+                                        if (applyAIOpsEvent(sseMessage)) {
+                                            return;
+                                        }
                                         if (sseMessage.type === 'content') {
                                             fullResponse += sseMessage.data || '';
                                             if (loadingMessageElement) {
@@ -1606,6 +1678,181 @@ class AIOpsAssistantApp {
         return messageDiv;
     }
 
+    normalizeOnCallEvent(event) {
+        if (!event || typeof event !== 'object') {
+            return null;
+        }
+
+        const type = event.type || 'status';
+        const agent = event.agent || event.tool || event.stage || 'system';
+        const status = event.status || event.stage || '';
+        const summary = event.summary || event.message || event.current_step || '';
+        const payload = event.payload || event.diagnosis || event.plan || event;
+
+        return { type, agent, status, summary, payload };
+    }
+
+    createOnCallTimeline(events) {
+        const normalizedEvents = (events || [])
+            .map(event => this.normalizeOnCallEvent(event))
+            .filter(Boolean);
+
+        const timeline = document.createElement('div');
+        timeline.className = 'oncall-timeline';
+
+        const title = document.createElement('div');
+        title.className = 'oncall-section-title';
+        title.textContent = '诊断时间线';
+        timeline.appendChild(title);
+
+        if (normalizedEvents.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'oncall-empty';
+            empty.textContent = '暂无诊断事件';
+            timeline.appendChild(empty);
+            return timeline;
+        }
+
+        normalizedEvents.forEach((event, index) => {
+            const item = document.createElement('div');
+            item.className = `oncall-timeline-item ${this.escapeHtml(event.type)}`;
+
+            const marker = document.createElement('div');
+            marker.className = 'oncall-timeline-marker';
+            marker.textContent = String(index + 1);
+
+            const body = document.createElement('div');
+            body.className = 'oncall-timeline-body';
+
+            const meta = document.createElement('div');
+            meta.className = 'oncall-timeline-meta';
+            meta.textContent = [event.type, event.agent, event.status].filter(Boolean).join(' · ');
+
+            const summary = document.createElement('div');
+            summary.className = 'oncall-timeline-summary';
+            summary.textContent = event.summary || '事件已记录';
+
+            body.appendChild(meta);
+            body.appendChild(summary);
+            item.appendChild(marker);
+            item.appendChild(body);
+            timeline.appendChild(item);
+        });
+
+        return timeline;
+    }
+
+    addOnCallAssistantMessage({ answer, events, caseId }) {
+        const messageElement = this.addMessage('assistant', '', false, false);
+        messageElement.classList.add('aiops-message', 'oncall-result-message');
+        this.renderOnCallTimeline(messageElement, events || []);
+        this.renderOnCallReport(messageElement, answer || '', caseId || '');
+        this.renderOnCallFeedback(messageElement, caseId || '');
+
+        this.currentChatHistory.push({
+            type: 'assistant',
+            content: answer || '',
+            timestamp: new Date().toISOString(),
+            metadata: {
+                case_id: caseId || '',
+                events: events || [],
+                route: 'aiops',
+            },
+        });
+
+        this.scrollToBottom();
+        return messageElement;
+    }
+
+    renderOnCallTimeline(messageElement, events) {
+        if (!messageElement) return;
+        const wrapper = messageElement.querySelector('.message-content-wrapper');
+        if (!wrapper) return;
+
+        const existing = wrapper.querySelector('.oncall-timeline');
+        if (existing) {
+            existing.remove();
+        }
+
+        wrapper.insertBefore(this.createOnCallTimeline(events), wrapper.firstChild);
+    }
+
+    renderOnCallReport(messageElement, report, caseId) {
+        if (!messageElement) return;
+        const content = messageElement.querySelector('.message-content');
+        if (!content) return;
+
+        const header = caseId ? `诊断 Case：${caseId}\n\n` : '';
+        content.innerHTML = this.renderMarkdown(`${header}${report || '暂无诊断报告'}`);
+        this.highlightCodeBlocks(content);
+    }
+
+    renderOnCallFeedback(messageElement, caseId) {
+        if (!messageElement || !caseId) return;
+        const wrapper = messageElement.querySelector('.message-content-wrapper');
+        if (!wrapper || wrapper.querySelector('.oncall-feedback')) return;
+
+        const feedback = document.createElement('form');
+        feedback.className = 'oncall-feedback';
+        feedback.innerHTML = `
+            <div class="oncall-section-title">诊断反馈</div>
+            <div class="oncall-feedback-row">
+                <label><input type="radio" name="accepted" value="true" checked> 结论准确</label>
+                <label><input type="radio" name="accepted" value="false"> 需要修正</label>
+            </div>
+            <input class="oncall-feedback-input" name="actual_root_cause" placeholder="实际根因">
+            <input class="oncall-feedback-input" name="final_resolution" placeholder="最终处理方案">
+            <textarea class="oncall-feedback-input" name="comment" rows="2" placeholder="补充说明"></textarea>
+            <button type="submit" class="oncall-feedback-submit">提交反馈</button>
+            <div class="oncall-feedback-status" aria-live="polite"></div>
+        `;
+
+        feedback.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            await this.submitOnCallFeedback(feedback, caseId);
+        });
+
+        wrapper.appendChild(feedback);
+    }
+
+    async submitOnCallFeedback(form, caseId) {
+        const status = form.querySelector('.oncall-feedback-status');
+        const submitButton = form.querySelector('.oncall-feedback-submit');
+        const formData = new FormData(form);
+
+        const payload = {
+            case_id: caseId,
+            session_id: this.sessionId,
+            user_accepted: formData.get('accepted') === 'true',
+            actual_root_cause: formData.get('actual_root_cause') || '',
+            final_resolution: formData.get('final_resolution') || '',
+            comment: formData.get('comment') || '',
+        };
+
+        if (status) status.textContent = '正在提交...';
+        if (submitButton) submitButton.disabled = true;
+
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/aiops/feedback`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...this.sessionHeaders(),
+                },
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json();
+            if (!response.ok || data.code !== 200) {
+                throw new Error(data.message || '反馈提交失败');
+            }
+            if (status) status.textContent = '反馈已提交';
+        } catch (error) {
+            if (status) status.textContent = `提交失败：${error.message}`;
+        } finally {
+            if (submitButton) submitButton.disabled = false;
+        }
+    }
+
     // HTML转义
     escapeHtml(text) {
         const div = document.createElement('div');
@@ -1718,6 +1965,20 @@ style.textContent = `
 document.head.appendChild(style);
 
 // 初始化应用
-document.addEventListener('DOMContentLoaded', () => {
-    new AIOpsAssistantApp();
-});
+const initAIOpsAssistantApp = () => {
+    if (window.aiOpsApp) {
+        return;
+    }
+    try {
+        window.aiOpsApp = new AIOpsAssistantApp();
+    } catch (error) {
+        window.aiOpsAppInitError = error && (error.stack || error.message || String(error));
+        console.error('AIOps app init failed:', error);
+    }
+};
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initAIOpsAssistantApp);
+} else {
+    initAIOpsAssistantApp();
+}

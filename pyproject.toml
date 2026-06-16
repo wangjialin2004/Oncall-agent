@@ -30,6 +30,7 @@ dependencies = [
     "langchain-mcp-adapters>=0.2.1",
     "fastmcp>=2.14.0",
     "langchain-qwq>=0.3.4",
+    "langgraph-checkpoint-sqlite>=3.1.0",
     "python-docx>=1.1.0",
     "pymupdf>=1.24.0",
 ]
@@ -47,6 +48,8 @@ dev = [
     "pre-commit>=3.6.0",
     "ipython>=8.20.0",
     "ipdb>=0.13.13",
+    "datasets>=2.18.0",
+    "ragas==0.3.9",
 ]
 
 [build-system]
@@ -55,7 +58,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["app*"]
+include = ["app*", "backend*"]
 
 
 
@@ -66,6 +69,17 @@ target-version = ['py311']
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+exclude = [
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "logs",
+    "*.pyc",
+    "*.egg-info",
+]
+
+[tool.ruff.lint]
 select = [
     "E",   # pycodestyle errors
     "W",   # pycodestyle warnings
@@ -81,20 +95,11 @@ ignore = [
     "C901",  # too complex
     "W191",  # indentation contains tabs
 ]
-exclude = [
-    ".git",
-    "__pycache__",
-    ".venv",
-    "venv",
-    "logs",
-    "*.pyc",
-    "*.egg-info",
-]
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # unused imports in __init__.py
 
-[tool.ruff.isort]
+[tool.ruff.lint.isort]
 known-first-party = ["app"]
 combine-as-imports = true
 
@@ -125,9 +130,10 @@ python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.coverage.run]
-source = ["app"]
+source = ["app", "backend"]
 omit = [
     "*/tests/*",
     "*/test_*.py",

@@ -1,3 +1,4 @@
+import pytest
 from langchain_core.messages import ToolMessage
 
 from app.agent.aiops.evidence import build_persistent_tool_evidence
@@ -28,6 +29,16 @@ class _FakeGraph:
         )
 
 
+class _FailingGraph:
+    def __init__(self):
+        self.input_state = None
+
+    async def astream(self, input, config, stream_mode):
+        self.input_state = input
+        raise RuntimeError("planner unavailable")
+        yield
+
+
 async def test_aiops_service_execute_persists_case_lifecycle(tmp_path):
     memory_service = DiagnosisMemoryService(tmp_path / "diagnosis-memory.sqlite3")
     graph = _FakeGraph()
@@ -44,7 +55,9 @@ async def test_aiops_service_execute_persists_case_lifecycle(tmp_path):
         "type": "complete",
         "stage": "complete",
         "message": "任务执行完成",
+        "case_id": case_id,
         "response": "# final report",
+        "events": [],
     }
     assert graph.input_state["session_id"] == "session-1"
     assert case["status"] == "completed"
@@ -53,6 +66,49 @@ async def test_aiops_service_execute_persists_case_lifecycle(tmp_path):
     assert case["plan"] == ["check alerts"]
     assert case["executed_steps"] == [["check alerts", "ok"]]
     assert case["final_report"] == "# final report"
+
+
+async def test_aiops_service_execute_exposes_case_id_on_error(tmp_path):
+    memory_service = DiagnosisMemoryService(tmp_path / "diagnosis-memory.sqlite3")
+    graph = _FailingGraph()
+    service = object.__new__(AIOpsService)
+    service.memory_service = memory_service
+    service.graph = graph
+
+    events = [event async for event in service.execute("diagnose", session_id="session-1")]
+
+    case_id = graph.input_state["case_id"]
+    case = memory_service.get_case(case_id)
+
+    assert events == [
+        {
+            "type": "error",
+            "stage": "error",
+            "message": "任务执行出错: planner unavailable",
+            "case_id": case_id,
+        }
+    ]
+    assert case["status"] == "failed"
+
+
+async def test_aiops_service_diagnose_exposes_case_id_in_completion(tmp_path):
+    memory_service = DiagnosisMemoryService(tmp_path / "diagnosis-memory.sqlite3")
+    graph = _FakeGraph()
+    service = object.__new__(AIOpsService)
+    service.memory_service = memory_service
+    service.graph = graph
+
+    events = [event async for event in service.diagnose(session_id="session-1")]
+
+    case_id = graph.input_state["case_id"]
+
+    assert events[-1]["type"] == "complete"
+    assert events[-1]["stage"] == "diagnosis_complete"
+    assert events[-1]["diagnosis"] == {
+        "status": "completed",
+        "case_id": case_id,
+        "report": "# final report",
+    }
 
 
 def test_diagnosis_memory_service_persists_case_lifecycle(tmp_path):
@@ -187,3 +243,40 @@ def test_diagnosis_memory_service_persists_feedback(tmp_path):
             "comment": "诊断结论准确",
         }
     ]
+
+
+def test_diagnosis_memory_service_record_feedback_returns_feedback_id(tmp_path):
+    db_path = tmp_path / "diagnosis-memory.sqlite3"
+    service = DiagnosisMemoryService(db_path)
+    service.create_case(session_id="session-1", user_input="diagnose", case_id="case-1")
+
+    feedback_id = service.record_feedback(
+        case_id="case-1",
+        session_id="session-1",
+        user_accepted=True,
+        actual_root_cause="Milvus connection exhausted",
+        final_resolution="Restarted Milvus",
+    )
+
+    assert isinstance(feedback_id, str)
+    assert feedback_id.startswith("feedback-")
+
+
+def test_diagnosis_memory_service_rejects_feedback_for_missing_case(tmp_path):
+    db_path = tmp_path / "diagnosis-memory.sqlite3"
+    service = DiagnosisMemoryService(db_path)
+
+    with pytest.raises(ValueError, match="Diagnosis case not found"):
+        service.record_feedback(
+            case_id="missing-case",
+            session_id="session-1",
+            user_accepted=False,
+        )
+
+
+def test_diagnosis_memory_service_rejects_feedback_lookup_for_missing_case(tmp_path):
+    db_path = tmp_path / "diagnosis-memory.sqlite3"
+    service = DiagnosisMemoryService(db_path)
+
+    with pytest.raises(ValueError, match="Diagnosis case not found"):
+        service.list_feedback("missing-case")

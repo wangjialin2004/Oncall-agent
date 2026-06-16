@@ -58,6 +58,11 @@ class VectorSearchService:
         根据配置在 dense、BM25 和 hybrid 检索模式之间分流。
         """
 
+        if not query or not query.strip():
+            raise ValueError("查询文本不能为空")
+        if top_k <= 0:
+            raise ValueError("top_k 必须大于 0")
+
         mode = str(config.rag_retrieval_mode or "dense").strip().lower()
         if mode == "hybrid":
             return self.search_hybrid_documents(query=query, top_k=top_k)

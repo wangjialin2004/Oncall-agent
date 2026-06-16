@@ -1,6 +1,7 @@
 """Unified assistant API."""
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 from loguru import logger
 
 from app.models.request import ChatRequest
@@ -26,13 +27,16 @@ async def assistant(
         }
     except Exception as exc:
         logger.error(f"统一助手接口错误: {exc}")
-        return {
-            "code": 500,
-            "message": "error",
-            "data": {
-                "success": False,
-                "route": "error",
-                "answer": None,
-                "errorMessage": str(exc),
+        return JSONResponse(
+            status_code=500,
+            content={
+                "code": 500,
+                "message": "error",
+                "data": {
+                    "success": False,
+                    "route": "error",
+                    "answer": None,
+                    "errorMessage": str(exc),
+                },
             },
-        }
+        )

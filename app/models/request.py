@@ -3,7 +3,7 @@
 定义 API 请求的 Pydantic 模型
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ChatRequest(BaseModel):
@@ -12,14 +12,15 @@ class ChatRequest(BaseModel):
     id: str = Field(..., description="会话 ID", alias="Id")
     question: str = Field(..., description="用户问题", alias="Question")
 
-    class Config:
-        populate_by_name = True
-        json_schema_extra = {
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_schema_extra={
             "example": {
                 "Id": "session-123",
                 "Question": "什么是向量数据库？"
             }
         }
+    )
 
 
 class ClearRequest(BaseModel):
@@ -27,5 +28,4 @@ class ClearRequest(BaseModel):
 
     session_id: str = Field(..., description="会话 ID", alias="sessionId")
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(populate_by_name=True)

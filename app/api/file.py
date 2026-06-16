@@ -18,6 +18,30 @@ TRUSTED_INDEX_DIRS = (Path("./aiops-docs"),)
 ALLOWED_EXTENSIONS = sorted(extension.lstrip(".") for extension in SUPPORTED_EXTENSIONS)
 # 单个文件支持最大大小
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+WINDOWS_RESERVED_FILENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+}
 
 
 @router.post("/upload")
@@ -50,6 +74,9 @@ async def upload_file(file: UploadFile = File(...)):
         # 4. 创建上传目录
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+        # 5. 保存文件
+        file_path = _unique_upload_path(UPLOAD_DIR, safe_filename)
+
         # 读取并保存文件内容
         content = await file.read()
 
@@ -59,7 +86,6 @@ async def upload_file(file: UploadFile = File(...)):
                 status_code=400, detail=f"文件大小超过限制（最大 {MAX_FILE_SIZE} 字节）"
             )
 
-        file_path = _unique_upload_path(UPLOAD_DIR, safe_filename)
         safe_filename = file_path.name
         file_path.write_bytes(content)
 
@@ -130,6 +156,8 @@ async def index_directory(directory_path: str = None):
 
         # 执行索引
         result = vector_index_service.index_directory(str(trusted_directory))
+        if result.error_message:
+            raise HTTPException(status_code=400, detail=result.error_message)
 
         return JSONResponse(
             status_code=200,
@@ -218,8 +246,10 @@ def _sanitize_filename(filename: str) -> str:
         str: 规范化后的文件名
     """
     # 去除空格
-    sanitized = filename.replace(" ", "_")
+    sanitized = "".join("_" if char.isspace() or not char.isprintable() else char for char in filename)
     # 去除其他可能导致问题的字符
     for char in ["\\", "/", ":", "*", "?", '"', "<", ">", "|"]:
         sanitized = sanitized.replace(char, "_")
+    if Path(sanitized).stem.upper() in WINDOWS_RESERVED_FILENAMES:
+        sanitized = f"_{sanitized}"
     return sanitized

@@ -1,28 +1,36 @@
 """
-通用 Plan-Execute-Replan 状态定义
-基于 LangGraph 官方教程实现
+State definitions for the AIOps and OnCall diagnosis workflows.
 """
 
 import operator
-from typing import Annotated, NotRequired, TypedDict
+from typing import Annotated, Any, NotRequired, TypedDict
 
 
 class PlanExecuteState(TypedDict):
-    """Plan-Execute-Replan 状态"""
+    """Existing Plan-Execute-Replan state."""
 
-    # 用户输入（任务描述）
     input: str
-
-    # 执行计划（步骤列表）
-    plan: list[str]
-
-    # 已执行的步骤历史
-    # 使用 operator.add 实现追加式更新（而非覆盖）
+    plan: list[Any]
     past_steps: Annotated[list[tuple], operator.add]
-
-    # 最终响应/报告
     response: str
-
-    # 持久化上下文
     session_id: NotRequired[str]
     case_id: NotRequired[str]
+
+
+class OnCallState(TypedDict):
+    """Supervisor-orchestrated OnCall multi-agent state."""
+
+    input: str
+    session_id: str
+    case_id: str
+    route: NotRequired[str]
+    route_reason: NotRequired[str]
+    incident: NotRequired[dict[str, Any]]
+    plan: list[dict[str, Any]]
+    past_steps: Annotated[list[dict[str, Any]], operator.add]
+    evidence: Annotated[list[dict[str, Any]], operator.add]
+    diagnosis: NotRequired[dict[str, Any]]
+    response: str
+    iteration: int
+    max_iterations: int
+    events: list[dict[str, Any]]

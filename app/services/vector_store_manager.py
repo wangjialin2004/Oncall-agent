@@ -106,7 +106,8 @@ class VectorStoreManager:
 
             # metadata 是 JSON 字段，使用 JSON 路径查询语法
             # _source 是文档的来源文件路径
-            expr = f'metadata["_source"] == "{file_path}"'
+            escaped_file_path = file_path.replace("\\", "\\\\").replace('"', '\\"')
+            expr = f'metadata["_source"] == "{escaped_file_path}"'
 
             result = collection.delete(expr)
             deleted_count = result.delete_count if hasattr(result, "delete_count") else 0

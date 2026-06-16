@@ -5,14 +5,106 @@ AIOps 智能运维接口
 import json
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 from loguru import logger
 from sse_starlette.sse import EventSourceResponse
 
-from app.models.aiops import AIOpsRequest
+from app.config import config
+from app.models.aiops import AIOpsRequest, DiagnosisFeedbackRequest
 from app.services.aiops_service import aiops_service
+from app.services.diagnosis_memory_service import diagnosis_memory_service
+from app.services.experience_memory_service import experience_memory_service
 from app.services.session_scope_service import require_session_owner, scope_session_id
 
 router = APIRouter()
+
+
+@router.post("/aiops/feedback")
+async def record_diagnosis_feedback(
+    request: DiagnosisFeedbackRequest,
+    owner_key: str = Depends(require_session_owner),
+):
+    """Persist user feedback for a diagnosis case."""
+    try:
+        scoped_session_id = scope_session_id(request.session_id, owner_key)
+        feedback_id = diagnosis_memory_service.record_feedback(
+            case_id=request.case_id,
+            session_id=scoped_session_id,
+            user_accepted=request.user_accepted,
+            actual_root_cause=request.actual_root_cause,
+            final_resolution=request.final_resolution,
+            comment=request.comment,
+        )
+        if request.user_accepted:
+            try:
+                experience_memory_service.create_or_merge_from_feedback(
+                    case_id=request.case_id,
+                    feedback_id=feedback_id,
+                    project_id=config.project_id,
+                )
+            except Exception as exc:
+                logger.warning(f"long-term experience memory write failed: {exc}")
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "code": 404,
+                "message": str(exc),
+                "data": None,
+            },
+        )
+    except Exception as exc:
+        logger.error(f"记录诊断反馈失败: {exc}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "code": 500,
+                "message": "error",
+                "data": {
+                    "errorMessage": str(exc),
+                },
+            },
+        )
+
+    return {
+        "code": 200,
+        "message": "success",
+        "data": request.model_dump(),
+    }
+
+
+@router.get("/aiops/cases/{case_id}/feedback")
+async def list_diagnosis_feedback(case_id: str):
+    """List user feedback recorded for a diagnosis case."""
+    try:
+        feedback = diagnosis_memory_service.list_feedback(case_id)
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "code": 404,
+                "message": str(exc),
+                "data": None,
+            },
+        )
+    except Exception as exc:
+        logger.error(f"查询诊断反馈失败: {exc}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "code": 500,
+                "message": "error",
+                "data": {
+                    "errorMessage": str(exc),
+                },
+            },
+        )
+
+    return {
+        "code": 200,
+        "message": "success",
+        "data": feedback,
+    }
 
 
 @router.post("/aiops")
@@ -91,6 +183,10 @@ async def diagnose_stream(
          "message": "诊断过程发生错误: ..."
        }
        ```
+
+    7. `agent_event` - 规范化的智能体时间线事件
+    8. `tool_event` - 规范化的证据/工具时间线事件
+    9. `decision_event` - 规范化的诊断循环决策事件
 
     **使用示例：**
     ```bash

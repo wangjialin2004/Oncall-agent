@@ -4,7 +4,8 @@
 支持真正的流式输出和更好的模型适配。
 """
 
-from typing import Annotated, Any, AsyncGenerator, Dict, Sequence
+from collections.abc import AsyncGenerator, Sequence
+from typing import Annotated, Any
 
 from langchain.agents import create_agent
 from langchain_core.messages import (
@@ -13,20 +14,26 @@ from langchain_core.messages import (
     RemoveMessage,
     SystemMessage,
 )
-from langgraph.checkpoint.memory import MemorySaver
+from langchain_qwq import ChatQwen
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from loguru import logger
 from typing_extensions import TypedDict
-from langchain_qwq import ChatQwen
 
-from app.config import config
-from app.tools import DEFAULT_LOCAL_AGENT_TOOLS
 from app.agent.mcp_client import (
+    format_exception_chain,
     get_mcp_client_with_retry,
     load_mcp_tools_safe,
-    format_exception_chain,
     suggest_mcp_transport,
 )
+from app.config import config
+from app.services.checkpoint_service import (
+    aclose_checkpointer,
+    close_checkpointer,
+    create_sqlite_checkpointer,
+    create_sync_sqlite_checkpointer,
+    setup_checkpointer,
+)
+from app.tools import DEFAULT_LOCAL_AGENT_TOOLS
 
 # 阿里千问大模型和langchain集成参考： https://docs.langchain.com/oss/python/integrations/chat/qwen
 # 注意：需要配置环境变量 DASHSCOPE_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1 否则默认访问的是新加坡站点
@@ -81,7 +88,12 @@ def trim_messages_middleware(state: AgentState) -> dict[str, Any] | None:
 class RagAgentService:
     """RAG Agent 服务 - 使用 LangGraph + ChatQwen 原生集成"""
 
-    def __init__(self, streaming: bool = True):
+    def __init__(
+        self,
+        streaming: bool = True,
+        checkpoint_db_path: str | None = None,
+        checkpointer: Any | None = None,
+    ):
         """初始化 RAG Agent 服务
 
         Args:
@@ -105,8 +117,9 @@ class RagAgentService:
         # MCP 客户端（延迟初始化，使用全局管理）
         self.mcp_tools: list = []
 
-        # 创建内存检查点（用于会话管理）
-        self.checkpointer = MemorySaver()
+        # SQLite 检查点在异步入口中懒加载，避免模块导入阶段没有 running loop。
+        self.checkpoint_db_path = checkpoint_db_path or config.checkpoint_db_path
+        self.checkpointer = checkpointer
 
         # Agent 初始化（会在异步方法中完成）
         self.agent = None
@@ -114,10 +127,17 @@ class RagAgentService:
 
         logger.info(f"RAG Agent 服务初始化完成 (ChatQwen), model={self.model_name}, streaming={streaming}")
 
+    @staticmethod
+    def _thread_id(session_id: str) -> str:
+        return f"rag:{session_id}"
+
     async def _initialize_agent(self):
         """异步初始化 Agent（包括 MCP 工具）"""
         if self._agent_initialized:
             return
+        if self.checkpointer is None:
+            self.checkpointer = create_sqlite_checkpointer(self.checkpoint_db_path)
+        await setup_checkpointer(self.checkpointer)
 
         for name, server in config.mcp_servers.items():
             hint = suggest_mcp_transport(
@@ -215,7 +235,7 @@ class RagAgentService:
             # 配置 thread_id（用于会话持久化）
             config_dict = {
                 "configurable": {
-                    "thread_id": session_id
+                    "thread_id": self._thread_id(session_id)
                 }
             }
 
@@ -252,7 +272,7 @@ class RagAgentService:
         self,
         question: str,
         session_id: str,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """
         流式处理用户问题（逐步返回答案片段）
 
@@ -282,7 +302,7 @@ class RagAgentService:
             # 配置 thread_id（用于会话持久化）
             config_dict = {
                 "configurable": {
-                    "thread_id": session_id
+                    "thread_id": self._thread_id(session_id)
                 }
             }
 
@@ -330,15 +350,19 @@ class RagAgentService:
         """
         try:
             # 使用 checkpointer 的 get 方法获取最新的检查点
-            config = {"configurable": {"thread_id": session_id}}
-            
+            config = {"configurable": {"thread_id": self._thread_id(session_id)}}
+
             # 获取该 thread 的最新检查点
-            checkpoint_tuple = self.checkpointer.get(config)
-            
+            reader = create_sync_sqlite_checkpointer(self.checkpoint_db_path)
+            try:
+                checkpoint_tuple = reader.get(config)
+            finally:
+                close_checkpointer(reader)
+
             if not checkpoint_tuple:
                 logger.info(f"获取会话历史: {session_id}, 消息数量: 0")
                 return []
-            
+
             # checkpoint_tuple 可能是命名元组或普通元组，安全地提取 checkpoint
             # 通常第一个元素是 checkpoint 数据
             if hasattr(checkpoint_tuple, 'checkpoint'):
@@ -346,20 +370,20 @@ class RagAgentService:
             else:
                 # 如果是普通元组，第一个元素是 checkpoint
                 checkpoint_data = checkpoint_tuple[0] if checkpoint_tuple else {}
-            
+
             # 从检查点中提取消息
             messages = checkpoint_data.get("channel_values", {}).get("messages", [])
-            
+
             # 转换为前端需要的格式
             history = []
             for msg in messages:
                 # 跳过系统消息
                 if isinstance(msg, SystemMessage):
                     continue
-                    
+
                 role = "user" if isinstance(msg, HumanMessage) else "assistant"
                 content = msg.content if hasattr(msg, 'content') else str(msg)
-                
+
                 # 提取时间戳（如果有的话）
                 timestamp = getattr(msg, 'timestamp', None)
                 if timestamp:
@@ -375,10 +399,10 @@ class RagAgentService:
                         "content": content,
                         "timestamp": datetime.now().isoformat()
                     })
-            
+
             logger.info(f"获取会话历史: {session_id}, 消息数量: {len(history)}")
             return history
-            
+
         except Exception as e:
             logger.error(f"获取会话历史失败: {session_id}, 错误: {e}")
             return []
@@ -395,11 +419,15 @@ class RagAgentService:
         """
         try:
             # 使用 checkpointer 的 delete_thread 方法删除该 thread 的所有检查点
-            self.checkpointer.delete_thread(session_id)
-            
+            writer = create_sync_sqlite_checkpointer(self.checkpoint_db_path)
+            try:
+                writer.delete_thread(self._thread_id(session_id))
+            finally:
+                close_checkpointer(writer)
+
             logger.info(f"已清除会话历史: {session_id}")
             return True
-            
+
         except Exception as e:
             logger.error(f"清空会话历史失败: {session_id}, 错误: {e}")
             return False
@@ -409,6 +437,8 @@ class RagAgentService:
         try:
             logger.info("清理 RAG Agent 服务资源...")
             # MCP 客户端由全局管理器统一管理，无需手动清理
+            if self.checkpointer is not None:
+                await aclose_checkpointer(self.checkpointer)
             logger.info("RAG Agent 服务资源已清理")
         except Exception as e:
             logger.error(f"清理资源失败: {e}")

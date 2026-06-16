@@ -11,8 +11,8 @@
 """
 
 from langchain_openai import ChatOpenAI
+
 from app.config import config
-from loguru import logger
 
 
 class LLMFactory:

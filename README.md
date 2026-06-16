@@ -127,6 +127,35 @@ python -c "import requests, os, time; [requests.post('http://localhost:9900/api/
 - **Web 界面**: http://localhost:9900
 - **API 文档**: http://localhost:9900/docs
 
+### New Agent Gateway UI
+
+Backend:
+
+```powershell
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+```
+
+Frontend:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. The frontend calls `POST /api/agent/stream` through the Vite
+dev proxy and displays realtime agent events in the right-side process panel.
+
+If port `8000` is already occupied, run the backend on another port and point the frontend proxy
+at it:
+
+```powershell
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8001
+cd frontend
+$env:AGENT_GATEWAY_API_TARGET="http://localhost:8001"
+npm run dev
+```
+
 ## 📡 API 接口
 
 ### 核心接口
@@ -135,7 +164,10 @@ python -c "import requests, os, time; [requests.post('http://localhost:9900/api/
 |------|------|------|------|
 | 普通对话 | POST | `/api/chat` | 一次性返回 |
 | 流式对话 | POST | `/api/chat_stream` | SSE 流式输出 |
+| 统一助手 | POST | `/api/assistant` | 自动路由到 RAG 或 AIOps 诊断 |
 | AIOps 诊断 | POST | `/api/aiops` | 自动故障诊断（流式） |
+| 诊断反馈提交 | POST | `/api/aiops/feedback` | 记录用户确认的根因、处理结果和反馈 |
+| 诊断反馈查询 | GET | `/api/aiops/cases/{case_id}/feedback` | 查询指定诊断 case 的反馈记录 |
 | 文件上传 | POST | `/api/upload` | 上传并索引文档 |
 | 健康检查 | GET | `/api/health` | 服务状态检查 |
 
@@ -153,11 +185,49 @@ curl -X POST "http://localhost:9900/api/chat_stream" \
   -d '{"Id":"session-123","Question":"你好"}' \
   --no-buffer
 
+# 统一助手：根据意图自动选择 RAG 或 AIOps；AIOps 路由会返回 case_id
+curl -X POST "http://localhost:9900/api/assistant" \
+  -H "Content-Type: application/json" \
+  -d '{"Id":"session-123","Question":"帮我诊断 CPU 告警"}'
+
 # AIOps 诊断
 curl -X POST "http://localhost:9900/api/aiops" \
   -H "Content-Type: application/json" \
   -d '{"session_id":"session-123"}' \
   --no-buffer
+
+# 提交诊断反馈：case_id 来自 /api/aiops 完成事件或 /api/assistant 的 AIOps 响应
+curl -X POST "http://localhost:9900/api/aiops/feedback" \
+  -H "Content-Type: application/json" \
+  -d '{"case_id":"case-xxx","session_id":"session-123","user_accepted":true,"actual_root_cause":"Milvus connection exhausted","final_resolution":"Restarted Milvus","comment":"诊断结论准确"}'
+
+# 查询诊断反馈
+curl "http://localhost:9900/api/aiops/cases/case-xxx/feedback"
+```
+
+### `/api/assistant` AIOps 响应结构
+
+当请求被路由到 AIOps（OnCall 多智能体诊断）时，响应在 `answer` 之外还会附带 `events`——一个规范化的诊断时间线（Triage / Planner / Evidence Collector / Diagnosis / Report 各阶段的 `agent_event`、`tool_event`、`decision_event`）。RAG 路由的响应不包含 `events` 字段。
+
+```json
+{
+  "success": true,
+  "route": "aiops",
+  "route_reason": "llm_semantic_aiops",
+  "case_id": "case-xxx",
+  "answer": "# OnCall Diagnosis Report...",
+  "events": [
+    {
+      "type": "agent_event",
+      "agent": "triage",
+      "stage": "triage",
+      "status": "completed",
+      "summary": "Structured incident",
+      "payload": {}
+    }
+  ],
+  "errorMessage": null
+}
 ```
 
 ## 📁 项目结构
