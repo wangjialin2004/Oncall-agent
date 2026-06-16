@@ -42,6 +42,10 @@ poetry.lock
 # CodeBuddy
 .codebuddy/
 
+# Codex / local planning artifacts
+.superpowers/
+.worktrees/
+
 # Environment
 .env
 .env.local
