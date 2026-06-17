@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_qwq import ChatQwen
 from loguru import logger
 
 from app.config import config
+from app.core.llm_client import ChatMessage, LLMClient, LLMClientConfig
 
 from .events import make_agent_event
 
@@ -86,27 +85,35 @@ def build_fallback_report(state: dict[str, Any]) -> str:
     )
 
 
-async def generate_report(state: dict[str, Any]) -> str:
-    model = ChatQwen(
-        model=config.rag_model,
-        api_key=config.dashscope_api_key,
-        temperature=0,
-        streaming=False,
-    )
-    prompt = [
-        SystemMessage(
-            content=(
-                "你是 OnCall 报告智能体。请输出简洁的中文 Markdown 报告。"
-                "明确区分已确认事实、推断根因、缺失证据和建议操作。"
-                "不要编造证据。"
-            )
-        ),
-        HumanMessage(content=f"Incident: {state.get('incident', {})}"),
-        HumanMessage(content=f"Evidence: {state.get('evidence', [])}"),
-        HumanMessage(content=f"Diagnosis: {state.get('diagnosis', {})}"),
-    ]
-    result = await model.ainvoke(prompt)
-    return result.content if hasattr(result, "content") else str(result)
+async def generate_report(state: dict[str, Any], llm_client: Any | None = None) -> str:
+    owns_client = llm_client is None
+    client = llm_client or LLMClient(LLMClientConfig.from_settings(config))
+    try:
+        response = await client.complete(
+            [
+                ChatMessage(
+                    role="system",
+                    content=(
+                        "你是 OnCall 报告智能体。请输出简洁的中文 Markdown 报告。"
+                        "明确区分已确认事实、推断根因、缺失证据和建议操作。"
+                        "不要编造证据。"
+                    ),
+                ),
+                ChatMessage(
+                    role="user",
+                    content=(
+                        f"故障信息：{state.get('incident', {})}\n"
+                        f"已收集证据：{state.get('evidence', [])}\n"
+                        f"诊断结论：{state.get('diagnosis', {})}"
+                    ),
+                ),
+            ],
+            temperature=0,
+        )
+    finally:
+        if owns_client:
+            await client.aclose()
+    return response.content
 
 
 async def reporter(state: dict[str, Any]) -> dict[str, Any]:

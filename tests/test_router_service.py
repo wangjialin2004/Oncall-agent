@@ -1,5 +1,6 @@
 import pytest
 
+from app.core.llm_client import LLMResponse
 import app.services.router_service as router_module
 from app.services.router_service import RouteDecision, RouterService
 
@@ -41,6 +42,40 @@ def test_route_message_clarifies_punctuation_only_input():
 
 
 @pytest.mark.asyncio
+async def test_answer_uses_custom_llm_client_for_default_route(monkeypatch):
+    class FakeLLMClient:
+        def __init__(self):
+            self.messages = None
+            self.temperature = None
+
+        async def complete(self, messages, *, temperature):
+            self.messages = messages
+            self.temperature = temperature
+            return LLMResponse(
+                content='{"route":"aiops","reason":"transaction is stuck"}',
+                raw={},
+            )
+
+    llm_client = FakeLLMClient()
+    service = RouterService(llm_client=llm_client)
+
+    async def fake_execute(message, session_id):
+        yield {"type": "complete", "case_id": "case-custom", "response": "# custom llm diagnosis"}
+
+    monkeypatch.setattr(router_module.aiops_service, "execute", fake_execute)
+
+    result = await service.answer("user checkout keeps spinning", session_id="s1")
+
+    assert llm_client.temperature == 0
+    assert llm_client.messages[0].role == "system"
+    assert llm_client.messages[1].content == "user checkout keeps spinning"
+    assert result["route"] == "aiops"
+    assert result["route_reason"] == "llm_semantic_aiops"
+    assert result["case_id"] == "case-custom"
+    assert result["answer"] == "# custom llm diagnosis"
+
+
+@pytest.mark.asyncio
 async def test_answer_uses_llm_semantic_route_for_aiops_without_keywords(monkeypatch):
     service = RouterService(semantic_router=lambda message: RouteDecision("aiops", "llm_semantic_aiops"))
 
@@ -63,17 +98,15 @@ async def test_answer_uses_llm_semantic_route_for_aiops_without_keywords(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_answer_uses_structured_llm_for_default_route(monkeypatch):
-    class FakeClassifier:
-        async def ainvoke(self, messages):
-            return RouteDecision("aiops", "用户描述了交易卡顿")
+async def test_answer_parses_custom_llm_json_for_default_route(monkeypatch):
+    class FakeLLMClient:
+        async def complete(self, messages, *, temperature):
+            return LLMResponse(
+                content='{"route":"aiops","reason":"transaction is stuck"}',
+                raw={},
+            )
 
-    class FakeModel:
-        def with_structured_output(self, schema):
-            self.schema = schema
-            return FakeClassifier()
-
-    service = RouterService(semantic_model=FakeModel())
+    service = RouterService(llm_client=FakeLLMClient())
 
     async def fake_execute(message, session_id):
         yield {"type": "complete", "case_id": "case-2", "response": "# semantic diagnosis"}

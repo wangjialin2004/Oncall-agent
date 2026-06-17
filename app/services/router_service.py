@@ -7,20 +7,28 @@ import json
 import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_qwq import ChatQwen
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.config import config
+from app.core.llm_client import ChatMessage, LLMClient, LLMClientConfig
 from app.services.aiops_service import aiops_service
 from app.services.rag_agent_service import rag_agent_service
 
 
 TIMELINE_EVENT_TYPES = {"agent_event", "tool_event", "decision_event"}
 DEFAULT_AIOPS_TIMEOUT_SECONDS = 20.0
+SEMANTIC_ROUTER_SYSTEM_PROMPT = (
+    "You are a routing classifier for an intelligent operations assistant. "
+    "Classify the user request into exactly one route: rag or aiops. "
+    "aiops means incidents, alarms, service outage, stuck transaction, slow response, "
+    "error-rate increase, abnormal logs, high resource usage, diagnosis, or troubleshooting. "
+    "rag means knowledge-base lookup, documentation explanation, concepts, steps, or general Q&A. "
+    "Return only compact JSON with keys route and reason, for example: "
+    '{"route":"aiops","reason":"service incident"}'
+)
 
 
 @dataclass(slots=True)
@@ -68,11 +76,11 @@ class RouterService:
     def __init__(
         self,
         semantic_router: SemanticRouter | None = None,
-        semantic_model: ChatQwen | None = None,
+        llm_client: Any | None = None,
         aiops_timeout_seconds: float = DEFAULT_AIOPS_TIMEOUT_SECONDS,
     ):
         self.semantic_router = semantic_router
-        self.semantic_model = semantic_model
+        self.llm_client = llm_client
         self.aiops_timeout_seconds = aiops_timeout_seconds
 
     @staticmethod
@@ -106,33 +114,51 @@ class RouterService:
                 result = await result
             return RouteDecision(route=result.route, reason=result.reason)
 
-        model = self.semantic_model or ChatQwen(
-            model=config.rag_model,
-            api_key=config.dashscope_api_key,
-            temperature=0,
-            streaming=False,
-        )
-        classifier = model.with_structured_output(SemanticRouteResult)
-        result = await classifier.ainvoke(
+        if self.llm_client is None:
+            self.llm_client = LLMClient(LLMClientConfig.from_settings(config))
+        llm_client = self.llm_client
+        response = await llm_client.complete(
             [
-                SystemMessage(
-                    content=(
-                        "你是智能运维助手的路由器，只能把用户请求分类为 rag 或 aiops。\n"
-                        "aiops: 故障、告警、服务挂了、下单转圈、响应变慢、错误率上升、"
-                        "日志异常、资源飙高、需要诊断或排障。\n"
-                        "rag: 查询知识库、文档说明、概念解释、步骤咨询、普通问答。\n"
-                        "示例: '服务挂了' -> aiops; '下单一直转圈' -> aiops; "
-                        "'怎么处理慢响应' -> rag; '解释一下 CPU 高的原因' -> rag。"
-                    )
-                ),
-                HumanMessage(content=message),
-            ]
+                ChatMessage(role="system", content=SEMANTIC_ROUTER_SYSTEM_PROMPT),
+                ChatMessage(role="user", content=message),
+            ],
+            temperature=0,
         )
+        result = self._parse_semantic_route_response(response.content)
         return RouteDecision(route=result.route, reason=f"llm_semantic_{result.route}")
+
+    @staticmethod
+    def _parse_semantic_route_response(content: str) -> SemanticRouteResult:
+        text = content.strip()
+        if text.startswith("```"):
+            text = text.strip("`").strip()
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
+
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start == -1 or end == -1 or start > end:
+                raise
+            payload = json.loads(text[start : end + 1])
+
+        return SemanticRouteResult.model_validate(payload)
 
     async def _resolve_route(self, message: str) -> RouteDecision:
         decision = self.route_message(message)
-        if decision.reason != "default_rag":
+        if decision.route == "clarify":
+            return decision
+
+        # 关键词路由可能误判：含 aiops 关键词的知识类问题（如“解释一下日志格式”）会被
+        # 硬路由到 aiops。当两类关键词同时命中（意图歧义）或无明确信号时，交给语义路由判别。
+        normalized = message.strip().lower()
+        has_aiops = any(keyword in normalized for keyword in self.AIOPS_KEYWORDS)
+        has_rag = any(keyword in normalized for keyword in self.RAG_KEYWORDS)
+        ambiguous = has_aiops and has_rag
+
+        if decision.reason != "default_rag" and not ambiguous:
             return decision
 
         try:

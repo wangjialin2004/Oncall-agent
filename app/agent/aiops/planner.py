@@ -1,21 +1,21 @@
 
 
+import json
 from textwrap import dedent
 from typing import Any
 
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_qwq import ChatQwen
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.agent.mcp_client import get_mcp_client_with_retry
 from app.config import config
+from app.core.llm_client import ChatMessage, LLMClient, LLMClientConfig
 from app.services.experience_memory_service import experience_memory_service
 from app.tools import DEFAULT_LOCAL_AGENT_TOOLS, retrieve_knowledge
 
 from .events import make_agent_event
 from .plan_utils import normalize_plan_steps
-from .state import PlanExecuteState
+from .state import OnCallState
 from .utils import format_tools_description
 
 
@@ -45,77 +45,161 @@ def format_experience_context(experiences: list[dict[str, Any]]) -> str:
         return ""
 
     sections = [
-        "## Relevant historical experience",
+        "## 相关历史经验",
         "",
-        "Historical experience is not current fact.",
-        "If similarity and confidence are high, first verify the historical root cause.",
-        "If verification fails, continue normal investigation.",
+        "历史经验仅供参考，不代表当前事实。",
+        "若相似度与置信度均较高，优先验证历史根因；验证失败则继续正常排查。",
         "",
     ]
     for item in experiences:
         sections.extend(
             [
                 f"[{item['experience_id']}]",
-                f"similarity: {item.get('similarity', 0):.2f}",
-                f"confidence: {item.get('confidence', 0):.2f}",
-                f"historical symptoms: {item['symptoms']}",
-                f"verified root cause: {item['root_cause']}",
-                f"effective resolution: {item['resolution']}",
-                f"key evidence: {item['evidence_summary']}",
-                f"source cases: {', '.join(item.get('source_case_ids', []))}",
+                f"相似度：{item.get('similarity', 0):.2f}",
+                f"置信度：{item.get('confidence', 0):.2f}",
+                f"历史症状：{item['symptoms']}",
+                f"已验证根因：{item['root_cause']}",
+                f"有效处置方案：{item['resolution']}",
+                f"关键证据：{item['evidence_summary']}",
+                f"来源案例：{', '.join(item.get('source_case_ids', []))}",
                 "",
             ]
         )
     return "\n".join(sections).strip()
 
 
-planner_prompt = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            dedent("""
-                作为一个专家级别的规划者，你需要将复杂的任务分解为可执行的步骤。
+def format_diagnosis_feedback(
+    diagnosis: dict[str, Any] | None,
+    evidence: list[dict[str, Any]] | None,
+) -> str:
+    """再规划时，把诊断反馈渲染成定向补证据的提示。
 
-                可用工具列表（用于制定计划时参考）：
+    首轮（无诊断结论）返回空串，规划行为不变；只有诊断判定证据不足并要求回到
+    Planner 时，才注入 next_focus / missing_evidence 与已收集证据摘要，引导只补缺口。
+    """
 
-                {tools_description}
+    if not diagnosis:
+        return ""
 
-                注意：你的职责是制定计划，实际的工具调用由 Executor 负责执行。
+    next_focus = str(diagnosis.get("next_focus") or "").strip()
+    missing_evidence = [str(item) for item in diagnosis.get("missing_evidence") or [] if item]
+    if not next_focus and not missing_evidence:
+        return ""
 
-                {experience_context}
-
-                对于给定的任务，请创建一个简单的、逐步的计划来完成它。计划应该：
-                - 将任务分解为逻辑上独立的步骤
-                - 每个步骤应该明确使用哪些工具(如果需要工具的话)来获取信息, 最好能同时提供工具执行所需要的参数
-                - 步骤之间应该有清晰的依赖关系
-                - 步骤描述要具体、可操作
-                - **如果有相关经验文档，请参考其中的方法和步骤制定计划**
-
-                示例输入："分析当前系统的性能问题"
-                示例输出（假设有对应工具）：
-                步骤1: 使用 get_metrics 工具收集系统的 CPU 和内存使用情况
-                步骤2: 使用 query_logs 工具检查最近的错误日志
-                步骤3: 使用 query_database 工具分析慢查询日志
-                步骤4: 综合以上信息生成性能分析报告
-            """).strip(),
-        ),
-        ("placeholder", "{messages}"),
+    lines = [
+        "## 上一轮诊断反馈（用于本轮定向补证据）",
+        "",
+        "上一轮已取证但诊断判定证据不足。请**只规划填补下列缺口的步骤**，",
+        "不要重复已完成的取证，避免生成与此前相同的步骤。",
+        "",
     ]
-)
+    if next_focus:
+        lines.append(f"- 下一步重点：{next_focus}")
+    if missing_evidence:
+        lines.append("- 缺失证据：")
+        lines.extend(f"  - {item}" for item in missing_evidence)
+
+    collected = [str(item.get("summary") or "").strip() for item in evidence or []]
+    collected = [item for item in collected if item]
+    if collected:
+        lines.append("- 已收集证据摘要（不要重复获取）：")
+        lines.extend(f"  - {item}" for item in collected[:8])
+
+    return "\n".join(lines).strip()
 
 
-async def planner(state: PlanExecuteState) -> dict[str, Any]:
+def _parse_plan_response(content: str) -> Plan:
+    text = content.strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or start > end:
+            raise
+        payload = json.loads(text[start : end + 1])
+
+    return Plan.model_validate(payload)
+
+
+def _build_planner_system_prompt(
+    tools_description: str,
+    experience_context: str,
+    diagnosis_feedback: str,
+) -> str:
+    return dedent(f"""
+        你是经验丰富的 OnCall 规划智能体。请将故障拆解为有序、可执行的排查步骤。
+
+        可用工具：
+        {tools_description}
+
+        {experience_context}
+
+        {diagnosis_feedback}
+
+        只返回如下格式的紧凑 JSON，不要包含其他内容：
+        {{"steps":["第一步","第二步"]}}
+
+        每个步骤应具体、有序，并在适当时指明可用工具或期望证据。不要执行工具，只生成计划。
+    """).strip()
+
+
+async def generate_plan_steps(
+    *,
+    input_text: str,
+    tools_description: str,
+    experience_context: str,
+    diagnosis_feedback: str,
+    llm_client: Any | None = None,
+) -> list[str]:
+    owns_client = llm_client is None
+    client = llm_client or LLMClient(LLMClientConfig.from_settings(config))
+    try:
+        response = await client.complete(
+            [
+                ChatMessage(
+                    role="system",
+                    content=_build_planner_system_prompt(
+                        tools_description,
+                        experience_context,
+                        diagnosis_feedback,
+                    ),
+                ),
+                ChatMessage(role="user", content=input_text),
+            ],
+            temperature=0,
+        )
+    finally:
+        if owns_client:
+            await client.aclose()
+    return _parse_plan_response(response.content).steps
+
+
+async def planner(state: OnCallState) -> dict[str, Any]:
     """
     规划节点：根据用户输入生成执行计划
 
     流程：
     1. 先查询内部文档，获取相关经验和最佳实践
-    2. 基于经验文档和可用工具制定执行计划
+    2. 若为再规划（诊断判定证据不足后回到本节点），消费诊断反馈做定向补证据
+    3. 基于经验文档、诊断反馈和可用工具制定执行计划
     """
     logger.info("=== Planner：制定执行计划 ===")
 
     input_text = state.get("input", "")
     logger.info(f"用户输入: {input_text}")
+
+    # 再规划时消费上一轮诊断反馈（首轮为空，行为不变）
+    diagnosis_feedback = format_diagnosis_feedback(
+        state.get("diagnosis"), state.get("evidence")
+    )
+    if diagnosis_feedback:
+        logger.info(f"再规划：消费诊断反馈（iteration={state.get('iteration', 0)}）")
 
     try:
         # 步骤1: 查询内部文档获取相关经验
@@ -168,28 +252,13 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
                 context_blocks.append(experience_context)
             experience_context = "\n\n---\n\n".join(context_blocks)
 
-        # 步骤4: 创建 LLM 并生成计划
-        llm = ChatQwen(
-            model=config.rag_model,
-            api_key=config.dashscope_api_key,
-            temperature=0
+        # 步骤4: 调用 LLM 生成计划
+        plan_steps = await generate_plan_steps(
+            input_text=input_text,
+            tools_description=tools_description,
+            experience_context=experience_context,
+            diagnosis_feedback=diagnosis_feedback,
         )
-
-        planner_chain = planner_prompt | llm.with_structured_output(Plan)
-
-        # 调用 LLM 生成计划
-        plan_result = await planner_chain.ainvoke({
-            "messages": [("user", input_text)],
-            "tools_description": tools_description,
-            "experience_context": experience_context
-        })
-
-        # 提取步骤列表
-        if isinstance(plan_result, Plan):
-            plan_steps = plan_result.steps
-        else:
-            # 如果返回的是字典，提取 steps 字段
-            plan_steps = plan_result.get("steps", [])  # type: ignore
 
         logger.info(f"计划已生成，共 {len(plan_steps)} 个步骤")
         for i, step in enumerate(plan_steps, 1):
@@ -211,19 +280,19 @@ async def planner(state: PlanExecuteState) -> dict[str, Any]:
         fallback_steps = normalize_plan_steps(
             [
                 {
-                    "description": "Collect current metrics for the affected service or system.",
+                    "description": "采集受影响服务或系统的当前指标。",
                     "tool_category": "monitor",
-                    "expected_evidence": "CPU, memory, latency, error-rate, or disk anomaly summary.",
+                    "expected_evidence": "CPU、内存、延迟、错误率或磁盘异常摘要。",
                 },
                 {
-                    "description": "Search recent application logs for errors related to the incident.",
+                    "description": "检索与故障相关的近期应用日志中的错误信息。",
                     "tool_category": "logs",
-                    "expected_evidence": "Error messages, exception stack traces, or timeout records.",
+                    "expected_evidence": "错误消息、异常堆栈或超时记录。",
                 },
                 {
-                    "description": "Retrieve relevant runbook knowledge for the detected incident type.",
+                    "description": "获取与当前故障类型相关的 Runbook 知识。",
                     "tool_category": "knowledge",
-                    "expected_evidence": "Known causes and recommended handling steps.",
+                    "expected_evidence": "已知原因及推荐处置步骤。",
                 },
             ]
         )

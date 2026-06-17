@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_qwq import ChatQwen
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.config import config
+from app.core.llm_client import ChatMessage, LLMClient, LLMClientConfig
 
 from .events import make_decision_event
 
@@ -40,32 +40,59 @@ def route_after_diagnosis(state: dict[str, Any]) -> str:
     return "planner"
 
 
-async def generate_diagnosis(state: dict[str, Any]) -> dict[str, Any]:
-    model = ChatQwen(
-        model=config.rag_model,
-        api_key=config.dashscope_api_key,
-        temperature=0,
-        streaming=False,
-    )
-    classifier = model.with_structured_output(DiagnosisResult)
-    result = await classifier.ainvoke(
-        [
-            SystemMessage(
-                content=(
-                    "你是 OnCall 诊断智能体。判断当前证据是否充分。"
-                    "缺少关键证据时返回 evidence_insufficient。"
-                    "只有证据支持结论时才返回 root_cause_ready。"
-                    "root_cause_candidates、missing_evidence 和 next_focus 必须使用中文。"
-                )
-            ),
-            HumanMessage(content=f"Incident: {state.get('incident', {})}"),
-            HumanMessage(content=f"Evidence: {state.get('evidence', [])}"),
-            HumanMessage(content=f"Past steps: {state.get('past_steps', [])}"),
-        ]
-    )
-    if isinstance(result, DiagnosisResult):
-        return result.model_dump()
-    return DiagnosisResult.model_validate(result).model_dump()
+def _parse_diagnosis_response(content: str) -> DiagnosisResult:
+    text = content.strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or start > end:
+            raise
+        payload = json.loads(text[start : end + 1])
+
+    return DiagnosisResult.model_validate(payload)
+
+
+async def generate_diagnosis(
+    state: dict[str, Any],
+    llm_client: Any | None = None,
+) -> dict[str, Any]:
+    owns_client = llm_client is None
+    client = llm_client or LLMClient(LLMClientConfig.from_settings(config))
+    try:
+        response = await client.complete(
+            [
+                ChatMessage(
+                    role="system",
+                    content=(
+                        "你是 OnCall 诊断智能体。判断当前证据是否充分。"
+                        "缺少关键证据时返回 evidence_insufficient。"
+                        "只有证据支持结论时才返回 root_cause_ready。"
+                        "root_cause_candidates、missing_evidence 和 next_focus 必须使用中文。"
+                        "Return only JSON."
+                    ),
+                ),
+                ChatMessage(
+                    role="user",
+                    content=(
+                        f"Incident: {state.get('incident', {})}\n"
+                        f"Evidence: {state.get('evidence', [])}\n"
+                        f"Past steps: {state.get('past_steps', [])}"
+                    ),
+                ),
+            ],
+            temperature=0,
+        )
+    finally:
+        if owns_client:
+            await client.aclose()
+    return _parse_diagnosis_response(response.content).model_dump()
 
 
 async def diagnosis(state: dict[str, Any]) -> dict[str, Any]:

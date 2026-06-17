@@ -1,33 +1,78 @@
 """
 Executor 节点：执行单个步骤
-基于 LangGraph 官方教程实现
+使用 LLMClient 实现，不依赖特定 LLM 提供商
 """
 
+import json
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_qwq import ChatQwen
-from langgraph.prebuilt import ToolNode
 from loguru import logger
 
 from app.agent.mcp_client import get_mcp_client_with_retry
 from app.config import config
+from app.core.llm_client import ChatMessage, LLMClient, LLMClientConfig, ToolCall
+from app.core.tool_calling import execute_tool_calls, tool_result_messages, tool_to_definition
 from app.services.diagnosis_memory_service import diagnosis_memory_service
 from app.tools import DEFAULT_LOCAL_AGENT_TOOLS
 
-from .evidence import append_evidence_summary, build_persistent_tool_evidence, build_tool_evidence
+from .evidence import append_evidence_summary
 from .events import make_tool_event
 from .plan_utils import plan_step_text, pop_next_plan_step
-from .state import PlanExecuteState
+from .state import OnCallState
+
+_EXECUTOR_SYSTEM_PROMPT = """你是一个能力强大的助手，负责执行具体的任务步骤。
+
+你可以使用各种工具来完成任务。对于每个步骤：
+1. 理解步骤的目标
+2. 选择合适的工具，如果已经指定了工具，则使用指定的工具
+3. 调用工具获取信息
+4. 返回执行结果
+
+注意：
+- 如果工具调用失败，请说明失败原因
+- 不要编造数据，只返回实际获取的信息
+- 执行结果要清晰、准确
+- 专注于当前步骤，不要考虑其他任务"""
 
 
-def format_executor_result(result: str, tool_messages: list | None = None) -> str:
-    """给步骤执行结果追加工具证据摘要。"""
+def route_after_executor(state: dict[str, Any]) -> str:
+    """计划仍有剩余步骤则回到 Executor 继续取证，否则进入诊断。"""
+    return "executor" if state.get("plan") else "diagnosis"
 
-    if not tool_messages:
-        return result
-    evidence_items = build_tool_evidence(tool_messages)
-    return append_evidence_summary(result, evidence_items)
+
+def build_step_task_message(state: dict[str, Any], step: Any) -> str:
+    """构造执行步骤的提示，注入 incident、步骤元数据与已收集证据。"""
+    lines = [f"请执行以下任务: {plan_step_text(step)}"]
+
+    incident = state.get("incident") or {}
+    if isinstance(incident, dict) and incident:
+        service = incident.get("service_name") or "未知"
+        incident_type = incident.get("incident_type") or "未知"
+        lines.append(f"\n## 故障背景\n- 受影响服务：{service}\n- 故障类型：{incident_type}")
+        symptoms = [str(item) for item in incident.get("symptoms") or [] if item]
+        if symptoms:
+            lines.append("- 症状：" + "；".join(symptoms[:5]))
+
+    if isinstance(step, dict):
+        tool_category = str(step.get("tool_category") or "").strip()
+        expected_evidence = str(step.get("expected_evidence") or "").strip()
+        if tool_category and tool_category != "unknown":
+            lines.append(f"\n## 建议工具类别\n{tool_category}")
+        if expected_evidence:
+            lines.append(f"\n## 期望产出证据\n{expected_evidence}")
+
+    collected = [
+        str(item.get("summary") or "").strip()
+        for item in state.get("evidence") or []
+        if isinstance(item, dict) and item.get("summary")
+    ]
+    if collected:
+        lines.append(
+            "\n## 已收集证据（避免重复获取）\n"
+            + "\n".join(f"- {item}" for item in collected[:8])
+        )
+
+    return "\n".join(lines)
 
 
 def _step_id(step: Any) -> str:
@@ -133,22 +178,77 @@ def build_failed_step_update(
     }
 
 
-async def executor(state: PlanExecuteState) -> dict[str, Any]:
-    """
-    执行节点：执行计划中的下一个步骤
+def _tool_call_payload(tool_call: ToolCall) -> dict[str, Any]:
+    return {
+        "id": tool_call.id,
+        "type": "function",
+        "function": {
+            "name": tool_call.name,
+            "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
+        },
+    }
 
-    使用 LangGraph 的 ToolNode 自动处理工具调用
-    """
+
+async def execute_step_with_tools(
+    *,
+    state: dict[str, Any],
+    task: Any,
+    tools: list[Any],
+    llm_client: Any,
+) -> tuple[str, list[dict[str, Any]]]:
+    messages: list[ChatMessage] = [
+        ChatMessage(role="system", content=_EXECUTOR_SYSTEM_PROMPT),
+        ChatMessage(role="user", content=build_step_task_message(state, task)),
+    ]
+
+    response = await llm_client.complete(
+        messages,
+        tools=[tool_to_definition(tool) for tool in tools],
+        tool_choice="auto",
+        temperature=0,
+    )
+    logger.info(f"LLM 响应，工具调用数：{len(response.tool_calls)}")
+    if not response.tool_calls:
+        return response.content, []
+
+    messages.append(
+        ChatMessage(
+            role="assistant",
+            content=response.content,
+            tool_calls=[_tool_call_payload(tool_call) for tool_call in response.tool_calls],
+        )
+    )
+
+    tool_results = await execute_tool_calls(response.tool_calls, tools)
+    messages.extend(tool_result_messages(tool_results))
+
+    final_response = await llm_client.complete(messages, temperature=0)
+    arguments_by_id = {tool_call.id: tool_call.arguments for tool_call in response.tool_calls}
+    evidence_records = [
+        {
+            "tool_name": result.tool_name,
+            "tool_call_id": result.call_id,
+            "evidence_id": result.call_id,
+            "source": "tool_call",
+            "success": result.success,
+            "summary": result.content[:300],
+            "arguments": arguments_by_id.get(result.call_id, {}),
+            "raw_result": result.content,
+        }
+        for result in tool_results
+    ]
+    return final_response.content, evidence_records
+
+
+async def executor(state: OnCallState) -> dict[str, Any]:
+    """执行节点：执行计划中的下一个步骤。"""
     logger.info("=== Executor：执行步骤 ===")
 
     plan = state.get("plan", [])
-
-    # 如果计划为空，不执行
     if not plan:
         logger.info("计划为空，跳过执行")
         return {}
 
-    # 取出第一个步骤
     task, remaining_plan = pop_next_plan_step(plan)
     if task is None:
         logger.info("Plan is empty; executor skipped")
@@ -156,83 +256,36 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
     logger.info(f"当前任务: {task}")
 
     try:
-        evidence_records: list[dict[str, Any]] = []
-        # 获取本地工具
+        # 收集本地工具和 MCP 工具
         local_tools = list(DEFAULT_LOCAL_AGENT_TOOLS)
-
-        # 获取 MCP 工具
         mcp_client = await get_mcp_client_with_retry()
         mcp_tools = await mcp_client.get_tools()
+        all_tools = local_tools + mcp_tools
         logger.info(f"可用工具数量: 本地 {len(local_tools)} + MCP {len(mcp_tools)}")
 
-        # 合并所有工具
-        all_tools = local_tools + mcp_tools
-
-        # 创建 LLM（绑定工具）
-        llm = ChatQwen(
-            model=config.rag_model,
-            api_key=config.dashscope_api_key,
-            temperature=0
-        )
-        llm_with_tools = llm.bind_tools(all_tools)
-
-        # 创建工具节点（自动执行工具调用）
-        tool_node = ToolNode(all_tools)
-
-        # 构建消息（只包含当前步骤，避免原始任务干扰）
-        messages = [
-            SystemMessage(content="""你是一个能力强大的助手，负责执行具体的任务步骤。
-
-你可以使用各种工具来完成任务。对于每个步骤：
-1. 理解步骤的目标
-2. 选择合适的工具，如果已经指定了工具，则使用指定的工具
-3. 调用工具获取信息
-4. 返回执行结果
-
-注意：
-- 如果工具调用失败，请说明失败原因
-- 不要编造数据，只返回实际获取的信息
-- 执行结果要清晰、准确
-- 专注于当前步骤，不要考虑其他任务"""),
-            HumanMessage(content=f"请执行以下任务: {task}")
-        ]
-
-        # 第一步：LLM 决定是否调用工具
-        llm_response = await llm_with_tools.ainvoke(messages)
-        logger.info(f"LLM 响应类型: {type(llm_response)}")
-
-        # 第二步：如果有工具调用，执行工具
-        if hasattr(llm_response, "tool_calls") and llm_response.tool_calls:
-            logger.info(f"检测到 {len(llm_response.tool_calls)} 个工具调用")
-
-            # 使用 ToolNode 自动执行工具
-            messages.append(llm_response)
-            tool_messages = await tool_node.ainvoke({"messages": messages})
-            executed_tool_messages = tool_messages.get("messages", [])
-            evidence_records = build_persistent_tool_evidence(
-                executed_tool_messages,
-                llm_response.tool_calls,
+        client = LLMClient(LLMClientConfig.from_settings(config))
+        try:
+            result, evidence_records = await execute_step_with_tools(
+                state=state,
+                task=task,
+                tools=all_tools,
+                llm_client=client,
             )
-            if state.get("case_id") and evidence_records:
-                diagnosis_memory_service.record_tool_evidence(
-                    case_id=state["case_id"],
-                    session_id=state.get("session_id", "default"),
-                    evidence_records=evidence_records,
-                )
+        finally:
+            await client.aclose()
 
-            # 第三步：将工具结果返回给 LLM 生成最终答案
-            messages.extend(executed_tool_messages)
-            final_response = await llm_with_tools.ainvoke(messages)
-            result = final_response.content if hasattr(final_response, 'content') else str(final_response)
-            result = format_executor_result(result, executed_tool_messages)
-        else:
-            # 没有工具调用，直接使用 LLM 的输出
-            logger.info("LLM 未调用工具，直接返回结果")
-            result = llm_response.content if hasattr(llm_response, 'content') else str(llm_response)
-
+        # 将工具证据摘要追加到步骤结果
+        result = append_evidence_summary(result, evidence_records)
         logger.info(f"步骤执行完成，结果长度: {len(result)}")
 
-        # 返回更新：移除已执行的步骤，记录证据与时间线事件
+        # 持久化证据记录
+        if state.get("case_id") and evidence_records:
+            diagnosis_memory_service.record_tool_evidence(
+                case_id=state["case_id"],
+                session_id=state.get("session_id", "default"),
+                evidence_records=evidence_records,
+            )
+
         return build_success_step_update(
             state=state,
             step=task,

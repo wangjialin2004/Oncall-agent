@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import re
+import json
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_qwq import ChatQwen
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.config import config
+from app.core.llm_client import ChatMessage, LLMClient, LLMClientConfig
 
 from .events import make_agent_event
 
@@ -70,29 +70,47 @@ def build_minimal_incident(input_text: str) -> dict[str, Any]:
     }
 
 
-async def generate_incident(input_text: str) -> dict[str, Any]:
-    model = ChatQwen(
-        model=config.rag_model,
-        api_key=config.dashscope_api_key,
-        temperature=0,
-        streaming=False,
-    )
-    classifier = model.with_structured_output(Incident)
-    result = await classifier.ainvoke(
-        [
-            SystemMessage(
-                content=(
-                    "You are an OnCall triage agent. Convert the user incident into "
-                    "structured JSON. Use unknown fields only when the user did not provide them. "
-                    "Set evidence_needs from metrics, logs, knowledge."
-                )
-            ),
-            HumanMessage(content=input_text),
-        ]
-    )
-    if isinstance(result, Incident):
-        return result.model_dump()
-    return Incident.model_validate(result).model_dump()
+def _parse_incident_response(content: str) -> Incident:
+    text = content.strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or start > end:
+            raise
+        payload = json.loads(text[start : end + 1])
+
+    return Incident.model_validate(payload)
+
+
+async def generate_incident(input_text: str, llm_client: Any | None = None) -> dict[str, Any]:
+    owns_client = llm_client is None
+    client = llm_client or LLMClient(LLMClientConfig.from_settings(config))
+    try:
+        response = await client.complete(
+            [
+                ChatMessage(
+                    role="system",
+                    content=(
+                        "你是 OnCall 告警分诊智能体。将用户描述的故障转换为结构化 JSON。"
+                        "仅在用户未提供时使用 unknown 填充字段。"
+                        "evidence_needs 从 metrics、logs、knowledge 中选取。只返回 JSON，不要其他内容。"
+                    ),
+                ),
+                ChatMessage(role="user", content=input_text),
+            ],
+            temperature=0,
+        )
+    finally:
+        if owns_client:
+            await client.aclose()
+    return _parse_incident_response(response.content).model_dump()
 
 
 async def triage(state: dict[str, Any]) -> dict[str, Any]:

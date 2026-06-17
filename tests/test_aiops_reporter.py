@@ -2,6 +2,7 @@ import sys
 
 import pytest
 
+from app.core.llm_client import LLMResponse
 from app.agent.aiops.reporter import build_fallback_report
 from app.agent.aiops.reporter import reporter as reporter_node
 
@@ -42,6 +43,35 @@ def test_build_fallback_report_includes_required_sections():
     assert "P95 latency rose above 3s" in report
     assert "DB saturation" in report
     assert "## 建议操作" in report
+
+
+@pytest.mark.asyncio
+async def test_generate_report_uses_custom_llm_client_markdown():
+    class FakeLLMClient:
+        def __init__(self):
+            self.messages = None
+            self.temperature = None
+
+        async def complete(self, messages, *, temperature):
+            self.messages = messages
+            self.temperature = temperature
+            return LLMResponse(content="# Custom Report", raw={})
+
+    llm_client = FakeLLMClient()
+
+    report = await reporter_module.generate_report(
+        {
+            "incident": {"service_name": "checkout-api"},
+            "evidence": [{"summary": "latency high"}],
+            "diagnosis": {"status": "root_cause_ready"},
+        },
+        llm_client=llm_client,
+    )
+
+    assert report == "# Custom Report"
+    assert llm_client.temperature == 0
+    assert llm_client.messages[0].role == "system"
+    assert "故障信息：" in llm_client.messages[1].content
 
 
 @pytest.mark.asyncio

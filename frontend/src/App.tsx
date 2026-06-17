@@ -1,9 +1,11 @@
 import { useMemo, useRef, useState } from "react";
 
+import { clearAuth, loadAuth, logout } from "./api/authApi";
 import { streamAgent } from "./api/agentStream";
 import { AgentProcessPanel } from "./components/AgentProcessPanel";
 import { AppShell } from "./components/AppShell";
 import { ChatWorkspace } from "./components/ChatWorkspace";
+import { LoginPage } from "./components/LoginPage";
 import { Sidebar } from "./components/Sidebar";
 import type {
   AgentMode,
@@ -29,12 +31,32 @@ function createId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+type AuthState = { token: string; username: string } | null;
+
 export default function App() {
+  const saved = loadAuth();
+  const [auth, setAuth] = useState<AuthState>(saved);
+
   const [mode, setMode] = useState<AgentMode>("auto");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [run, setRun] = useState<AgentRun>(initialRun);
   const abortRef = useRef<AbortController | null>(null);
   const sessionId = useMemo(() => createId("session"), []);
+
+  function handleLogin(token: string, username: string) {
+    setAuth({ token, username });
+  }
+
+  async function handleLogout() {
+    abortRef.current?.abort();
+    if (auth?.token) {
+      await logout(auth.token);
+    }
+    clearAuth();
+    setAuth(null);
+    setMessages([]);
+    setRun({ ...initialRun, sessionId });
+  }
 
   function applyEvent(event: AgentStreamEvent) {
     if (event.type === "complete") {
@@ -79,9 +101,7 @@ export default function App() {
           caseId: event.case_id ?? current.caseId,
         };
       }
-      return {
-        ...current,
-      };
+      return { ...current };
     });
   }
 
@@ -134,9 +154,19 @@ export default function App() {
     setRun((current) => ({ ...current, status: "cancelled" }));
   }
 
+  if (!auth) {
+    return <LoginPage onLogin={handleLogin} />;
+  }
+
   return (
     <AppShell
-      sidebar={<Sidebar onNewSession={handleNewSession} />}
+      sidebar={
+        <Sidebar
+          username={auth.username}
+          onNewSession={handleNewSession}
+          onLogout={handleLogout}
+        />
+      }
       main={
         <ChatWorkspace
           mode={mode}

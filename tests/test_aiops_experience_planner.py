@@ -1,5 +1,9 @@
 from importlib import import_module
 
+import pytest
+
+from app.core.llm_client import LLMResponse
+
 planner_module = import_module("app.agent.aiops.planner")
 
 
@@ -41,7 +45,7 @@ def test_format_experience_context_requires_verification_first():
 
     assert "exp-1" in context
     assert "Milvus connection pool exhausted" in context
-    assert "first verify the historical root cause" in context
+    assert "优先验证历史根因" in context
 
 
 def test_load_experience_context_searches_by_project(monkeypatch):
@@ -56,3 +60,35 @@ def test_load_experience_context_searches_by_project(monkeypatch):
         {"query": "diagnose API slow", "project_id": "super_biz_agent", "top_k": 3}
     ]
     assert "exp-1" in context
+
+
+@pytest.mark.asyncio
+async def test_generate_plan_steps_uses_custom_llm_client_json():
+    class FakeLLMClient:
+        def __init__(self):
+            self.messages = None
+            self.temperature = None
+
+        async def complete(self, messages, *, temperature):
+            self.messages = messages
+            self.temperature = temperature
+            return LLMResponse(
+                content='{"steps":["Collect service metrics","Search recent error logs"]}',
+                raw={},
+            )
+
+    llm_client = FakeLLMClient()
+
+    steps = await planner_module.generate_plan_steps(
+        input_text="checkout-api is slow",
+        tools_description="query_metrics: fetch metrics\nquery_logs: fetch logs",
+        experience_context="Historical case: latency caused by DB saturation",
+        diagnosis_feedback="",
+        llm_client=llm_client,
+    )
+
+    assert steps == ["Collect service metrics", "Search recent error logs"]
+    assert llm_client.temperature == 0
+    assert llm_client.messages[0].role == "system"
+    assert "query_metrics" in llm_client.messages[0].content
+    assert llm_client.messages[1].content == "checkout-api is slow"

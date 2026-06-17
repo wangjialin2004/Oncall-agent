@@ -8,12 +8,32 @@ export type StreamAgentArgs = {
   onEvent: (event: AgentStreamEvent) => void;
 };
 
+const SESSION_OWNER_STORAGE_KEY = "sessionOwnerToken";
+
+function getSessionOwnerToken(): string {
+  const existing = localStorage.getItem(SESSION_OWNER_STORAGE_KEY);
+  if (existing) {
+    return existing;
+  }
+
+  const token = `owner-${crypto.randomUUID()}`;
+  localStorage.setItem(SESSION_OWNER_STORAGE_KEY, token);
+  return token;
+}
+
 export async function streamAgent(args: StreamAgentArgs): Promise<void> {
+  const authToken = localStorage.getItem("authToken");
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-Session-Owner": getSessionOwnerToken(),
+  };
+  if (authToken) {
+    headers["Authorization"] = `Bearer ${authToken}`;
+  }
+
   const response = await fetch("/api/assistant", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers,
     body: JSON.stringify({
       Id: args.sessionId,
       Question: args.message,

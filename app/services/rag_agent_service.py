@@ -1,20 +1,15 @@
-"""RAG Agent 服务 - 基于 LangGraph 的智能代理
-
-使用 langchain_qwq 的 ChatQwen 原生集成，
-支持真正的流式输出和更好的模型适配。
-"""
+"""RAG Agent service backed by the application-owned LLM client."""
 
 from collections.abc import AsyncGenerator, Sequence
+import json
 from typing import Annotated, Any
 
-from langchain.agents import create_agent
 from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     RemoveMessage,
     SystemMessage,
 )
-from langchain_qwq import ChatQwen
 from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from loguru import logger
 from typing_extensions import TypedDict
@@ -26,6 +21,8 @@ from app.agent.mcp_client import (
     suggest_mcp_transport,
 )
 from app.config import config
+from app.core.llm_client import ChatMessage, LLMClient, LLMClientConfig, ToolCall
+from app.core.tool_calling import execute_tool_calls, tool_result_messages, tool_to_definition
 from app.services.checkpoint_service import (
     aclose_checkpointer,
     close_checkpointer,
@@ -35,10 +32,16 @@ from app.services.checkpoint_service import (
 )
 from app.tools import DEFAULT_LOCAL_AGENT_TOOLS
 
-# 阿里千问大模型和langchain集成参考： https://docs.langchain.com/oss/python/integrations/chat/qwen
-# 注意：需要配置环境变量 DASHSCOPE_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1 否则默认访问的是新加坡站点
-# 同时也需要配置环境变量 DASHSCOPE_API_KEY=your_api_key
 
+def _tool_call_payload(tool_call: ToolCall) -> dict[str, Any]:
+    return {
+        "id": tool_call.id,
+        "type": "function",
+        "function": {
+            "name": tool_call.name,
+            "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
+        },
+    }
 
 class AgentState(TypedDict):
     """Agent 状态"""
@@ -86,13 +89,14 @@ def trim_messages_middleware(state: AgentState) -> dict[str, Any] | None:
 
 
 class RagAgentService:
-    """RAG Agent 服务 - 使用 LangGraph + ChatQwen 原生集成"""
+    """RAG Agent service backed by the application LLM client."""
 
     def __init__(
         self,
         streaming: bool = True,
         checkpoint_db_path: str | None = None,
         checkpointer: Any | None = None,
+        llm_client: Any | None = None,
     ):
         """初始化 RAG Agent 服务
 
@@ -104,12 +108,8 @@ class RagAgentService:
         self.system_prompt = self._build_system_prompt()
 
 
-        self.model = ChatQwen(
-            model=self.model_name,
-            api_key=config.dashscope_api_key,
-            temperature=0.7,
-            streaming=streaming,
-        )
+        self.llm_client = llm_client
+        self.model = None
 
         # 定义基础工具（与 AIOps Planner/Executor 使用同一套默认本地工具）
         self.tools = list(DEFAULT_LOCAL_AGENT_TOOLS)
@@ -125,7 +125,9 @@ class RagAgentService:
         self.agent = None
         self._agent_initialized = False
 
-        logger.info(f"RAG Agent 服务初始化完成 (ChatQwen), model={self.model_name}, streaming={streaming}")
+        logger.info(
+            f"RAG Agent service initialized, model={self.model_name}, streaming={streaming}"
+        )
 
     @staticmethod
     def _thread_id(session_id: str) -> str:
@@ -158,16 +160,9 @@ class RagAgentService:
             self.mcp_tools = mcp_tools
             logger.info(f"成功加载 {len(mcp_tools)} 个 MCP 工具")
 
-        all_tools = self.tools + self.mcp_tools
-
-        self.agent = create_agent(
-            self.model,
-            tools=all_tools,
-            checkpointer=self.checkpointer,
-        )
-
         self._agent_initialized = True
 
+        all_tools = self.tools + self.mcp_tools
 
         if all_tools:
             tool_names = [tool.name if hasattr(tool, "name") else str(tool) for tool in all_tools]
@@ -203,6 +198,37 @@ class RagAgentService:
             请根据用户的问题，灵活使用可用工具，提供高质量的帮助。
         """).strip()
 
+    async def _complete_with_tools(self, question: str) -> str:
+        if self.llm_client is None:
+            self.llm_client = LLMClient(LLMClientConfig.from_settings(config))
+        llm_client = self.llm_client
+        messages = [
+            ChatMessage(role="system", content=self.system_prompt),
+            ChatMessage(role="user", content=question),
+        ]
+        tools = self.tools + self.mcp_tools
+
+        response = await llm_client.complete(
+            messages,
+            temperature=0.7,
+            tools=[tool_to_definition(tool) for tool in tools],
+            tool_choice="auto" if tools else None,
+        )
+        if not response.tool_calls:
+            return response.content
+
+        messages.append(
+            ChatMessage(
+                role="assistant",
+                content=response.content,
+                tool_calls=[_tool_call_payload(tool_call) for tool_call in response.tool_calls],
+            )
+        )
+        tool_results = await execute_tool_calls(response.tool_calls, tools)
+        messages.extend(tool_result_messages(tool_results))
+        final_response = await llm_client.complete(messages, temperature=0.7)
+        return final_response.content
+
     async def query(
         self,
         question: str,
@@ -219,47 +245,11 @@ class RagAgentService:
             str: 完整答案
         """
         try:
-            await self._initialize_agent()
-
             logger.info(f"[会话 {session_id}] RAG Agent 收到查询（非流式）: {question}")
 
-            # 构建消息列表（系统提示 + 用户问题）
-            messages = [
-                SystemMessage(content=self.system_prompt),
-                HumanMessage(content=question)
-            ]
-
-            # 构建 Agent 输入
-            agent_input = {"messages": messages}
-
-            # 配置 thread_id（用于会话持久化）
-            config_dict = {
-                "configurable": {
-                    "thread_id": self._thread_id(session_id)
-                }
-            }
-
-            result = await self.agent.ainvoke(
-                input=agent_input,
-                config=config_dict,
-            )
-
-            # 提取最终答案
-            messages_result = result.get("messages", [])
-            if messages_result:
-                last_message = messages_result[-1]
-                answer = last_message.content if hasattr(last_message, 'content') else str(last_message)
-
-                # 记录工具调用
-                if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                    tool_names = [tc.get("name", "unknown") for tc in last_message.tool_calls]
-                    logger.info(f"[会话 {session_id}] Agent 调用了工具: {tool_names}")
-
-                logger.info(f"[会话 {session_id}] RAG Agent 查询完成（非流式）")
-                return answer
-
-            logger.warning(f"[会话 {session_id}] Agent 返回结果为空")
-            return ""
+            answer = await self._complete_with_tools(question)
+            logger.info(f"[会话 {session_id}] RAG Agent 查询完成（非流式）")
+            return answer
 
         except Exception as e:
             logger.error(
@@ -286,47 +276,15 @@ class RagAgentService:
                 - data: 具体内容
         """
         try:
-            await self._initialize_agent()
-
             logger.info(f"[会话 {session_id}] RAG Agent 收到查询（流式）: {question}")
 
-            # 构建消息列表（系统提示 + 用户问题）
-            messages = [
-                SystemMessage(content=self.system_prompt),
-                HumanMessage(content=question)
-            ]
-
-            # 构建 Agent 输入
-            agent_input = {"messages": messages}
-
-            # 配置 thread_id（用于会话持久化）
-            config_dict = {
-                "configurable": {
-                    "thread_id": self._thread_id(session_id)
+            answer = await self._complete_with_tools(question)
+            if answer:
+                yield {
+                    "type": "content",
+                    "data": answer,
+                    "node": "llm",
                 }
-            }
-
-            async for token, metadata in self.agent.astream(
-                input=agent_input,
-                config=config_dict,
-                stream_mode="messages",
-            ):
-                node_name = metadata.get('langgraph_node', 'unknown') if isinstance(metadata, dict) else 'unknown'
-                message_type = type(token).__name__
-
-                if message_type in ("AIMessage", "AIMessageChunk"):
-                    content_blocks = getattr(token, 'content_blocks', None)
-
-                    if content_blocks and isinstance(content_blocks, list):
-                        for block in content_blocks:
-                            if isinstance(block, dict) and block.get('type') == 'text':
-                                text_content = block.get('text', '')
-                                if text_content:
-                                    yield {
-                                        "type": "content",
-                                        "data": text_content,
-                                        "node": node_name
-                                    }
 
             logger.info(f"[会话 {session_id}] RAG Agent 查询完成（流式）")
             yield {"type": "complete"}

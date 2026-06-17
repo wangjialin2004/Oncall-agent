@@ -1,24 +1,12 @@
-"""LLM 工厂类
-
-使用 LangChain ChatOpenAI 通过 OpenAI 兼容模式调用阿里云 DashScope
-这种方式便于后续切换到其他支持 OpenAI API 的模型提供商
-
-支持的模型提供商（只需修改 base_url 和 api_key）：
-- 阿里云 DashScope: https://dashscope.aliyuncs.com/compatible-mode/v1
-- OpenAI: https://api.openai.com/v1
-- Azure OpenAI: https://{resource}.openai.azure.com
-- 其他兼容 OpenAI API 的服务
-"""
-
-from langchain_openai import ChatOpenAI
+"""Factory for the provider-neutral LLM client."""
 
 from app.config import config
+from app.core.llm_client import LLMClient, LLMClientConfig
 
 
 class LLMFactory:
-    """LLM 工厂类 - 使用 OpenAI 兼容模式"""
+    """Create application-owned OpenAI-compatible LLM clients."""
 
-    # 阿里云 DashScope OpenAI 兼容模式 URL
     DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     @staticmethod
@@ -28,25 +16,22 @@ class LLMFactory:
         streaming: bool = True,
         base_url: str | None = None,
         api_key: str | None = None,
-    ) -> ChatOpenAI:
-        model = model or config.dashscope_model
-        base_url = base_url or LLMFactory.DASHSCOPE_BASE_URL
-        api_key = api_key or config.dashscope_api_key
+    ) -> LLMClient:
+        client_config = LLMClientConfig.from_settings(config)
+        if model is not None or base_url is not None or api_key is not None:
+            client_config = LLMClientConfig(
+                provider=client_config.provider,
+                base_url=base_url or client_config.base_url,
+                api_key=api_key or client_config.api_key,
+                model=model or client_config.model,
+                timeout=client_config.timeout,
+                default_headers=client_config.default_headers,
+            )
 
-        # 参考：https://help.aliyun.com/zh/model-studio/getting-started/models
-        extra_body = {}
-        extra_body["stream"] = streaming
+        # Kept for call-site compatibility. Temperature and streaming are set
+        # per request on LLMClient.complete().
+        _ = (temperature, streaming)
+        return LLMClient(client_config)
 
-        llm = ChatOpenAI(
-            model=model,
-            temperature=temperature,
-            streaming=streaming,
-            base_url=base_url,
-            api_key=api_key,
-            extra_body=extra_body if extra_body else None,
-        )
 
-        return llm
-
-# 全局 LLM 工厂实例
 llm_factory = LLMFactory()

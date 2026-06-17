@@ -1,70 +1,107 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { parseSseChunk, streamAgent } from "../../api/agentStream";
+import { streamAgent } from "../../api/agentStream";
 
-describe("parseSseChunk", () => {
-  it("parses multiple SSE message frames", () => {
-    const events = parseSseChunk(
-      'event: message\ndata: {"type":"route_selected","route":"rag","reason":"explicit_mode","mode":"rag"}\n\n' +
-        'event: message\ndata: {"type":"content","data":"hello"}\n\n',
+describe("streamAgent", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    localStorage.clear();
+  });
+
+  it("sends the session owner header required by the assistant API", async () => {
+    localStorage.setItem("sessionOwnerToken", "owner-a");
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          code: 200,
+          data: {
+            success: true,
+            route: "rag",
+            route_reason: "auto",
+            answer: "ok",
+            events: [],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
     );
+    vi.stubGlobal("fetch", fetchMock);
 
-    expect(events).toEqual([
-      { type: "route_selected", route: "rag", reason: "explicit_mode", mode: "rag" },
-      { type: "content", data: "hello" },
-    ]);
-  });
-
-  it("ignores empty frames", () => {
-    expect(parseSseChunk("\n\n")).toEqual([]);
-  });
-
-  it("parses CRLF-delimited SSE frames from EventSourceResponse", () => {
-    const events = parseSseChunk(
-      'event: message\r\ndata: {"type":"route_selected","route":"oncall","reason":"explicit_mode","mode":"oncall"}\r\n\r\n',
-    );
-
-    expect(events).toEqual([
-      { type: "route_selected", route: "oncall", reason: "explicit_mode", mode: "oncall" },
-    ]);
-  });
-
-  it("emits CRLF-delimited events while the stream is still open", async () => {
-    let controllerRef!: ReadableStreamDefaultController<Uint8Array>;
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controllerRef = controller;
-      },
+    await streamAgent({
+      sessionId: "s1",
+      message: "checkout-api slow",
+      mode: "auto",
+      onEvent: vi.fn(),
     });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/assistant",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "X-Session-Owner": "owner-a",
+        }),
+      }),
+    );
+  });
+
+  it("emits route and complete events from the assistant JSON response", async () => {
+    localStorage.setItem("sessionOwnerToken", "owner-a");
     const onEvent = vi.fn();
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response(stream, { status: 200 })),
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            code: 200,
+            data: {
+              success: true,
+              route: "aiops",
+              route_reason: "incident symptoms",
+              answer: "diagnosis report",
+              case_id: "case-1",
+              events: [
+                {
+                  type: "agent_event",
+                  agent: "triage",
+                  stage: "triage",
+                  status: "completed",
+                  summary: "structured incident",
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
     );
 
-    const promise = streamAgent({
+    await streamAgent({
       sessionId: "s1",
       message: "checkout-api slow",
-      mode: "oncall",
+      mode: "auto",
       onEvent,
     });
 
-    controllerRef.enqueue(
-      new TextEncoder().encode(
-        'event: message\r\ndata: {"type":"route_selected","route":"oncall","reason":"explicit_mode","mode":"oncall"}\r\n\r\n',
-      ),
-    );
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
     expect(onEvent).toHaveBeenCalledWith({
       type: "route_selected",
-      route: "oncall",
-      reason: "explicit_mode",
-      mode: "oncall",
+      route: "aiops",
+      reason: "incident symptoms",
+      mode: "auto",
     });
-
-    controllerRef.close();
-    await promise;
-    vi.unstubAllGlobals();
+    expect(onEvent).toHaveBeenCalledWith({
+      type: "complete",
+      route: "aiops",
+      answer: "diagnosis report",
+      case_id: "case-1",
+      events: [
+        {
+          type: "agent_event",
+          agent: "triage",
+          stage: "triage",
+          status: "completed",
+          summary: "structured incident",
+        },
+      ],
+    });
   });
 });

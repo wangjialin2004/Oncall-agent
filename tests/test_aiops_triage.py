@@ -2,6 +2,7 @@ import sys
 
 import pytest
 
+from app.core.llm_client import LLMResponse
 from app.agent.aiops.triage import build_minimal_incident
 from app.agent.aiops.triage import triage as triage_node
 
@@ -21,6 +22,42 @@ def test_build_minimal_incident_extracts_basic_slow_response_signal():
     assert "checkout-api 最近一直转圈，接口响应很慢" in incident["symptoms"]
     assert incident["evidence_needs"] == ["metrics", "logs", "knowledge"]
     assert incident["confidence"] == 0.4
+
+
+@pytest.mark.asyncio
+async def test_generate_incident_uses_custom_llm_client_json():
+    class FakeLLMClient:
+        def __init__(self):
+            self.messages = None
+            self.temperature = None
+
+        async def complete(self, messages, *, temperature):
+            self.messages = messages
+            self.temperature = temperature
+            return LLMResponse(
+                content=(
+                    '{"incident_type":"error_rate","service_name":"payment-api",'
+                    '"time_window":"last_15_minutes","severity":"P1",'
+                    '"symptoms":["500 errors"],"missing_fields":[],'
+                    '"evidence_needs":["metrics","logs"],"confidence":0.91}'
+                ),
+                raw={},
+            )
+
+    llm_client = FakeLLMClient()
+
+    incident = await triage_module.generate_incident(
+        "payment-api has 500 errors",
+        llm_client=llm_client,
+    )
+
+    assert llm_client.temperature == 0
+    assert llm_client.messages[0].role == "system"
+    assert llm_client.messages[1].content == "payment-api has 500 errors"
+    assert incident["incident_type"] == "error_rate"
+    assert incident["service_name"] == "payment-api"
+    assert incident["severity"] == "P1"
+    assert incident["confidence"] == 0.91
 
 
 @pytest.mark.asyncio

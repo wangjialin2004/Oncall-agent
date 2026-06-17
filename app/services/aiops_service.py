@@ -11,6 +11,7 @@ from loguru import logger
 
 from app.agent.aiops import OnCallState, diagnosis, executor, planner, reporter, triage
 from app.agent.aiops.diagnosis import route_after_diagnosis
+from app.agent.aiops.executor import route_after_executor
 from app.config import config
 from app.services.checkpoint_service import create_sqlite_checkpointer, setup_checkpointer
 from app.services.diagnosis_memory_service import DiagnosisMemoryService, diagnosis_memory_service
@@ -89,7 +90,16 @@ class AIOpsService:
         # 定义边
         workflow.add_edge(NODE_TRIAGE, NODE_PLANNER)
         workflow.add_edge(NODE_PLANNER, NODE_EXECUTOR)
-        workflow.add_edge(NODE_EXECUTOR, NODE_DIAGNOSIS)
+
+        # 执行后的条件边：计划仍有剩余步骤则回到 Executor 逐步取证，否则进入诊断
+        workflow.add_conditional_edges(
+            NODE_EXECUTOR,
+            route_after_executor,
+            {
+                NODE_EXECUTOR: NODE_EXECUTOR,
+                NODE_DIAGNOSIS: NODE_DIAGNOSIS,
+            },
+        )
 
         # 诊断后的条件边：证据充分则出报告，否则回到规划继续取证（受 max_iterations 约束）
         workflow.add_conditional_edges(
@@ -153,7 +163,9 @@ class AIOpsService:
             config_dict = {
                 "configurable": {
                     "thread_id": self._thread_id(session_id)
-                }
+                },
+                # Executor 自环逐步取证 + 诊断多轮，提高递归上限避免触顶（默认 25）
+                "recursion_limit": 50,
             }
 
             if self.graph is None:
@@ -401,35 +413,6 @@ class AIOpsService:
                 "type": "status",
                 "stage": "executor",
                 "message": "开始执行步骤"
-            }
-
-    def _format_replanner_event(self, state: dict | None) -> dict:
-        """格式化 Replanner 节点事件"""
-        if not state:
-            return {
-                "type": "status",
-                "stage": "replanner",
-                "message": "评估节点运行中"
-            }
-
-        response = state.get("response", "")
-        plan = state.get("plan", [])
-
-        if response:
-            # 已生成最终响应
-            return {
-                "type": "report",
-                "stage": "final_report",
-                "message": "最终报告已生成",
-                "report": response
-            }
-        else:
-            # 重新规划
-            return {
-                "type": "status",
-                "stage": "replanner",
-                "message": f"评估完成，{'继续执行剩余步骤' if plan else '准备生成最终响应'}",
-                "remaining_steps": len(plan)
             }
 
     def _persist_node_output(self, case_id: str, node_name: str, state: dict | None) -> None:

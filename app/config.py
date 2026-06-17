@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     dashscope_model: str = "qwen-max"
     dashscope_embedding_model: str = "text-embedding-v4"  # v4 支持多种维度（默认 1024）
 
+    # Generic LLM provider configuration. When unset, the custom LLM client
+    # falls back to the legacy DashScope settings above.
+    llm_provider: str = ""
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""
+    llm_timeout: float = 60.0
+
     # Milvus 配置
     milvus_host: str = "localhost"
     milvus_port: int = 19530
