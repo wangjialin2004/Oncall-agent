@@ -4,8 +4,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-AgentMode = Literal["auto", "rag", "oncall"]
-ResolvedAgentRoute = Literal["rag", "oncall"]
+# The old OnCall pipeline lane was removed; the gateway now only has the RAG lane.
+# The live operational path is /api/assistant -> RouterService -> experts.
+AgentMode = Literal["auto", "rag"]
+ResolvedAgentRoute = Literal["rag"]
 
 
 class AgentStreamRequest(BaseModel):

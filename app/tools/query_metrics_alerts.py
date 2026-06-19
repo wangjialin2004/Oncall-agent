@@ -12,10 +12,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from langchain_core.tools import tool
 from loguru import logger
 
 from app.config import config
+from app.core.runtime_tools import make_runtime_tool
 
 # Prometheus Alerts API 相对 base URL 的路径（与 Query API 的 /api/v1/query 并列）
 ALERTS_API_PATH = "/api/v1/alerts"
@@ -154,8 +154,7 @@ def _simplify_alerts(result: dict[str, Any]) -> tuple[list[dict[str, Any]], dict
     return simplified, state_counts
 
 
-@tool
-def query_prometheus_alerts() -> str:
+def _query_prometheus_alerts() -> str:
     """查询 Prometheus 服务端当前活动告警（HTTP GET /api/v1/alerts）。
 
     适用场景：用户关心「有没有告警」「哪些规则在 firing/pending」「最近触发了什么告警」
@@ -200,3 +199,10 @@ def query_prometheus_alerts() -> str:
     }
     logger.info("Prometheus alerts query completed: {} alerts, states={}", len(simplified), state_counts)
     return json.dumps(out, ensure_ascii=False, indent=2)
+
+
+query_prometheus_alerts = make_runtime_tool(
+    name="query_prometheus_alerts",
+    description=_query_prometheus_alerts.__doc__ or "",
+    func=_query_prometheus_alerts,
+)

@@ -1,0 +1,21 @@
+# Alert rules readable through Prometheus GET /api/v1/alerts.
+groups:
+  - name: aiops-assistant-resources
+    rules:
+      - alert: HighCpuUsage
+        expr: app_cpu_usage_percent > 80
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage"
+          description: '{{ $labels.service }} CPU usage {{ $value | printf "%.1f" }}% exceeds 80%'
+
+      - alert: HighMemoryUsage
+        expr: app_memory_usage_percent > 70
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage"
+          description: '{{ $labels.service }} memory usage {{ $value | printf "%.1f" }}% exceeds 70%'

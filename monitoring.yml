@@ -1,0 +1,23 @@
+# Local Prometheus for the monitor MCP PromQL path.
+# Start: docker compose -f monitoring.yml up -d   or make start-prometheus
+# Stop:  docker compose -f monitoring.yml down    or make stop-prometheus
+# Prerequisite: the FastAPI app must expose /metrics on host port 9900.
+services:
+  prometheus:
+    image: quay.io/prometheus/prometheus:v2.54.1
+    container_name: aiops-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:

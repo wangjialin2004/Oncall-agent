@@ -18,11 +18,14 @@
 **监控数据服务** - 端口 8004
 
 **核心工具：**
-- `query_cpu_metrics` - CPU 使用率查询
-- `query_memory_metrics` - 内存使用查询
-- `query_process_list` - 进程列表
-- `search_historical_tickets` - 历史工单查询
-- `get_service_info` / `list_all_services` - 服务信息
+- `query_cpu_metrics` - CPU 使用率查询（时间序列，百分比）
+- `query_memory_metrics` - 内存使用查询（时间序列，百分比）
+- `query_prometheus_range` - 任意 PromQL 区间查询（延迟/错误率/QPS 等，仅 prometheus 模式可用）
+- `get_local_resource_usage` / `get_disk_usage` / `get_python_processes` - 本机资源与进程
+- `get_service_ports_status` / `check_api_health` / `check_mcp_health` / `check_milvus_health` - 端口/健康检查
+
+> 指标数据源由环境变量 `MONITOR_TARGET_MODE` 切换：`self`/`local`（默认，本机 psutil 快照）或
+> `prometheus`（走真实 PromQL）。详见下方「Prometheus 数据源」。
 
 ## 🚀 快速开始
 
@@ -112,11 +115,48 @@ export TENCENTCLOUD_SECRET_KEY="your-key"
 from tencentcloud.cls.v20201016 import cls_client
 ```
 
-**其他监控系统：**
-- Prometheus
-- Grafana
-- 云监控（腾讯云/阿里云/AWS）
-- 自建监控平台
+### Prometheus 数据源
+
+把 monitor MCP 的指标工具从本机快照切换为真实 Prometheus（PromQL）。本仓库已自带一条
+**开箱即用**的链路：应用 `/metrics` → Prometheus 抓取 → monitor MCP 查询。
+
+**端到端跑通（推荐顺序）：**
+
+```bash
+# 1) 启动应用（在宿主机 9900 暴露 /metrics，由 app/core/metrics.py 提供）
+make start            # 或 python -m app.main
+curl -s localhost:9900/metrics | grep app_cpu_usage_percent   # 自检
+
+# 2) 启动 Prometheus（容器，抓取宿主机 /metrics；配置见 deploy/prometheus/）
+make start-prometheus            # = docker compose -f monitoring.yml up -d
+# 打开 http://localhost:9090/targets 确认 aiops-assistant-api 为 UP
+
+# 3) 让 monitor MCP 走真实 PromQL，并重启它
+export MONITOR_TARGET_MODE=prometheus
+make stop-monitor && make start-monitor
+```
+
+应用暴露的指标：`app_cpu_usage_percent` / `app_memory_usage_percent`（0-100 Gauge）、
+`http_request_duration_seconds`（请求耗时直方图）。默认 PromQL 模板已对齐这些指标，**无需额外配置**。
+
+**接入你自己的 exporter（覆盖默认模板）：**
+
+```bash
+export PROMETHEUS_BASE_URL=http://your-prometheus:9090
+export PROMETHEUS_REQUEST_TIMEOUT=10          # 秒，可选
+# {service} 替换为入参 service_name，{range} 替换为速率窗口；模板应聚合为「单条、0-100 百分比」序列
+export PROMETHEUS_RATE_WINDOW='5m'
+export PROMETHEUS_CPU_QUERY='app_cpu_usage_percent{service="{service}"}'
+export PROMETHEUS_MEMORY_QUERY='app_memory_usage_percent{service="{service}"}'
+```
+
+- 以上变量可写入项目根 `.env`，monitor MCP 启动时自动加载（依赖 `python-dotenv`）。
+- 延迟分位/错误率/QPS 等任意指标无需建模板，直接用 `query_prometheus_range(query=...)` 传完整 PromQL，例如：
+  `histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{service="aiops-assistant-api"}[5m])) by (le))`
+- `MONITOR_TARGET_MODE` 同时被主应用读取（`/health` 会回显当前模式）。
+- `deploy/prometheus/alerts.yml` 内置 CPU>80%/内存>70% 告警，触发后可被 `query_prometheus_alerts` 读取。
+
+**其他监控系统：** Grafana、云监控（腾讯云/阿里云/AWS）、自建监控平台同理，可在各 Server 内新增 Provider。
 
 ### 自定义数据源
 

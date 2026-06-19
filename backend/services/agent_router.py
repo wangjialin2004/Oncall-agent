@@ -13,7 +13,12 @@ class AgentRoute:
 
 
 class AgentRouter:
-    """Resolve frontend-selected mode into an executable agent route."""
+    """Resolve frontend-selected mode into an executable agent route.
+
+    This legacy gateway now has a single RAG lane. The old OnCall pipeline lane
+    was removed; operational routing lives in /api/assistant -> RouterService.
+    The semantic classifier is still consulted so ``reason`` reflects intent.
+    """
 
     def __init__(self, router_service: RouterService | None = None):
         self.router_service = router_service or RouterService()
@@ -21,10 +26,6 @@ class AgentRouter:
     def resolve_route(self, *, message: str, mode: AgentMode) -> AgentRoute:
         if mode == "rag":
             return AgentRoute(route="rag", reason="explicit_mode")
-        if mode == "oncall":
-            return AgentRoute(route="oncall", reason="explicit_mode")
 
         decision = self.router_service.route_message(message)
-        if decision.route == "aiops":
-            return AgentRoute(route="oncall", reason=decision.reason)
         return AgentRoute(route="rag", reason=decision.reason)

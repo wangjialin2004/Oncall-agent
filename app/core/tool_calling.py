@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 from dataclasses import dataclass
 from typing import Any
 
 from app.core.llm_client import ChatMessage, ToolCall, ToolDefinition
+from app.core.runtime_tools import RuntimeTool, run_tool
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,23 +19,18 @@ class ToolExecutionResult:
     raw: Any = None
 
 
-def tool_to_definition(tool: Any) -> ToolDefinition:
-    name = str(getattr(tool, "name", "") or getattr(tool, "__name__", "")).strip()
-    description = str(getattr(tool, "description", "") or getattr(tool, "__doc__", "") or "").strip()
-    args_schema = getattr(tool, "args_schema", None)
-    parameters = {"type": "object", "properties": {}}
-    if args_schema is not None and hasattr(args_schema, "model_json_schema"):
-        parameters = args_schema.model_json_schema()
+def tool_to_definition(tool: RuntimeTool) -> ToolDefinition:
+    name = tool.name.strip()
+    description = tool.description.strip()
+    parameters = tool.parameters or {"type": "object", "properties": {}}
     return ToolDefinition(name=name, description=description, parameters=parameters)
 
 
 async def execute_tool_calls(
     tool_calls: list[ToolCall],
-    tools: list[Any],
+    tools: list[RuntimeTool],
 ) -> list[ToolExecutionResult]:
-    tool_by_name = {
-        str(getattr(tool, "name", "") or getattr(tool, "__name__", "")): tool for tool in tools
-    }
+    tool_by_name = {tool.name: tool for tool in tools}
     results: list[ToolExecutionResult] = []
     for tool_call in tool_calls:
         tool = tool_by_name.get(tool_call.name)
@@ -50,7 +45,7 @@ async def execute_tool_calls(
             )
             continue
         try:
-            raw = await _invoke_tool(tool, tool_call.arguments)
+            raw = await run_tool(tool, tool_call.arguments)
             results.append(
                 ToolExecutionResult(
                     call_id=tool_call.id,
@@ -79,23 +74,26 @@ def tool_result_messages(results: list[ToolExecutionResult]) -> list[ChatMessage
     ]
 
 
-async def _invoke_tool(tool: Any, arguments: dict[str, Any]) -> Any:
-    if hasattr(tool, "ainvoke"):
-        return await tool.ainvoke(arguments)
-    if hasattr(tool, "invoke"):
-        result = tool.invoke(arguments)
-    elif hasattr(tool, "func"):
-        result = tool.func(**arguments)
-    else:
-        result = tool(**arguments)
-    if inspect.isawaitable(result):
-        return await result
-    return result
-
-
 def _stringify_tool_result(raw: Any) -> str:
     if isinstance(raw, tuple) and raw:
         return _stringify_tool_result(raw[0])
     if isinstance(raw, str):
         return raw
+    structured_content = getattr(raw, "structuredContent", None)
+    if structured_content is not None:
+        return json.dumps(structured_content, ensure_ascii=False, default=str)
+    content = getattr(raw, "content", None)
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            text = getattr(item, "text", None)
+            if isinstance(text, str):
+                parts.append(text)
+            elif hasattr(item, "model_dump"):
+                parts.append(json.dumps(item.model_dump(mode="json"), ensure_ascii=False, default=str))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+    if hasattr(raw, "model_dump"):
+        return json.dumps(raw.model_dump(mode="json"), ensure_ascii=False, default=str)
     return json.dumps(raw, ensure_ascii=False, default=str)

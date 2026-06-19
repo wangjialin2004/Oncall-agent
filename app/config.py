@@ -38,6 +38,27 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = ""
     llm_timeout: float = 60.0
+    # 瞬时错误（429 / 5xx / 网络超时）的指数退避重试次数；鉴权错误不重试
+    llm_max_retries: int = 2
+    llm_retry_base_delay: float = 0.5
+
+    # Router + 专家 Agent 配置
+    # 语义路由低于该置信度时回退到综合诊断（最稳，可跨域排查）
+    router_min_confidence: float = 0.55
+    # 单个专家执行超时（秒），超时返回降级答案
+    expert_timeout_seconds: float = 60.0
+
+    # 日志分析管线（处理上万行日志）
+    # 进入聚类前允许处理的最大原始行数（超出按时间倒序截断并提示）
+    log_max_lines: int = 20000
+    # 送入 LLM 的字符预算（近似 token 控制），超出触发 Map-Reduce 摘要
+    log_token_budget: int = 12000
+    # Map-Reduce 分块的字符大小
+    log_chunk_size: int = 8000
+    # 聚类后保留的 Top 模板数量
+    log_top_patterns: int = 30
+    # 日志摘要使用的模型（留空则用默认 llm_model）
+    log_summary_model: str = ""
 
     # Milvus 配置
     milvus_host: str = "localhost"
@@ -64,26 +85,32 @@ class Settings(BaseSettings):
     mcp_monitor_transport: str = "streamable-http"
     mcp_monitor_url: str = "http://localhost:8004/mcp"
 
-    # Prometheus
+    # Prometheus（告警 API 工具 query_prometheus_alerts 使用；
+    # 指标 PromQL 相关的 PROMETHEUS_CPU_QUERY / PROMETHEUS_MEMORY_QUERY / PROMETHEUS_RATE_WINDOW
+    # 由独立的 monitor MCP Server 读取，详见 .env.example 与 mcp_servers/README.md）
     prometheus_base_url: str = "http://127.0.0.1:9090"
     prometheus_request_timeout: float = 10.0
 
     # Provider modes
+    # monitor_target_mode: self|local 用本机 psutil；prometheus 让 monitor MCP 的指标工具走真实 PromQL
     monitor_target_mode: str = "self"
     log_provider: str = "local"
 
-    # Diagnosis memory
-    diagnosis_memory_db_path: str = "data/diagnosis_memory.sqlite3"
+    # Short-term LangGraph checkpoint (conversation context) — kept.
     checkpoint_db_path: str = "volumes/checkpoints.db"
 
-    # Long-term experience memory
+    # Long-term memory
+    memory_db_path: str = "volumes/long_term_memory.db"
     project_id: str = "super_biz_agent"
-    experience_memory_db_path: str = "data/experience_memory.sqlite3"
+    long_term_memory_enabled: bool = True
     experience_memory_collection: str = "experience_memory"
     experience_memory_top_k: int = 3
     experience_memory_similarity_threshold: float = 0.78
-    experience_memory_high_confidence_threshold: float = 0.75
-    experience_memory_initial_confidence: float = 0.8
+    experience_memory_high_confidence: float = 0.8
+    experience_memory_weak_confidence: float = 0.4
+    service_knowledge_enabled: bool = True
+    user_preferences_enabled: bool = True
+    auth_token_secret: str = "dev-auth-token-secret"
 
     @field_validator("debug", mode="before")
     @classmethod

@@ -1,5 +1,5 @@
 import { Activity, Send, Square } from "lucide-react";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 
 import type { AgentMode, ChatMessage, RunStatus } from "../types/events";
 
@@ -7,8 +7,10 @@ type ChatWorkspaceProps = {
   mode: AgentMode;
   messages: ChatMessage[];
   runStatus: RunStatus;
+  selectedId?: string;
   onModeChange: (mode: AgentMode) => void;
   onSend: (message: string) => void;
+  onSelectMessage?: (id: string) => void;
   onStop: () => void;
 };
 
@@ -16,16 +18,26 @@ export function ChatWorkspace({
   mode,
   messages,
   runStatus,
+  selectedId,
   onModeChange,
   onSend,
+  onSelectMessage,
   onStop,
 }: ChatWorkspaceProps) {
   const [message, setMessage] = useState("");
   const isRunning = runStatus === "running";
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const messagesEl = messagesRef.current;
+    if (!messagesEl) {
+      return;
+    }
+    if (typeof messagesEl.scrollTo === "function") {
+      messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: "smooth" });
+      return;
+    }
+    messagesEl.scrollTop = messagesEl.scrollHeight;
   }, [messages]);
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -59,12 +71,11 @@ export function ChatWorkspace({
           <select value={mode} onChange={(event) => onModeChange(event.target.value as AgentMode)}>
             <option value="auto">自动</option>
             <option value="rag">知识库</option>
-            <option value="oncall">OnCall</option>
           </select>
         </label>
       </header>
 
-      <div className="messages">
+      <div className="messages" ref={messagesRef}>
         {messages.length === 0 ? (
           <div className="empty-state">
             <div className="empty-state-icon">
@@ -74,13 +85,38 @@ export function ChatWorkspace({
             <span className="empty-state-hint">描述一个告警事件，或向知识库提问</span>
           </div>
         ) : (
-          messages.map((item) => (
-            <article className={`message ${item.role}`} key={item.id}>
-              <div className="message-bubble">{item.content}</div>
-            </article>
-          ))
+          messages.map((item) => {
+            const selectable = item.role === "assistant" && Boolean(onSelectMessage);
+            const isSelected = selectable && item.id === selectedId;
+            return (
+              <article
+                className={`message ${item.role}${isSelected ? " selected" : ""}`}
+                key={item.id}
+              >
+                <div
+                  className="message-bubble"
+                  {...(selectable
+                    ? {
+                        role: "button",
+                        tabIndex: 0,
+                        "aria-pressed": isSelected,
+                        title: "查看该回合的智能体过程",
+                        onClick: () => onSelectMessage?.(item.id),
+                        onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            onSelectMessage?.(item.id);
+                          }
+                        },
+                      }
+                    : {})}
+                >
+                  {item.content}
+                </div>
+              </article>
+            );
+          })
         )}
-        <div ref={messagesEndRef} />
       </div>
 
       <form className="composer" onSubmit={submit}>

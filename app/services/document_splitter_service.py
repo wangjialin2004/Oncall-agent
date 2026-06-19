@@ -1,4 +1,4 @@
-"""文档分割服务模块 - 基于 LangChain 的智能文档分割"""
+"""Document splitting service without LangChain dependencies."""
 
 import hashlib
 import re
@@ -6,43 +6,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from langchain_core.documents import Document
-from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 from loguru import logger
 
 from app.config import config
+from app.models.document import RetrievedDocument
 
 
 class DocumentSplitterService:
-    """文档分割服务 - 使用 LangChain 的分割器"""
+    """Split extracted documents into searchable chunks."""
 
     def __init__(self):
-        """初始化文档分割服务"""
         self.chunk_size = config.chunk_max_size
         self.chunk_overlap = config.chunk_overlap
-
-        # Markdown 标题分割器 (只按一级和二级标题分割，减少分片数)
-        self.markdown_splitter = MarkdownHeaderTextSplitter(
-            headers_to_split_on=[
-                ("#", "h1"),
-                ("##", "h2"),
-                # 不再按三级标题分割，避免过度碎片化
-            ],
-            strip_headers=False,  # 保留标题在内容中
-        )
-
-        # 递归字符分割器 (用于二次分割，使用更大的chunk_size)
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.chunk_size * 2,  # 加倍chunk_size，减少分片数
-            chunk_overlap=self.chunk_overlap,
-            length_function=len,
-            is_separator_regex=False,
-        )
+        self.secondary_chunk_size = self.chunk_size * 2
 
         logger.info(
-            f"文档分割服务初始化完成, chunk_size={self.chunk_size}, "
-            f"secondary_chunk_size={self.chunk_size * 2}, "
-            f"overlap={self.chunk_overlap}"
+            f"Document splitter initialized: chunk_size={self.chunk_size}, "
+            f"secondary_chunk_size={self.secondary_chunk_size}, overlap={self.chunk_overlap}"
         )
 
     def split_markdown(
@@ -50,38 +30,22 @@ class DocumentSplitterService:
         content: str,
         file_path: str = "",
         base_metadata: dict[str, Any] | None = None,
-    ) -> list[Document]:
-        """
-        分割 Markdown 文档 (两阶段分割 + 合并小片段)
-
-        Args:
-            content: Markdown 内容
-            file_path: 文件路径 (用于元数据)
-
-        Returns:
-            List[Document]: 文档分片列表
-        """
+    ) -> list[RetrievedDocument]:
+        """Split markdown-like content by h1/h2 headings and chunk size."""
         if not content or not content.strip():
-            logger.warning(f"Markdown 文档内容为空: {file_path}")
+            logger.warning(f"Markdown document is empty: {file_path}")
             return []
 
         try:
-            # 第一阶段: 按标题分割
-            md_docs = self.markdown_splitter.split_text(content)
-
-            # 第二阶段: 按大小进一步分割
-            docs_after_split = self.text_splitter.split_documents(md_docs)
-
-            # 第三阶段: 合并太小的分片 (< 300字符)
+            sections = self._split_markdown_sections(content)
+            docs_after_split = self._split_documents_by_size(sections)
             final_docs = self._merge_small_chunks(docs_after_split, min_size=300)
-
             self._apply_chunk_metadata(final_docs, file_path, base_metadata)
 
-            logger.info(f"Markdown 分割完成: {file_path} -> {len(final_docs)} 个分片")
+            logger.info(f"Markdown split complete: {file_path} -> {len(final_docs)} chunks")
             return final_docs
-
         except Exception as e:
-            logger.error(f"Markdown 分割失败: {file_path}, 错误: {e}")
+            logger.error(f"Markdown split failed: {file_path}, error: {e}")
             raise
 
     def split_text(
@@ -89,31 +53,20 @@ class DocumentSplitterService:
         content: str,
         file_path: str = "",
         base_metadata: dict[str, Any] | None = None,
-    ) -> list[Document]:
-        """
-        分割普通文本文档
-
-        Args:
-            content: 文本内容
-            file_path: 文件路径 (用于元数据)
-
-        Returns:
-            List[Document]: 文档分片列表
-        """
+    ) -> list[RetrievedDocument]:
+        """Split plain text content."""
         if not content or not content.strip():
-            logger.warning(f"文本文档内容为空: {file_path}")
+            logger.warning(f"Text document is empty: {file_path}")
             return []
 
         try:
-            # 直接使用递归字符分割器
-            docs = self.text_splitter.create_documents(texts=[content], metadatas=[{}])
+            docs = self._split_documents_by_size([RetrievedDocument(page_content=content)])
             self._apply_chunk_metadata(docs, file_path, base_metadata)
 
-            logger.info(f"文本分割完成: {file_path} -> {len(docs)} 个分片")
+            logger.info(f"Text split complete: {file_path} -> {len(docs)} chunks")
             return docs
-
         except Exception as e:
-            logger.error(f"文本分割失败: {file_path}, 错误: {e}")
+            logger.error(f"Text split failed: {file_path}, error: {e}")
             raise
 
     def split_document(
@@ -121,55 +74,118 @@ class DocumentSplitterService:
         content: str,
         file_path: str = "",
         base_metadata: dict[str, Any] | None = None,
-    ) -> list[Document]:
-        """
-        智能分割文档 (根据文件类型选择分割器)
-
-        Args:
-            content: 文档内容
-            file_path: 文件路径
-
-        Returns:
-            List[Document]: 文档分片列表
-        """
+    ) -> list[RetrievedDocument]:
+        """Split a document using markdown-aware logic for extracted rich documents."""
         if Path(file_path).suffix.lower() in {".md", ".markdown", ".pdf", ".docx"}:
             return self.split_markdown(content, file_path, base_metadata)
-        else:
-            return self.split_text(content, file_path, base_metadata)
+        return self.split_text(content, file_path, base_metadata)
 
-    def _merge_small_chunks(self, documents: list[Document], min_size: int = 300) -> list[Document]:
-        """
-        合并太小的分片
+    def _split_markdown_sections(self, content: str) -> list[RetrievedDocument]:
+        docs: list[RetrievedDocument] = []
+        current_lines: list[str] = []
+        current_metadata: dict[str, Any] = {}
+        active_h1 = ""
+        active_h2 = ""
 
-        Args:
-            documents: 文档列表
-            min_size: 最小分片大小 (字符数)
+        def flush() -> None:
+            text = "\n".join(current_lines).strip()
+            if text:
+                docs.append(RetrievedDocument(page_content=text, metadata=dict(current_metadata)))
 
-        Returns:
-            List[Document]: 合并后的文档列表
-        """
+        for line in content.splitlines():
+            match = re.match(r"^(#{1,2})\s+(.+?)\s*$", line)
+            if match:
+                flush()
+                current_lines = [line]
+                level = len(match.group(1))
+                title = match.group(2).strip()
+                if level == 1:
+                    active_h1 = title
+                    active_h2 = ""
+                else:
+                    active_h2 = title
+                current_metadata = {}
+                if active_h1:
+                    current_metadata["h1"] = active_h1
+                if active_h2:
+                    current_metadata["h2"] = active_h2
+                continue
+
+            current_lines.append(line)
+
+        flush()
+
+        if docs:
+            return docs
+        return [RetrievedDocument(page_content=content.strip(), metadata={})]
+
+    def _split_documents_by_size(
+        self,
+        documents: list[RetrievedDocument],
+    ) -> list[RetrievedDocument]:
+        split_docs: list[RetrievedDocument] = []
+        for doc in documents:
+            for chunk in self._split_text_by_size(doc.page_content):
+                split_docs.append(
+                    RetrievedDocument(page_content=chunk, metadata=dict(doc.metadata))
+                )
+        return split_docs
+
+    def _split_text_by_size(self, text: str) -> list[str]:
+        text = text.strip()
+        if len(text) <= self.secondary_chunk_size:
+            return [text] if text else []
+
+        chunks: list[str] = []
+        start = 0
+        while start < len(text):
+            end = min(start + self.secondary_chunk_size, len(text))
+            if end < len(text):
+                boundary = self._find_split_boundary(text, start, end)
+                if boundary > start:
+                    end = boundary
+
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+
+            if end >= len(text):
+                break
+            start = max(end - self.chunk_overlap, start + 1)
+
+        return chunks
+
+    def _find_split_boundary(self, text: str, start: int, end: int) -> int:
+        min_boundary = start + max(1, self.secondary_chunk_size // 2)
+        for separator in ["\n\n", "\n", "。", ". ", " "]:
+            boundary = text.rfind(separator, min_boundary, end)
+            if boundary != -1:
+                return boundary + len(separator)
+        return end
+
+    def _merge_small_chunks(
+        self,
+        documents: list[RetrievedDocument],
+        min_size: int = 300,
+    ) -> list[RetrievedDocument]:
+        """Merge very small adjacent chunks."""
         if not documents:
             return []
 
-        merged_docs = []
-        current_doc = None
+        merged_docs: list[RetrievedDocument] = []
+        current_doc: RetrievedDocument | None = None
 
         for doc in documents:
             doc_size = len(doc.page_content)
 
             if current_doc is None:
-                # 第一个文档
                 current_doc = doc
-            elif doc_size < min_size and len(current_doc.page_content) < self.chunk_size * 2:
-                # 当前文档太小且合并后不会太大，则合并
+            elif doc_size < min_size and len(current_doc.page_content) < self.secondary_chunk_size:
                 current_doc.page_content += "\n\n" + doc.page_content
-                # 保留主文档的元数据
             else:
-                # 保存当前文档，开始新文档
                 merged_docs.append(current_doc)
                 current_doc = doc
 
-        # 添加最后一个文档
         if current_doc is not None:
             merged_docs.append(current_doc)
 
@@ -177,11 +193,11 @@ class DocumentSplitterService:
 
     def _apply_chunk_metadata(
         self,
-        documents: list[Document],
+        documents: list[RetrievedDocument],
         file_path: str,
         base_metadata: dict[str, Any] | None = None,
     ) -> None:
-        """为每个 chunk 补充统一的索引元数据。"""
+        """Add consistent indexing metadata to each chunk."""
 
         source_path = file_path or (base_metadata or {}).get("source", "")
         path = Path(source_path)
@@ -219,7 +235,7 @@ class DocumentSplitterService:
         return " > ".join(headers)
 
     def _guess_content_type(self, content: str) -> str:
-        has_image = "[图片]" in content or bool(re.search(r"!\[[^\]]*\]\([^)]+\)", content))
+        has_image = "[鍥剧墖]" in content or bool(re.search(r"!\[[^\]]*\]\([^)]+\)", content))
         has_table = self._contains_markdown_table(content)
         if has_image and has_table:
             return "mixed"
@@ -244,5 +260,4 @@ class DocumentSplitterService:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-# 全局单例
 document_splitter_service = DocumentSplitterService()

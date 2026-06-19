@@ -17,32 +17,6 @@ from pymilvus import (
 from app.config import config
 
 
-def _patch_pymilvus_milvus_client_orm_alias() -> None:
-    """
-    langchain_milvus 内部创建的 MilvusClient 会将 _using 设为 ``cm-{id}``，
-    该别名未在 pymilvus.orm.connections 中注册；随后 ORM ``Collection(..., using=...)``
-    会抛出 ConnectionNotExistException: should create connection first.
-
-    在已通过 ``connections.connect(alias="default", ...)`` 建立连接后，
-    强制让 MilvusClient 使用 ``default`` 别名，与 ORM 一致。
-    """
-    if getattr(_patch_pymilvus_milvus_client_orm_alias, "_done", False):
-        return
-    try:
-        from pymilvus.milvus_client.milvus_client import MilvusClient
-    except ImportError:
-        return
-
-    _orig_init = MilvusClient.__init__
-
-    def _wrapped_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-        _orig_init(self, *args, **kwargs)
-        self._using = "default"
-
-    MilvusClient.__init__ = _wrapped_init  # type: ignore[method-assign]
-    _patch_pymilvus_milvus_client_orm_alias._done = True
-
-
 class MilvusClientManager:
     """Milvus 客户端管理器"""
 
@@ -74,8 +48,6 @@ class MilvusClientManager:
             return self._client
 
         try:
-            _patch_pymilvus_milvus_client_orm_alias()
-
             logger.info(f"正在连接到 Milvus: {config.milvus_host}:{config.milvus_port}")
 
             # 建立连接
@@ -347,6 +319,8 @@ class MilvusClientManager:
         Raises:
             RuntimeError: collection 未初始化时抛出
         """
+        if self._collection is None:
+            _ = self.connect()
         if self._collection is None:
             raise RuntimeError("Collection 未初始化，请先调用 connect()")
         return self._collection

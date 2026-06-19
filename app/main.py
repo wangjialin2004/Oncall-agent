@@ -12,8 +12,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from app.api import aiops, assistant, chat, file, health, memory
+from app.api import assistant, auth, chat, conversations, file, health, memory
 from app.config import config
+from app.core.metrics import setup_metrics
 from app.core.milvus_client import milvus_manager
 
 
@@ -29,8 +30,14 @@ async def lifespan(app: FastAPI):
 
     # 连接 Milvus
     logger.info("🔌 正在连接 Milvus...")
-    milvus_manager.connect()
-    logger.info("✅ Milvus 连接成功")
+    try:
+        milvus_manager.connect()
+        logger.info("✅ Milvus 连接成功")
+    except RuntimeError as e:
+        logger.warning(
+            "Milvus startup connect failed; continuing without vector search until it is available: {}",
+            e,
+        )
 
     logger.info("=" * 60)
 
@@ -38,7 +45,10 @@ async def lifespan(app: FastAPI):
 
     # 关闭时执行
     logger.info("🔌 正在关闭 Milvus 连接...")
-    milvus_manager.close()
+    try:
+        milvus_manager.close()
+    except Exception as e:
+        logger.warning("Milvus close failed during shutdown: {}", e)
     logger.info(f"👋 {config.app_name} 关闭")
 
 
@@ -59,13 +69,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 暴露 Prometheus /metrics（供 Prometheus 抓取，打通真实指标链路）
+setup_metrics(app)
+
 # 注册路由
 app.include_router(health.router, tags=["健康检查"])
 app.include_router(assistant.router, prefix="/api", tags=["统一助手"])
+app.include_router(conversations.router, prefix="/api", tags=["会话历史"])
 app.include_router(chat.router, prefix="/api", tags=["对话"])
 app.include_router(file.router, prefix="/api", tags=["文件管理"])
-app.include_router(aiops.router, prefix="/api", tags=["AIOps智能运维"])
-app.include_router(memory.router, prefix="/api", tags=["长期经验记忆"])
+app.include_router(auth.router, prefix="/api", tags=["auth"])
+app.include_router(memory.router, prefix="/api", tags=["long-term-memory"])
 
 # 挂载静态文件
 static_dir = "static"

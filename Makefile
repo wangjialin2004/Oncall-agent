@@ -186,6 +186,24 @@ status:
 	fi
 
 # ============================================================
+# Prometheus 管理（指标链路：应用 /metrics → Prometheus → monitor MCP）
+# ============================================================
+
+# 启动本地 Prometheus（容器，抓取宿主机 9900 的 /metrics）
+start-prometheus:
+	@echo "$(YELLOW)📈 启动 Prometheus 容器...$(NC)"
+	@docker compose -f monitoring.yml up -d
+	@echo "$(GREEN)✅ Prometheus: http://localhost:9090$(NC)"
+	@echo "$(YELLOW)   前置: 应用需在宿主机 9900 暴露 /metrics（make start）$(NC)"
+	@echo "$(YELLOW)   启用真实指标: export MONITOR_TARGET_MODE=prometheus 后重启 monitor MCP$(NC)"
+
+# 停止本地 Prometheus
+stop-prometheus:
+	@echo "$(YELLOW)🛑 停止 Prometheus 容器...$(NC)"
+	@docker compose -f monitoring.yml down
+	@echo "$(GREEN)✅ Prometheus 已停止$(NC)"
+
+# ============================================================
 # MCP 服务管理
 # ============================================================
 

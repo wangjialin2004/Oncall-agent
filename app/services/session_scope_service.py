@@ -2,29 +2,44 @@
 
 from __future__ import annotations
 
-import hashlib
 from typing import Annotated
 
 from fastapi import Header, HTTPException
 
-SESSION_OWNER_HEADER = "X-Session-Owner"
+from app.services.auth_service import auth_service
+
+AUTHORIZATION_HEADER = "Authorization"
 
 
 def require_session_owner(
-    x_session_owner: Annotated[str | None, Header(alias=SESSION_OWNER_HEADER)] = None,
+    authorization: Annotated[str | None, Header(alias=AUTHORIZATION_HEADER)] = None,
 ) -> str:
-    """Return a stable owner key or reject unauthenticated session access."""
+    """Return a stable owner key derived from the authenticated backend user."""
 
-    owner = (x_session_owner or "").strip()
-    if not owner:
+    token = _bearer_token(authorization)
+    if not token:
         raise HTTPException(
             status_code=401,
-            detail=f"{SESSION_OWNER_HEADER} header is required",
+            detail="Authorization Bearer token is required",
         )
-    return hashlib.sha256(owner.encode("utf-8")).hexdigest()[:8]
+    try:
+        username = auth_service.verify_access_token(token)
+        return auth_service.owner_key_for_user(username)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid authorization token") from exc
 
 
 def scope_session_id(session_id: str, owner_key: str) -> str:
     """Namespace a user-visible session ID without storing the raw owner token."""
 
     return f"owner:{owner_key}:{session_id}"
+
+
+def _bearer_token(authorization: str | None) -> str:
+    value = (authorization or "").strip()
+    if not value:
+        return ""
+    scheme, _, token = value.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return ""
+    return token.strip()

@@ -1,18 +1,11 @@
 """RAG Agent service backed by the application-owned LLM client."""
 
-from collections.abc import AsyncGenerator, Sequence
 import json
-from typing import Annotated, Any
+from collections.abc import AsyncGenerator
+from datetime import datetime
+from typing import Any
 
-from langchain_core.messages import (
-    BaseMessage,
-    HumanMessage,
-    RemoveMessage,
-    SystemMessage,
-)
-from langgraph.graph.message import REMOVE_ALL_MESSAGES, add_messages
 from loguru import logger
-from typing_extensions import TypedDict
 
 from app.agent.mcp_client import (
     format_exception_chain,
@@ -43,50 +36,35 @@ def _tool_call_payload(tool_call: ToolCall) -> dict[str, Any]:
         },
     }
 
-class AgentState(TypedDict):
-    """Agent 状态"""
-    messages: Annotated[Sequence[BaseMessage], add_messages]
 
+def _history_item_from_message(message: Any) -> dict[str, str] | None:
+    if isinstance(message, dict):
+        role = str(message.get("role") or "").lower()
+        content = str(message.get("content") or "")
+        timestamp = str(message.get("timestamp") or datetime.now().isoformat())
+    else:
+        role = str(getattr(message, "role", "") or getattr(message, "type", "")).lower()
+        content = str(getattr(message, "content", "") or "")
+        timestamp = str(getattr(message, "timestamp", "") or datetime.now().isoformat())
+        if not role:
+            class_name = message.__class__.__name__.lower()
+            if "human" in class_name:
+                role = "user"
+            elif "system" in class_name:
+                role = "system"
+            else:
+                role = "assistant"
 
-def trim_messages_middleware(state: AgentState) -> dict[str, Any] | None:
-    """
-    修剪消息历史，只保留最近的几条消息以适应上下文窗口
-
-    策略：
-    - 保留第一条系统消息（System Message）
-    - 保留最近的 6 条消息（3 轮对话）
-    - 当消息少于等于 7 条时，不做修剪
-
-    Args:
-        state: Agent 状态
-
-    Returns:
-        包含修剪后消息的字典，如果无需修剪则返回 None
-    """
-    messages = state["messages"]
-
-    # 如果消息数量较少，无需修剪
-    if len(messages) <= 7:
+    if role == "system":
         return None
+    if role in {"human", "user"}:
+        role = "user"
+    elif role in {"ai", "assistant"}:
+        role = "assistant"
+    else:
+        role = "assistant"
 
-    # 提取第一条系统消息
-    first_msg = messages[0]
-
-    # 保留最近的 6 条消息（确保包含完整的对话轮次）
-    recent_messages = messages[-6:] if len(messages) % 2 == 0 else messages[-7:]
-
-    # 构建新的消息列表
-    new_messages = [first_msg] + list(recent_messages)
-
-    logger.debug(f"修剪消息历史: {len(messages)} -> {len(new_messages)} 条")
-
-    return {
-        "messages": [
-            RemoveMessage(id=REMOVE_ALL_MESSAGES),
-            *new_messages
-        ]
-    }
-
+    return {"role": role, "content": content, "timestamp": timestamp}
 
 class RagAgentService:
     """RAG Agent service backed by the application LLM client."""
@@ -169,15 +147,7 @@ class RagAgentService:
             logger.info(f"可用工具列表: {', '.join(tool_names)}")
 
     def _build_system_prompt(self) -> str:
-        """
-        构建系统提示词
-
-        注意：LangChain 框架会自动将工具信息传递给 LLM，
-        因此系统提示词中无需列举具体的工具列表。
-
-        Returns:
-            str: 系统提示词
-        """
+        """Build the system prompt for direct LLM tool calling."""
         from textwrap import dedent
 
         return dedent("""
@@ -335,28 +305,9 @@ class RagAgentService:
             # 转换为前端需要的格式
             history = []
             for msg in messages:
-                # 跳过系统消息
-                if isinstance(msg, SystemMessage):
-                    continue
-
-                role = "user" if isinstance(msg, HumanMessage) else "assistant"
-                content = msg.content if hasattr(msg, 'content') else str(msg)
-
-                # 提取时间戳（如果有的话）
-                timestamp = getattr(msg, 'timestamp', None)
-                if timestamp:
-                    history.append({
-                        "role": role,
-                        "content": content,
-                        "timestamp": timestamp
-                    })
-                else:
-                    from datetime import datetime
-                    history.append({
-                        "role": role,
-                        "content": content,
-                        "timestamp": datetime.now().isoformat()
-                    })
+                item = _history_item_from_message(msg)
+                if item is not None:
+                    history.append(item)
 
             logger.info(f"获取会话历史: {session_id}, 消息数量: {len(history)}")
             return history

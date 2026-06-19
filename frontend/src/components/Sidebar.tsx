@@ -1,12 +1,32 @@
-import { Activity, LogOut, MessageSquarePlus } from "lucide-react";
+import { Activity, Gauge, LogOut, MessageSquarePlus, Trash2 } from "lucide-react";
+
+import type { ConversationSummary } from "../api/conversationApi";
+
+type SidebarView = "chat" | "baseline";
 
 type SidebarProps = {
   username: string;
+  activeView: SidebarView;
+  sessions: ConversationSummary[];
+  activeSessionId: string;
   onNewSession: () => void;
+  onSelectSession: (sessionId: string) => void;
+  onDeleteSession: (sessionId: string) => void;
+  onOpenBaselines: () => void;
   onLogout: () => void;
 };
 
-export function Sidebar({ username, onNewSession, onLogout }: SidebarProps) {
+export function Sidebar({
+  username,
+  activeView,
+  sessions,
+  activeSessionId,
+  onNewSession,
+  onSelectSession,
+  onDeleteSession,
+  onOpenBaselines,
+  onLogout,
+}: SidebarProps) {
   const avatarLetter = username.charAt(0).toUpperCase() || "U";
 
   return (
@@ -23,9 +43,50 @@ export function Sidebar({ username, onNewSession, onLogout }: SidebarProps) {
         新建会话
       </button>
 
+      <button
+        className={`sidebar-action${activeView === "baseline" ? " active" : ""}`}
+        type="button"
+        onClick={onOpenBaselines}
+      >
+        <Gauge size={15} aria-hidden="true" />
+        服务基线
+      </button>
+
       <div className="sidebar-section">
         <span className="sidebar-section-label">历史会话</span>
-        <p>暂无历史记录</p>
+        {sessions.length === 0 ? (
+          <p>暂无历史记录</p>
+        ) : (
+          <ul className="session-list">
+            {sessions.map((session) => {
+              const isActive = activeView === "chat" && session.session_id === activeSessionId;
+              return (
+                <li
+                  key={session.session_id}
+                  className={`session-item${isActive ? " active" : ""}`}
+                >
+                  <button
+                    type="button"
+                    className="session-open"
+                    title={session.title}
+                    onClick={() => onSelectSession(session.session_id)}
+                  >
+                    <span className="session-title">{session.title || "未命名会话"}</span>
+                    <span className="session-meta">{session.turn_count} 轮</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="session-delete"
+                    aria-label={`删除会话 ${session.title}`}
+                    onClick={() => onDeleteSession(session.session_id)}
+                  >
+                    <Trash2 size={13} aria-hidden="true" />
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </div>
 
       <div className="sidebar-footer">

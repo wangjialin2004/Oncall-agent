@@ -1,5 +1,13 @@
-export type AgentMode = "auto" | "rag" | "oncall";
-export type AgentRoute = "rag" | "aiops" | "clarify" | "unknown";
+export type AgentMode = "auto" | "rag";
+export type AgentRoute =
+  | "knowledge"
+  | "metric"
+  | "log"
+  | "change"
+  | "diagnosis"
+  | "clarify"
+  | "unknown"
+  | "error";
 export type RunStatus = "idle" | "running" | "completed" | "error" | "cancelled";
 
 export type RouteSelectedEvent = {
@@ -10,13 +18,18 @@ export type RouteSelectedEvent = {
 };
 
 export type TimelineEvent = {
-  type: "agent_event" | "tool_event" | "decision_event";
+  type: "route_event" | "agent_event" | "tool_event" | "decision_event";
   agent?: string;
   stage?: string;
   status?: string;
   summary?: string;
   tool?: string;
+  route?: string;
   evidence_id?: string;
+  duration_ms?: number;
+  usage?: Record<string, number>;
+  trace_id?: string;
+  span_id?: string;
   payload?: Record<string, unknown>;
 };
 
@@ -62,6 +75,8 @@ export type ChatMessage = {
   status?: RunStatus;
 };
 
+export type FeedbackState = "" | "adopted" | "corrected" | "weak";
+
 export type AgentRun = {
   runId: string;
   sessionId: string;
@@ -72,4 +87,8 @@ export type AgentRun = {
   answer: string;
   caseId: string;
   error: string;
+  /** The user message that started this run, needed to build the experience card. */
+  userMessage: string;
+  /** Long-term-memory feedback already given for this run, if any. */
+  feedback: FeedbackState;
 };

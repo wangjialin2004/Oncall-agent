@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import httpx
+from loguru import logger
 
 
 ChatRole = Literal["system", "user", "assistant", "tool"]
@@ -46,6 +48,8 @@ class LLMClientConfig:
     api_key: str
     model: str
     timeout: float = 60.0
+    max_retries: int = 2
+    retry_base_delay: float = 0.5
     default_headers: dict[str, str] = field(default_factory=dict)
 
     @classmethod
@@ -67,6 +71,8 @@ class LLMClientConfig:
             api_key=api_key,
             model=model,
             timeout=timeout,
+            max_retries=int(getattr(settings, "llm_max_retries", 2)),
+            retry_base_delay=float(getattr(settings, "llm_retry_base_delay", 0.5)),
         )
 
 
@@ -77,6 +83,7 @@ class LLMResponse:
     model: str | None = None
     finish_reason: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 class LLMClientError(RuntimeError):
@@ -132,18 +139,54 @@ class LLMClient:
         if extra_body:
             payload.update(extra_body)
 
-        response = await self._client.post(
-            self._chat_completions_url(),
-            headers=self._headers(),
-            json=payload,
-        )
-        if response.status_code == 401:
-            raise LLMAuthenticationError(self._format_provider_error(response))
-        if response.status_code >= 400:
-            raise LLMClientError(self._format_provider_error(response))
-
-        data = response.json()
+        data = await self._post_with_retry(payload)
         return self._parse_response(data)
+
+    async def _post_with_retry(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST chat completions with exponential backoff on transient failures.
+
+        Retries on network errors and HTTP 429/5xx. Authentication errors (401)
+        and other 4xx are not retried.
+        """
+        attempts = max(0, self.config.max_retries) + 1
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                response = await self._client.post(
+                    self._chat_completions_url(),
+                    headers=self._headers(),
+                    json=payload,
+                )
+            except httpx.HTTPError as exc:
+                last_error = LLMClientError(f"{self.config.provider} LLM request error: {exc}")
+                if attempt < attempts - 1:
+                    await self._sleep_backoff(attempt, reason=str(exc))
+                    continue
+                raise last_error from exc
+
+            if response.status_code == 401:
+                raise LLMAuthenticationError(self._format_provider_error(response))
+            if response.status_code == 429 or response.status_code >= 500:
+                last_error = LLMClientError(self._format_provider_error(response))
+                if attempt < attempts - 1:
+                    await self._sleep_backoff(attempt, reason=f"HTTP {response.status_code}")
+                    continue
+                raise last_error
+            if response.status_code >= 400:
+                raise LLMClientError(self._format_provider_error(response))
+
+            return response.json()
+
+        # Unreachable, but keeps type checkers satisfied.
+        raise last_error or LLMClientError("LLM request failed")
+
+    async def _sleep_backoff(self, attempt: int, *, reason: str) -> None:
+        delay = self.config.retry_base_delay * (2**attempt)
+        logger.warning(
+            f"{self.config.provider} LLM request failed ({reason}); "
+            f"retrying in {delay:.2f}s (attempt {attempt + 1}/{self.config.max_retries})"
+        )
+        await asyncio.sleep(delay)
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -215,6 +258,8 @@ class LLMClient:
             raise LLMResponseError("LLM response choice did not include a message")
 
         content = self._normalize_content(message.get("content"))
+        raw_usage = data.get("usage")
+        usage = dict(raw_usage) if isinstance(raw_usage, dict) else {}
         return LLMResponse(
             content=content,
             raw=data,
@@ -225,6 +270,7 @@ class LLMClient:
                 else None
             ),
             tool_calls=self._parse_tool_calls(message.get("tool_calls")),
+            usage=usage,
         )
 
     @staticmethod

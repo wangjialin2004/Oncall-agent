@@ -1,165 +1,126 @@
-"""向量存储管理器 - 封装 Milvus VectorStore 操作"""
+"""Vector store manager backed directly by PyMilvus."""
 
+import time
+import uuid
+from typing import Any
 
-from langchain_core.documents import Document
-from langchain_milvus import Milvus
 from loguru import logger
+from pymilvus import Collection
 
 from app.config import config
 from app.core.milvus_client import milvus_manager
+from app.models.document import RetrievedDocument
 from app.services.vector_embedding_service import vector_embedding_service
 
-# 统一使用 biz collection
 COLLECTION_NAME = "biz"
 
 
 class VectorStoreManager:
-    """向量存储管理器"""
+    """Manage vector writes and simple reads for the business knowledge collection."""
 
     def __init__(self):
-        """初始化向量存储管理器"""
-        self.vector_store = None
         self.collection_name = COLLECTION_NAME
 
-    def _initialize_vector_store(self):
-        """初始化 Milvus VectorStore"""
+    def add_documents(self, documents: list[RetrievedDocument]) -> list[str]:
+        """Embed and insert documents into Milvus."""
+        if not documents:
+            return []
+
         try:
-            # 必须在 PyMilvus / langchain_milvus 访问 Collection 之前建立连接，
-            # 否则会出现 ConnectionNotExistException: should create connection first.
-            # （模块导入时就会执行此处，早于 FastAPI lifespan 中的 milvus_manager.connect）
-            _ = milvus_manager.connect()
-
-            connection_args = {
-                "host": config.milvus_host,
-                "port": config.milvus_port,
-            }
-
-            # 创建 LangChain Milvus VectorStore
-            # 使用 biz collection，字段映射由配置控制，默认兼容旧的 vector 字段。
-            self.vector_store = Milvus(
-                embedding_function=vector_embedding_service,
-                collection_name=self.collection_name,
-                connection_args=connection_args,
-                auto_id=False,  # 使用自定义 id
-                drop_old=False,
-                text_field="content",  # 文本内容存储到 content 字段
-                vector_field=config.rag_dense_vector_field,  # 向量存储字段
-                primary_field="id",  # 主键字段
-                metadata_field="metadata",  # 元数据字段
-            )
-
-            logger.info(
-                f"VectorStore 初始化成功: {config.milvus_host}:{config.milvus_port}, "
-                f"collection: {self.collection_name}"
-            )
-
-        except Exception as e:
-            logger.error(f"VectorStore 初始化失败: {e}")
-            raise
-
-    def add_documents(self, documents: list[Document]) -> list[str]:
-        """
-        批量添加文档到向量存储（自动批量向量化）
-
-        Args:
-            documents: 文档列表
-
-        Returns:
-            List[str]: 文档 ID 列表
-        """
-        try:
-            self._ensure_vector_store()
-            import time
-            import uuid
             start_time = time.time()
-
-            # 为每个文档生成唯一 id（因为 auto_id=False）
+            collection = self._get_collection()
             ids = [str(uuid.uuid4()) for _ in documents]
+            contents = [doc.page_content for doc in documents]
+            vectors = vector_embedding_service.embed_documents(contents)
 
-            # LangChain Milvus 的 add_documents 会自动调用 embedding_function
-            # 并进行批量处理，性能更好
-            result_ids = self.vector_store.add_documents(documents, ids=ids)
+            if len(vectors) != len(documents):
+                raise RuntimeError(
+                    f"Embedding count mismatch: documents={len(documents)}, embeddings={len(vectors)}"
+                )
+
+            rows = [
+                {
+                    "id": doc_id,
+                    config.rag_dense_vector_field: vector,
+                    "content": content,
+                    "metadata": doc.metadata,
+                }
+                for doc_id, vector, content, doc in zip(
+                    ids,
+                    vectors,
+                    contents,
+                    documents,
+                    strict=True,
+                )
+            ]
+
+            collection.insert(rows)
+            collection.flush()
 
             elapsed = time.time() - start_time
             logger.info(
-                f"批量添加 {len(documents)} 个文档到 VectorStore 完成, "
-                f"耗时: {elapsed:.2f}秒, 平均: {elapsed/len(documents):.2f}秒/个"
+                f"Added {len(documents)} documents to Milvus, elapsed={elapsed:.2f}s, "
+                f"avg={elapsed / len(documents):.2f}s"
             )
-            return result_ids
+            return ids
         except Exception as e:
-            logger.error(f"添加文档失败: {e}")
+            logger.error(f"Add documents failed: {e}")
             raise
 
     def delete_by_source(self, file_path: str) -> int:
-        """
-        删除指定文件的所有文档
-
-        Args:
-            file_path: 文件路径
-
-        Returns:
-            int: 删除的文档数量
-        """
+        """Delete all chunks for a source file."""
         try:
-            # 使用 milvus_manager 获取已连接的 collection
-            collection = milvus_manager.get_collection()
+            collection = self._get_collection()
 
-            # metadata 是 JSON 字段，使用 JSON 路径查询语法
-            # _source 是文档的来源文件路径
             escaped_file_path = file_path.replace("\\", "\\\\").replace('"', '\\"')
             expr = f'metadata["_source"] == "{escaped_file_path}"'
 
             result = collection.delete(expr)
             deleted_count = result.delete_count if hasattr(result, "delete_count") else 0
 
-            logger.info(f"删除文件旧数据: {file_path}, 删除数量: {deleted_count}")
+            logger.info(f"Deleted old vectors for {file_path}, count={deleted_count}")
             return deleted_count
 
         except Exception as e:
-            logger.warning(f"删除旧数据失败 (可能是首次索引): {e}")
+            logger.warning(f"Delete old vectors failed, possibly first indexing run: {e}")
             return 0
 
-    def get_vector_store(self) -> Milvus:
-        """
-        获取 VectorStore 实例
-
-        Returns:
-            Milvus: VectorStore 实例
-        """
-        self._ensure_vector_store()
-        return self.vector_store
+    def get_vector_store(self) -> Collection:
+        """Return the underlying Milvus collection."""
+        return self._get_collection()
 
     def reinitialize(self) -> None:
-        """在 collection 重建后刷新 LangChain Milvus VectorStore。"""
+        """Refresh the collection reference after collection rebuild."""
+        _ = milvus_manager.connect()
 
-        self._initialize_vector_store()
-
-    def _ensure_vector_store(self) -> None:
-        """按需初始化 VectorStore，避免模块导入阶段依赖 live Milvus。"""
-
-        if self.vector_store is None:
-            self._initialize_vector_store()
-
-    def similarity_search(self, query: str, k: int = 3) -> list[Document]:
-        """
-        相似度搜索
-
-        Args:
-            query: 查询文本
-            k: 返回结果数量
-
-        Returns:
-            List[Document]: 相关文档列表
-        """
+    def similarity_search(self, query: str, k: int = 3) -> list[RetrievedDocument]:
+        """Run a dense similarity search and return retrieved documents."""
         try:
-            self._ensure_vector_store()
-            docs = self.vector_store.similarity_search(query, k=k)
-            logger.debug(f"相似度搜索完成: query='{query}', 结果数={len(docs)}")
+            from app.services.vector_search_service import vector_search_service
+
+            results = vector_search_service.search_similar_documents(query, top_k=k)
+            docs: list[RetrievedDocument] = []
+            for result in results:
+                metadata: dict[str, Any] = {
+                    "id": result.id,
+                    "score": result.score,
+                    "source": result.source,
+                    "retrieval_type": result.retrieval_type,
+                    "rank": result.rank,
+                    **result.metadata,
+                }
+                docs.append(RetrievedDocument(page_content=result.content, metadata=metadata))
             return docs
         except Exception as e:
-            logger.error(f"相似度搜索失败: {e}")
+            logger.error(f"Similarity search failed: {e}")
             return []
 
+    def _get_collection(self) -> Collection:
+        try:
+            return milvus_manager.get_collection()
+        except RuntimeError:
+            _ = milvus_manager.connect()
+            return milvus_manager.get_collection()
 
-# 全局单例
+
 vector_store_manager = VectorStoreManager()
