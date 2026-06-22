@@ -1,4 +1,4 @@
-"""Unified assistant API (SSE streaming over the Router + Expert Agents)."""
+"""Unified assistant API (SSE streaming over the Harness orchestrator)."""
 
 import inspect
 import json
@@ -7,10 +7,10 @@ from fastapi import APIRouter, Depends
 from loguru import logger
 from sse_starlette.sse import EventSourceResponse
 
+from app.agent.harness import harness_service
 from app.models.request import ChatRequest
 from app.services.conversation_service import conversation_service
-from app.services.router_service import router_service
-from app.services.session_scope_service import require_session_owner, scope_session_id
+from app.services.session_scope_service import require_session_owner
 
 router = APIRouter()
 
@@ -36,15 +36,16 @@ async def assistant(
     request: ChatRequest,
     owner_key: str = Depends(require_session_owner),
 ):
-    scoped_session_id = scope_session_id(request.id, owner_key)
     logger.info(f"[会话 {request.id}] 收到统一助手请求: {request.question}")
 
     async def event_generator():
         try:
-            stream_kwargs = {"session_id": scoped_session_id}
-            if "owner_key" in inspect.signature(router_service.stream).parameters:
+            stream_service = harness_service
+            # Conversation turns and harness memory both use the user-visible session id.
+            stream_kwargs = {"session_id": request.id}
+            if "owner_key" in inspect.signature(stream_service.stream).parameters:
                 stream_kwargs["owner_key"] = owner_key
-            async for event in router_service.stream(request.question, **stream_kwargs):
+            async for event in stream_service.stream(request.question, **stream_kwargs):
                 yield {"event": "message", "data": json.dumps(event, ensure_ascii=False, default=str)}
                 event_type = event.get("type")
                 if event_type == "complete":

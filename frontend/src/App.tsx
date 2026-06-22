@@ -26,6 +26,7 @@ import type {
 
 const SESSION_STORAGE_KEY = "currentSessionId";
 const RUNNING_PLACEHOLDER = "Running...";
+const TYPING_INTERVAL_MS = 28;
 
 function createId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -120,6 +121,91 @@ export default function App() {
   const abortRef = useRef<AbortController | null>(null);
   // Assistant message id of the turn currently streaming, so events route correctly.
   const activeIdRef = useRef<string>("");
+  const typingQueuesRef = useRef<Record<string, string[]>>({});
+  const typingTimersRef = useRef<Record<string, number>>({});
+  const completedAnswersRef = useRef<Record<string, string>>({});
+
+  function clearTyping(assistantId?: string) {
+    const ids = assistantId ? [assistantId] : Object.keys(typingTimersRef.current);
+    for (const id of ids) {
+      const timer = typingTimersRef.current[id];
+      if (timer) {
+        window.clearInterval(timer);
+      }
+      delete typingTimersRef.current[id];
+      delete typingQueuesRef.current[id];
+      delete completedAnswersRef.current[id];
+    }
+  }
+
+  function finishTyping(assistantId: string) {
+    const completedAnswer = completedAnswersRef.current[assistantId];
+    if (completedAnswer !== undefined) {
+      setMessages((items) =>
+        items.map((item) =>
+          item.id === assistantId
+            ? { ...item, content: completedAnswer || item.content, status: "completed" }
+            : item,
+        ),
+      );
+      delete completedAnswersRef.current[assistantId];
+    }
+  }
+
+  function flushTyping(assistantId: string) {
+    const timer = typingTimersRef.current[assistantId];
+    if (timer) {
+      window.clearInterval(timer);
+    }
+    delete typingTimersRef.current[assistantId];
+    delete typingQueuesRef.current[assistantId];
+    finishTyping(assistantId);
+  }
+
+  function appendTypedCharacter(assistantId: string, character: string) {
+    setMessages((items) =>
+      items.map((item) =>
+        item.id === assistantId
+          ? {
+              ...item,
+              content: (item.content === RUNNING_PLACEHOLDER ? "" : item.content) + character,
+            }
+          : item,
+      ),
+    );
+  }
+
+  function startTyping(assistantId: string) {
+    if (typingTimersRef.current[assistantId]) {
+      return;
+    }
+
+    typingTimersRef.current[assistantId] = window.setInterval(() => {
+      const queue = typingQueuesRef.current[assistantId] ?? [];
+      const next = queue.shift();
+
+      if (next) {
+        appendTypedCharacter(assistantId, next);
+        return;
+      }
+
+      window.clearInterval(typingTimersRef.current[assistantId]);
+      delete typingTimersRef.current[assistantId];
+      delete typingQueuesRef.current[assistantId];
+      finishTyping(assistantId);
+    }, TYPING_INTERVAL_MS);
+  }
+
+  function enqueueTypingText(assistantId: string, text: string) {
+    if (!text) {
+      return;
+    }
+    typingQueuesRef.current[assistantId] = [
+      ...(typingQueuesRef.current[assistantId] ?? []),
+      ...Array.from(text),
+    ];
+    startTyping(assistantId);
+  }
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -131,6 +217,7 @@ export default function App() {
 
   const loadSession = useCallback(async (sid: string) => {
     abortRef.current?.abort();
+    clearTyping();
     activeIdRef.current = "";
     localStorage.setItem(SESSION_STORAGE_KEY, sid);
     setSessionId(sid);
@@ -181,12 +268,15 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth]);
 
+  useEffect(() => () => clearTyping(), []);
+
   function handleLogin(token: string, username: string) {
     setAuth({ token, username });
   }
 
   async function handleLogout() {
     abortRef.current?.abort();
+    clearTyping();
     weakAcceptIfNeeded(runs[activeIdRef.current]);
     if (auth?.token) {
       await logout(auth.token);
@@ -207,29 +297,33 @@ export default function App() {
     }
 
     if (event.type === "content") {
-      setMessages((items) =>
-        items.map((item) =>
-          item.id === assistantId
-            ? {
-                ...item,
-                content: (item.content === RUNNING_PLACEHOLDER ? "" : item.content) + event.data,
-              }
-            : item,
-        ),
-      );
+      enqueueTypingText(assistantId, event.data);
     } else if (event.type === "report") {
+      clearTyping(assistantId);
       setMessages((items) =>
         items.map((item) => (item.id === assistantId ? { ...item, content: event.report } : item)),
       );
     } else if (event.type === "complete") {
-      setMessages((items) =>
-        items.map((item) =>
-          item.id === assistantId
-            ? { ...item, content: event.answer || item.content, status: "completed" }
-            : item,
-        ),
-      );
+      if (typingTimersRef.current[assistantId]) {
+        completedAnswersRef.current[assistantId] = event.answer;
+      } else if (event.answer) {
+        completedAnswersRef.current[assistantId] = event.answer;
+        enqueueTypingText(assistantId, event.answer);
+      } else {
+        setMessages((items) =>
+          items.map((item) =>
+            item.id === assistantId
+              ? {
+                  ...item,
+                  content: item.content === RUNNING_PLACEHOLDER ? "" : item.content,
+                  status: "completed",
+                }
+              : item,
+          ),
+        );
+      }
     } else if (event.type === "error") {
+      clearTyping(assistantId);
       setMessages((items) =>
         items.map((item) =>
           item.id === assistantId
@@ -247,7 +341,15 @@ export default function App() {
       const prev = current[assistantId] ?? makeRun({ runId: assistantId, sessionId });
       let next = prev;
       if (event.type === "route_selected") {
-        next = { ...prev, route: event.route, mode: event.mode, status: "running" };
+        next = {
+          ...prev,
+          route: event.route,
+          mode: event.mode,
+          status: "running",
+          events: event.timelineEvent
+            ? normalizeTimelineEvents([...prev.events, event.timelineEvent])
+            : prev.events,
+        };
       } else if (
         event.type === "agent_event" ||
         event.type === "tool_event" ||
@@ -265,7 +367,9 @@ export default function App() {
           status: "completed",
           answer: event.answer,
           caseId: event.case_id,
-          events: normalizeTimelineEvents(event.events.length > 0 ? event.events : prev.events),
+          events: normalizeTimelineEvents(
+            event.events.length > 0 ? [...prev.events, ...event.events] : prev.events,
+          ),
         };
       } else if (event.type === "error") {
         next = {
@@ -281,6 +385,9 @@ export default function App() {
 
   async function handleSend(message: string) {
     abortRef.current?.abort();
+    if (activeIdRef.current) {
+      flushTyping(activeIdRef.current);
+    }
     weakAcceptIfNeeded(runs[activeIdRef.current]);
     const controller = new AbortController();
     abortRef.current = controller;
@@ -352,6 +459,7 @@ export default function App() {
 
   function handleNewSession() {
     abortRef.current?.abort();
+    clearTyping();
     weakAcceptIfNeeded(runs[activeIdRef.current]);
     const id = createId("session");
     localStorage.setItem(SESSION_STORAGE_KEY, id);
@@ -390,6 +498,7 @@ export default function App() {
     if (!assistantId) {
       return;
     }
+    clearTyping(assistantId);
     setMessages((items) =>
       items.map((item) =>
         item.id === assistantId && item.status === "running"

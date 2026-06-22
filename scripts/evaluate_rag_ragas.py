@@ -234,16 +234,32 @@ def create_ragas_embeddings(ragas_settings: dict[str, str]) -> Any:
     return LangchainEmbeddingsWrapper(embeddings)
 
 
+async def _generate_answer(question: str, *, session_id: str) -> str:
+    """Generate an answer via the knowledge-base Q&A expert (RAG path).
+
+    The standalone RAG agent service was removed together with its duplicate
+    conversation stack; the knowledge expert is now the canonical RAG Q&A path.
+    """
+    from app.agent.experts.knowledge import knowledge_expert
+
+    parts: list[str] = []
+    async for event in knowledge_expert.run(
+        message=question, session_id=session_id, trace_id=session_id
+    ):
+        if event.get("type") == "content":
+            parts.append(str(event.get("data") or ""))
+    return "".join(parts)
+
+
 async def collect_rows(*, cases_path: Path, top_k: int, skip_generation: bool, limit: int | None) -> list[dict[str, Any]]:
     from app.core.milvus_client import milvus_manager
-    from app.services.rag_agent_service import RagAgentService
     from app.services.vector_search_service import vector_search_service
 
     cases = load_cases(cases_path)
     if limit is not None:
         cases = cases[: max(0, limit)]
 
-    agent = None if skip_generation else RagAgentService(streaming=False)
+    generate_answers = not skip_generation
     rows: list[dict[str, Any]] = []
 
     ensure_retrieval_dependencies_available(milvus_manager)
@@ -254,8 +270,10 @@ async def collect_rows(*, cases_path: Path, top_k: int, skip_generation: bool, l
             sources = [_source_from_result(item) for item in results]
             trace = build_retrieval_trace(results)
             response = ""
-            if agent is not None:
-                response = await agent.query(case.question, session_id=f"ragas-eval-{index}")
+            if generate_answers:
+                response = await _generate_answer(
+                    case.question, session_id=f"ragas-eval-{index}"
+                )
 
             rows.append(
                 build_ragas_row(

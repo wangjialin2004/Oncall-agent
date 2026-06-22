@@ -35,6 +35,7 @@ export function translateBackendEvent(
         route,
         reason: String(payload.summary ?? ""),
         mode,
+        timelineEvent: payload as unknown as TimelineEvent,
       };
     case "agent_event":
     case "tool_event":
@@ -69,17 +70,30 @@ export function translateBackendEvent(
   }
 }
 
+function normalizeSseLineEndings(value: string, isFinal = false): string {
+  const normalized = value.replace(/\r\n/g, "\n");
+  return isFinal ? normalized.replace(/\r/g, "\n") : normalized.replace(/\r(?!$)/g, "\n");
+}
+
 /** Parse the `data:` lines out of a single SSE frame. */
 export function parseSseFrame(frame: string): Record<string, unknown> | null {
-  const dataLines = frame
+  const dataLines = normalizeSseLineEndings(frame, true)
     .split("\n")
-    .filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trim());
+    .flatMap((line) => {
+      if (line === "data") {
+        return [""];
+      }
+      if (!line.startsWith("data:")) {
+        return [];
+      }
+      const value = line.slice(5);
+      return [value.startsWith(" ") ? value.slice(1) : value];
+    });
   if (dataLines.length === 0) {
     return null;
   }
   try {
-    return JSON.parse(dataLines.join("\n")) as Record<string, unknown>;
+    return JSON.parse(dataLines.join("\n").trim()) as Record<string, unknown>;
   } catch {
     return null;
   }
@@ -136,7 +150,7 @@ export async function streamAgent(args: StreamAgentArgs): Promise<void> {
       break;
     }
     buffer += decoder.decode(value, { stream: true });
-    buffer = buffer.replace(/\r\n/g, "\n");
+    buffer = normalizeSseLineEndings(buffer);
     let separatorIndex = buffer.indexOf("\n\n");
     while (separatorIndex >= 0) {
       const frame = buffer.slice(0, separatorIndex);
@@ -146,6 +160,8 @@ export async function streamAgent(args: StreamAgentArgs): Promise<void> {
     }
   }
 
+  buffer += decoder.decode();
+  buffer = normalizeSseLineEndings(buffer, true);
   if (buffer.trim().length > 0) {
     dispatch(buffer);
   }

@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from app.config import config
+from app.utils.serialization import json_loads as _json_loads
+from app.utils.time import utc_now as _utc_now
 
 
 class UserPreferenceService:
@@ -119,17 +120,6 @@ class UserPreferenceService:
             connection.commit()
         finally:
             connection.close()
-
-
-def _json_loads(value: str, default: Any) -> Any:
-    try:
-        return json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return default
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 user_preference_service = UserPreferenceService()

@@ -25,8 +25,8 @@ from typing import Any
 
 from loguru import logger
 
+from app.agent.agent_loop import estimate_tokens
 from app.agent.events import make_agent_event
-from app.agent.experts.base import estimate_tokens
 from app.config import config
 from app.core.llm_client import ChatMessage
 

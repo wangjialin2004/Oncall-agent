@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -65,7 +65,7 @@ describe("multi-turn conversation UI", () => {
 
     // The streamed text shows in the chat bubble (and also the side-panel report).
     expect((await screen.findAllByText("实时输出")).length).toBeGreaterThan(0);
-    expect(screen.queryByText("Running...")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Running...")).not.toBeInTheDocument());
   });
 
   it("lists past conversations and restores one when clicked", async () => {

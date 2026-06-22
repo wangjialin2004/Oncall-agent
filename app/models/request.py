@@ -21,11 +21,3 @@ class ChatRequest(BaseModel):
             }
         }
     )
-
-
-class ClearRequest(BaseModel):
-    """清空会话请求"""
-
-    session_id: str = Field(..., description="会话 ID", alias="sessionId")
-
-    model_config = ConfigDict(populate_by_name=True)

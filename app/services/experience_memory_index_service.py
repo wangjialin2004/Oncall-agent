@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from difflib import SequenceMatcher
 from typing import Any
 
 from loguru import logger
@@ -11,6 +10,7 @@ from pymilvus import Collection, CollectionSchema, DataType, FieldSchema, utilit
 from app.config import config
 from app.core.milvus_client import milvus_manager
 from app.services.vector_embedding_service import vector_embedding_service
+from app.utils.text import normalize_text as _normalize, text_similarity as _text_similarity
 
 VECTOR_DIM = 1024
 ID_MAX_LENGTH = 100
@@ -249,14 +249,6 @@ class ExperienceMemoryIndexService:
 experience_memory_index_service = ExperienceMemoryIndexService()
 
 
-def _normalize(text: str) -> str:
-    return " ".join((text or "").strip().lower().split())
-
-
-def _text_similarity(left: str, right: str) -> float:
-    if not left or not right:
-        return 0.0
-    return SequenceMatcher(None, left, right).ratio()
 
 
 def _distance_to_similarity(distance: float) -> float:

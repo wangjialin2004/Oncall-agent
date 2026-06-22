@@ -15,14 +15,6 @@ class ChatResponse(BaseModel):
     session_id: str = Field(..., description="会话 ID")
 
 
-class SessionInfoResponse(BaseModel):
-    """会话信息响应"""
-
-    session_id: str = Field(..., description="会话 ID")
-    message_count: int = Field(..., description="消息数量")
-    history: list[dict[str, str]] = Field(..., description="历史消息列表")
-
-
 class ApiResponse(BaseModel):
     """通用 API 响应"""
 

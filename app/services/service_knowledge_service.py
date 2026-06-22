@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from app.config import config
+from app.utils.time import utc_now as _utc_now
 
 
 class ServiceKnowledgeService:
@@ -370,10 +369,6 @@ def _relation_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "environment": row["environment"],
         "updated_at": row["updated_at"],
     }
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 service_knowledge_service = ServiceKnowledgeService()

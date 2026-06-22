@@ -1,5 +1,7 @@
 import { Activity, Send, Square } from "lucide-react";
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import type { AgentMode, ChatMessage, RunStatus } from "../types/events";
 
@@ -111,7 +113,11 @@ export function ChatWorkspace({
                       }
                     : {})}
                 >
-                  {item.content}
+                  {item.role === "assistant" ? (
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown>
+                  ) : (
+                    item.content
+                  )}
                 </div>
               </article>
             );

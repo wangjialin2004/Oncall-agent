@@ -53,11 +53,18 @@ frontend/dist/
 # Environment
 .env
 .env.local
+.env.*
+!.env.example
 
 # Logs
 logs/
 *.log
 *.pid
+
+# Local runtime/test artifacts
+output/
+.playwright-cli/
+.playwright-mcp/
 
 # Database
 *.db

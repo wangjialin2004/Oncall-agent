@@ -323,6 +323,7 @@ class MilvusClientManager:
             _ = self.connect()
         if self._collection is None:
             raise RuntimeError("Collection 未初始化，请先调用 connect()")
+        self._load_collection()
         return self._collection
 
     def health_check(self) -> bool:

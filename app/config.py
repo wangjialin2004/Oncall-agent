@@ -28,15 +28,15 @@ class Settings(BaseSettings):
 
     # DashScope 配置
     dashscope_api_key: str = ""  # 默认空字符串，实际使用需从环境变量加载
-    dashscope_model: str = "qwen-max"
+    dashscope_model: str = ""
     dashscope_embedding_model: str = "text-embedding-v4"  # v4 支持多种维度（默认 1024）
 
     # Generic LLM provider configuration. When unset, the custom LLM client
     # falls back to the legacy DashScope settings above.
-    llm_provider: str = ""
-    llm_base_url: str = ""
+    llm_provider: str = "openai"  # openai | azure | custom
+    llm_base_url: str = "https://dasuapi.com/v1"
     llm_api_key: str = ""
-    llm_model: str = ""
+    llm_model: str = "gpt-5.4"
     llm_timeout: float = 60.0
     # 瞬时错误（429 / 5xx / 网络超时）的指数退避重试次数；鉴权错误不重试
     llm_max_retries: int = 2
@@ -45,8 +45,33 @@ class Settings(BaseSettings):
     # Router + 专家 Agent 配置
     # 语义路由低于该置信度时回退到综合诊断（最稳，可跨域排查）
     router_min_confidence: float = 0.55
+    # 将关键词分为强/弱两层；弱词只作为语义路由提示，避免单个泛化词误导路由
+    router_keyword_tiering_enabled: bool = True
     # 单个专家执行超时（秒），超时返回降级答案
     expert_timeout_seconds: float = 60.0
+
+    # Harness 主循环配置（默认关闭，旧 RouterService 路径保留可回滚）
+    harness_enabled: bool = False
+    harness_max_steps: int = 6
+    harness_token_budget: int = 16000
+    harness_history_max_turns: int = 6
+    harness_timeout_seconds: float = 90.0
+    harness_mcp_enabled: bool = False
+    harness_delegation_enabled: bool = True
+    harness_tool_timeout_seconds: float = 30.0
+    harness_tool_max_output_chars: int = 6000
+    # 工具瞬时错误（超时/网络/5xx）的有限重试次数；鉴权/权限类错误不重试
+    harness_tool_max_retries: int = 1
+    harness_tool_retry_backoff_seconds: float = 0.5
+    # 连续多少步“重复工具调用且无新增证据”后提前收尾，防止空转
+    harness_no_progress_limit: int = 2
+    # harness 直连日志类工具时，对超大输出走 analyze_logs 聚类摘要而非硬截断
+    harness_log_pipeline_enabled: bool = True
+    # 证据自检为低置信度/有缺口时，在最终答案前显式插入缺口声明（纠正型自检）
+    harness_corrective_verify_enabled: bool = True
+    # 规划/自检是否改用 LLM 驱动（默认关闭，回退到确定性规则版）
+    harness_llm_planning_enabled: bool = False
+    harness_llm_verify_enabled: bool = False
 
     # 日志分析管线（处理上万行日志）
     # 进入聚类前允许处理的最大原始行数（超出按时间倒序截断并提示）
@@ -67,7 +92,7 @@ class Settings(BaseSettings):
 
     # RAG 配置
     rag_top_k: int = 3
-    rag_model: str = "qwen-max"  # 使用快速响应模型，不带扩展思考
+    rag_model: str = "gpt-5.4"  # 使用快速响应模型，不带扩展思考
     rag_retrieval_mode: str = "dense"  # dense | bm25 | hybrid
     rag_dense_weight: float = 0.7
     rag_bm25_weight: float = 0.3

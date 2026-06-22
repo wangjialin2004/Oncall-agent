@@ -6,8 +6,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from app.core.llm_client import ChatMessage, ToolCall, ToolDefinition
-from app.core.runtime_tools import RuntimeTool, run_tool
+from app.core.llm_client import ToolDefinition
+from app.core.runtime_tools import RuntimeTool
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,54 +24,6 @@ def tool_to_definition(tool: RuntimeTool) -> ToolDefinition:
     description = tool.description.strip()
     parameters = tool.parameters or {"type": "object", "properties": {}}
     return ToolDefinition(name=name, description=description, parameters=parameters)
-
-
-async def execute_tool_calls(
-    tool_calls: list[ToolCall],
-    tools: list[RuntimeTool],
-) -> list[ToolExecutionResult]:
-    tool_by_name = {tool.name: tool for tool in tools}
-    results: list[ToolExecutionResult] = []
-    for tool_call in tool_calls:
-        tool = tool_by_name.get(tool_call.name)
-        if tool is None:
-            results.append(
-                ToolExecutionResult(
-                    call_id=tool_call.id,
-                    tool_name=tool_call.name,
-                    content=f"Tool not found: {tool_call.name}",
-                    success=False,
-                )
-            )
-            continue
-        try:
-            raw = await run_tool(tool, tool_call.arguments)
-            results.append(
-                ToolExecutionResult(
-                    call_id=tool_call.id,
-                    tool_name=tool_call.name,
-                    content=_stringify_tool_result(raw),
-                    success=True,
-                    raw=raw,
-                )
-            )
-        except Exception as exc:
-            results.append(
-                ToolExecutionResult(
-                    call_id=tool_call.id,
-                    tool_name=tool_call.name,
-                    content=f"Tool execution failed: {exc}",
-                    success=False,
-                )
-            )
-    return results
-
-
-def tool_result_messages(results: list[ToolExecutionResult]) -> list[ChatMessage]:
-    return [
-        ChatMessage(role="tool", content=result.content, tool_call_id=result.call_id)
-        for result in results
-    ]
 
 
 def _stringify_tool_result(raw: Any) -> str:

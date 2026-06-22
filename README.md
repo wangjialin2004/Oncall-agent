@@ -127,15 +127,7 @@ python -c "import requests, os, time; [requests.post('http://localhost:9900/api/
 - **Web 界面**: http://localhost:9900
 - **API 文档**: http://localhost:9900/docs
 
-### New Agent Gateway UI
-
-Backend:
-
-```powershell
-python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
-```
-
-Frontend:
+### 前端开发界面
 
 ```powershell
 cd frontend
@@ -143,18 +135,8 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. The frontend calls `POST /api/agent/stream` through the Vite
+Open `http://localhost:5173`. The frontend calls `POST /api/assistant` through the Vite
 dev proxy and displays realtime agent events in the right-side process panel.
-
-If port `8000` is already occupied, run the backend on another port and point the frontend proxy
-at it:
-
-```powershell
-python -m uvicorn backend.main:app --host 0.0.0.0 --port 8001
-cd frontend
-$env:AGENT_GATEWAY_API_TARGET="http://localhost:8001"
-npm run dev
-```
 
 ## 📡 API 接口
 
@@ -162,8 +144,6 @@ npm run dev
 
 | 功能 | 方法 | 路径 | 说明 |
 |------|------|------|------|
-| 普通对话 | POST | `/api/chat` | 一次性返回 |
-| 流式对话 | POST | `/api/chat_stream` | SSE 流式输出 |
 | 统一助手 | POST | `/api/assistant` | 自动路由到 RAG 或 AIOps 诊断 |
 | AIOps 诊断 | POST | `/api/aiops` | 自动故障诊断（流式） |
 | 诊断反馈提交 | POST | `/api/aiops/feedback` | 记录用户确认的根因、处理结果和反馈 |
@@ -174,17 +154,6 @@ npm run dev
 ### 使用示例
 
 ```bash
-# 普通对话
-curl -X POST "http://localhost:9900/api/chat" \
-  -H "Content-Type: application/json" \
-  -d '{"Id":"session-123","Question":"你好"}'
-
-# 流式对话
-curl -X POST "http://localhost:9900/api/chat_stream" \
-  -H "Content-Type: application/json" \
-  -d '{"Id":"session-123","Question":"你好"}' \
-  --no-buffer
-
 # 统一助手：根据意图自动选择 RAG 或 AIOps；AIOps 路由会返回 case_id
 curl -X POST "http://localhost:9900/api/assistant" \
   -H "Content-Type: application/json" \

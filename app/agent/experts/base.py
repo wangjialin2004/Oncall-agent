@@ -5,38 +5,36 @@ generic multi-round tool-calling loop implemented here. ``run`` is an async
 generator yielding normalized timeline events (``agent_event`` / ``tool_event``)
 and ``content`` chunks, so the router can stream them straight to the frontend.
 
-The comprehensive-diagnosis expert does NOT use this loop (it wraps the existing
-LangGraph pipeline); see ``diagnosis.py``.
+The loop's primitives (token/usage helpers, the guarded tool executor, the
+per-result event streaming) live in the shared kernel ``app.agent.agent_loop``,
+which the unified harness uses too — experts and harness share one kernel.
+
+The comprehensive-diagnosis expert does NOT bypass this loop; see ``diagnosis.py``.
 """
 
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import AsyncGenerator, Sequence
 from typing import Any, Protocol
 
 from loguru import logger
 
-from app.config import config
-from app.core.llm_client import ChatMessage, LLMClient, LLMClientConfig, ToolCall
+from app.agent.agent_loop import (
+    GuardedToolExecutor,
+    merge_usage,
+    stream_tool_results,
+    tool_call_payload,
+)
+from app.agent.events import make_agent_event
+from app.core.llm_client import ChatMessage, LLMClient, new_llm_client
 from app.core.runtime_tools import RuntimeTool
-from app.core.tool_calling import execute_tool_calls, tool_to_definition
-from app.agent.events import make_agent_event, make_tool_event
+from app.core.tool_calling import tool_to_definition
 
 ExpertEvent = dict[str, Any]
 
 # Cap tool-calling rounds so a misbehaving model can't loop forever.
 DEFAULT_MAX_TOOL_ROUNDS = 3
-
-
-def estimate_tokens(text: str) -> int:
-    """Cheap, provider-neutral token estimate.
-
-    CJK-heavy operational text averages well under 2 chars/token, but ~2.5 is a
-    safe upper bound for budgeting. We only need an order-of-magnitude gate.
-    """
-    return max(1, int(len(text) / 2.5))
 
 
 class ExpertAgent(Protocol):
@@ -48,24 +46,6 @@ class ExpertAgent(Protocol):
     def run(
         self, *, message: str, session_id: str, trace_id: str, context: str = ""
     ) -> AsyncGenerator[ExpertEvent, None]: ...
-
-
-def _tool_call_payload(tool_call: ToolCall) -> dict[str, Any]:
-    return {
-        "id": tool_call.id,
-        "type": "function",
-        "function": {
-            "name": tool_call.name,
-            "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
-        },
-    }
-
-
-def _merge_usage(total: dict[str, int], usage: dict[str, Any]) -> None:
-    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-        value = usage.get(key)
-        if isinstance(value, (int, float)):
-            total[key] = total.get(key, 0) + int(value)
 
 
 class ToolCallingExpert:
@@ -104,7 +84,28 @@ class ToolCallingExpert:
         return message
 
     def _new_llm_client(self) -> LLMClient:
-        return LLMClient(LLMClientConfig.from_settings(config))
+        return new_llm_client()
+
+    def _make_result_processor(self, *, client: LLMClient, trace_id: str):
+        """Adapt ``transform_tool_result`` to the shared kernel's result processor."""
+
+        async def process(result: Any):
+            content = result.content
+            extra: list[ExpertEvent] = []
+            try:
+                content = await self.transform_tool_result(
+                    tool_name=result.tool_name,
+                    content=content,
+                    raw=result.raw,
+                    events_sink=extra,
+                    trace_id=trace_id,
+                    llm_client=client,
+                )
+            except Exception as exc:  # transform must never break the loop
+                logger.warning(f"{self.agent_label} 结果后处理失败: {exc}")
+            return content, extra, []
+
+        return process
 
     async def run(
         self, *, message: str, session_id: str, trace_id: str, context: str = ""
@@ -123,6 +124,9 @@ class ToolCallingExpert:
         )
 
         client = self._new_llm_client()
+        # max_output_chars=0: keep raw tool output so transform_tool_result hooks
+        # (e.g. the log pipeline) see full content instead of a truncated prefix.
+        executor = GuardedToolExecutor(max_output_chars=0)
         try:
             tools = await self.get_tools()
             tool_defs = [tool_to_definition(tool) for tool in tools]
@@ -135,70 +139,75 @@ class ToolCallingExpert:
             ]
 
             answer = ""
-            extra_events: list[ExpertEvent] = []
-            for round_index in range(self.max_tool_rounds):
-                response = await client.complete(
-                    messages,
+            answer_streamed = False
+            for _round_index in range(self.max_tool_rounds):
+                if not tool_defs:
+                    async for chunk in self._stream_final_answer(
+                        client=client,
+                        messages=messages,
+                        temperature=self.temperature,
+                    ):
+                        answer += chunk
+                        yield {"type": "content", "data": chunk, "agent": self.agent_label}
+                    answer_streamed = True
+                    break
+
+                response = None
+                async for event in self._stream_chat_turn(
+                    client=client,
+                    messages=messages,
                     tools=tool_defs or None,
                     tool_choice="auto" if tool_defs else None,
                     temperature=self.temperature,
-                )
-                _merge_usage(usage_total, response.usage)
+                ):
+                    chunk = event.get("content")
+                    if chunk:
+                        answer += str(chunk)
+                        answer_streamed = True
+                        yield {"type": "content", "data": str(chunk), "agent": self.agent_label}
+                    if event.get("response") is not None:
+                        response = event["response"]
+                if response is None:
+                    break
+                merge_usage(usage_total, response.usage)
 
                 if not response.tool_calls:
-                    answer = response.content
+                    if not answer:
+                        answer = response.content
                     break
 
                 messages.append(
                     ChatMessage(
                         role="assistant",
                         content=response.content,
-                        tool_calls=[_tool_call_payload(tc) for tc in response.tool_calls],
+                        tool_calls=[tool_call_payload(tc) for tc in response.tool_calls],
                     )
                 )
 
-                tool_results = await execute_tool_calls(response.tool_calls, tools)
+                tool_results = await executor.execute(response.tool_calls, tools)
                 args_by_id = {tc.id: tc.arguments for tc in response.tool_calls}
-                for result in tool_results:
-                    tool_started = time.perf_counter()
-                    content = result.content
-                    try:
-                        content = await self.transform_tool_result(
-                            tool_name=result.tool_name,
-                            content=content,
-                            raw=result.raw,
-                            events_sink=extra_events,
-                            trace_id=trace_id,
-                            llm_client=client,
-                        )
-                    except Exception as exc:  # transform must never break the loop
-                        logger.warning(f"{self.agent_label} 结果后处理失败: {exc}")
-
-                    for ev in extra_events:
-                        yield ev
-                    extra_events.clear()
-
-                    yield make_tool_event(
-                        agent=self.agent_label,
-                        tool=result.tool_name,
-                        status="completed" if result.success else "failed",
-                        evidence_id=result.call_id,
-                        summary=_summarize(content),
-                        payload={"arguments": args_by_id.get(result.call_id, {})},
-                        trace_id=trace_id,
-                        span_id=f"tool:{result.call_id}",
-                        duration_ms=(time.perf_counter() - tool_started) * 1000,
-                    )
-                    messages.append(
-                        ChatMessage(role="tool", content=content, tool_call_id=result.call_id)
-                    )
+                async for event in stream_tool_results(
+                    tool_results,
+                    messages=messages,
+                    agent_label=self.agent_label,
+                    trace_id=trace_id,
+                    args_by_id=args_by_id,
+                    process_result=self._make_result_processor(client=client, trace_id=trace_id),
+                    measure_duration=True,
+                ):
+                    yield event
             else:
                 # Exhausted rounds without a final answer: ask once more, no tools.
-                response = await client.complete(messages, temperature=self.temperature)
-                _merge_usage(usage_total, response.usage)
-                answer = response.content
+                async for chunk in self._stream_final_answer(
+                    client=client,
+                    messages=messages,
+                    temperature=self.temperature,
+                ):
+                    answer += chunk
+                    yield {"type": "content", "data": chunk, "agent": self.agent_label}
+                answer_streamed = True
 
-            if answer:
+            if answer and not answer_streamed:
                 yield {"type": "content", "data": answer, "agent": self.agent_label}
 
             yield make_agent_event(
@@ -233,10 +242,52 @@ class ToolCallingExpert:
         finally:
             await client.aclose()
 
+    async def _stream_final_answer(
+        self,
+        *,
+        client: Any,
+        messages: list[ChatMessage],
+        temperature: float,
+    ) -> AsyncGenerator[str, None]:
+        stream_complete = getattr(client, "stream_complete", None)
+        if stream_complete is None:
+            response = await client.complete(messages, temperature=temperature)
+            yield response.content
+            return
+        async for chunk in stream_complete(messages, temperature=temperature):
+            yield str(chunk)
 
-def _summarize(text: str, limit: int = 300) -> str:
-    text = (text or "").strip().replace("\n", " ")
-    return text[:limit]
+    async def _stream_chat_turn(
+        self,
+        *,
+        client: Any,
+        messages: list[ChatMessage],
+        temperature: float,
+        tools: list[Any] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        stream_chat = getattr(client, "stream_chat", None)
+        if stream_chat is None:
+            response = await client.complete(
+                messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                temperature=temperature,
+            )
+            yield {"response": response}
+            return
+        async for event in stream_chat(
+            messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            temperature=temperature,
+        ):
+            content = str(getattr(event, "content", "") or "")
+            if content:
+                yield {"content": content}
+            response = getattr(event, "response", None)
+            if response is not None:
+                yield {"response": response}
 
 
 async def collect_tools(

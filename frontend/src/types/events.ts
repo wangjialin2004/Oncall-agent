@@ -15,6 +15,7 @@ export type RouteSelectedEvent = {
   route: AgentRoute;
   reason: string;
   mode: AgentMode;
+  timelineEvent?: TimelineEvent;
 };
 
 export type TimelineEvent = {

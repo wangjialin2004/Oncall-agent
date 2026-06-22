@@ -4,12 +4,25 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "../../App";
+import { streamAgent } from "../../api/agentStream";
 
 Element.prototype.scrollIntoView = vi.fn();
 
 vi.mock("../../api/agentStream", () => ({
   streamAgent: vi.fn(async ({ onEvent }) => {
-    onEvent({ type: "route_selected", route: "diagnosis", reason: "test_diagnosis", mode: "auto" });
+    onEvent({
+      type: "route_selected",
+      route: "diagnosis",
+      reason: "test_diagnosis",
+      mode: "auto",
+      timelineEvent: {
+        type: "route_event",
+        agent: "router",
+        route: "diagnosis",
+        status: "completed",
+        summary: "test_diagnosis",
+      },
+    });
     onEvent({
       type: "agent_event",
       agent: "diagnosis",
@@ -17,6 +30,18 @@ vi.mock("../../api/agentStream", () => ({
       status: "in_progress",
       summary: "综合诊断开始",
       payload: {},
+    });
+    onEvent({
+      type: "agent_event",
+      agent: "harness",
+      stage: "plan",
+      status: "completed",
+      summary: "已生成调度计划",
+      payload: {
+        todos: ["确认目标", "选择工具"],
+        required_evidence: ["指标曲线"],
+        required_params: [{ name: "target", prompt: "服务名", reason: "指标查询需要目标" }],
+      },
     });
     onEvent({ type: "content", data: "诊断结论已确认" });
     onEvent({
@@ -51,6 +76,7 @@ vi.mock("../../api/conversationApi", () => ({
 describe("App", () => {
   afterEach(() => {
     cleanup();
+    vi.mocked(streamAgent).mockClear();
   });
 
   it("sends a message and renders realtime agent events", async () => {
@@ -62,7 +88,15 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByText("智能体过程")).toBeInTheDocument();
+    expect(await screen.findByText("路由分发")).toBeInTheDocument();
     expect(await screen.findByText("综合诊断开始")).toBeInTheDocument();
+    expect(await screen.findByText("已生成调度计划")).toBeInTheDocument();
+    for (const detailsToggle of screen.getAllByText("查看调度详情")) {
+      await user.click(detailsToggle);
+    }
+    expect(await screen.findByText("计划步骤")).toBeInTheDocument();
+    expect(await screen.findByText("确认目标")).toBeInTheDocument();
+    expect(await screen.findByText("服务名：指标查询需要目标")).toBeInTheDocument();
     expect(await screen.findByText("已完成")).toBeInTheDocument();
     expect((await screen.findAllByText("诊断结论已确认")).length).toBeGreaterThan(0);
   });
@@ -85,5 +119,24 @@ describe("App", () => {
       assistantAnswer: "诊断结论已确认",
     });
     expect(await screen.findByText("已采纳，将沉淀为长期经验。")).toBeInTheDocument();
+  });
+
+  it("renders a complete answer when no content chunks arrive", async () => {
+    vi.mocked(streamAgent).mockImplementationOnce(async ({ onEvent }) => {
+      onEvent({
+        type: "complete",
+        route: "diagnosis",
+        answer: "fallback answer",
+        case_id: "",
+        events: [],
+      });
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(screen.getByRole("textbox"), "hello");
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByText("fallback answer")).toBeInTheDocument();
   });
 });

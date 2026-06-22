@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
+from collections.abc import AsyncGenerator
 from typing import Any, Literal
 
 import httpx
@@ -86,6 +87,12 @@ class LLMResponse:
     usage: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class LLMStreamChunk:
+    content: str = ""
+    response: LLMResponse | None = None
+
+
 class LLMClientError(RuntimeError):
     """Base error for custom LLM client failures."""
 
@@ -142,6 +149,104 @@ class LLMClient:
         data = await self._post_with_retry(payload)
         return self._parse_response(data)
 
+    async def stream_complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str | None = None,
+        temperature: float = 0.7,
+        extra_body: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """Stream final assistant content from an OpenAI-compatible SSE response.
+
+        This intentionally supports content-only final answers. Tool-call turns still
+        use ``complete()`` so callers receive fully parsed tool call objects.
+        """
+
+        async for event in self.stream_chat(
+            messages,
+            model=model,
+            temperature=temperature,
+            extra_body=extra_body,
+        ):
+            if event.content:
+                yield event.content
+
+    async def stream_chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str | None = None,
+        temperature: float = 0.7,
+        tools: list[ToolDefinition] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        extra_body: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[LLMStreamChunk, None]:
+        """Stream a chat turn while preserving the final parsed response.
+
+        Text deltas are yielded immediately as ``content`` chunks. After the SSE
+        stream finishes, one final event carries the assembled ``LLMResponse`` so
+        tool-call loops can continue without falling back to blocking
+        ``complete()``.
+        """
+
+        payload: dict[str, Any] = {
+            "model": model or self.config.model,
+            "messages": [self._message_to_payload(message) for message in messages],
+            "temperature": temperature,
+            "stream": True,
+        }
+        if tools:
+            payload["tools"] = [self._tool_to_payload(tool) for tool in tools]
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
+        if extra_body:
+            payload.update(extra_body)
+
+        content_parts: list[str] = []
+        raw_chunks: list[dict[str, Any]] = []
+        tool_call_parts: dict[int, dict[str, Any]] = {}
+        usage: dict[str, Any] = {}
+        finish_reason: str | None = None
+        response_model: str | None = None
+
+        async for data in self._stream_with_retry(payload):
+            raw_chunks.append(data)
+            if isinstance(data.get("model"), str):
+                response_model = data["model"]
+            raw_usage = data.get("usage")
+            if isinstance(raw_usage, dict):
+                usage = dict(raw_usage)
+
+            choices = data.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            first_choice = choices[0]
+            if not isinstance(first_choice, dict):
+                continue
+            if isinstance(first_choice.get("finish_reason"), str):
+                finish_reason = first_choice["finish_reason"]
+            delta = first_choice.get("delta")
+            if not isinstance(delta, dict):
+                continue
+
+            chunk = self._normalize_content(delta.get("content"))
+            if chunk:
+                content_parts.append(chunk)
+                yield LLMStreamChunk(content=chunk)
+            self._accumulate_stream_tool_calls(delta.get("tool_calls"), tool_call_parts)
+
+        raw_tool_calls = self._tool_call_parts_to_payload(tool_call_parts)
+        response = LLMResponse(
+            content="".join(content_parts),
+            raw={"stream_chunks": raw_chunks},
+            model=response_model,
+            finish_reason=finish_reason,
+            tool_calls=self._parse_tool_calls(raw_tool_calls),
+            usage=usage,
+        )
+        yield LLMStreamChunk(response=response)
+
     async def _post_with_retry(self, payload: dict[str, Any]) -> dict[str, Any]:
         """POST chat completions with exponential backoff on transient failures.
 
@@ -179,6 +284,78 @@ class LLMClient:
 
         # Unreachable, but keeps type checkers satisfied.
         raise last_error or LLMClientError("LLM request failed")
+
+    async def _stream_with_retry(
+        self, payload: dict[str, Any]
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        attempts = max(0, self.config.max_retries) + 1
+        for attempt in range(attempts):
+            try:
+                async with self._client.stream(
+                    "POST",
+                    self._chat_completions_url(),
+                    headers=self._headers(),
+                    json=payload,
+                ) as response:
+                    if response.status_code == 401:
+                        raise LLMAuthenticationError(await self._format_provider_error_async(response))
+                    if response.status_code == 429 or response.status_code >= 500:
+                        error = LLMClientError(await self._format_provider_error_async(response))
+                        if attempt < attempts - 1:
+                            await self._sleep_backoff(
+                                attempt, reason=f"HTTP {response.status_code}"
+                            )
+                            continue
+                        raise error
+                    if response.status_code >= 400:
+                        raise LLMClientError(await self._format_provider_error_async(response))
+
+                    async for payload in self._iter_sse_payloads(response):
+                        yield payload
+                    return
+            except (LLMAuthenticationError, LLMClientError):
+                raise
+            except httpx.HTTPError as exc:
+                error = LLMClientError(f"{self.config.provider} LLM stream error: {exc}")
+                if attempt < attempts - 1:
+                    await self._sleep_backoff(attempt, reason=str(exc))
+                    continue
+                raise error from exc
+
+    async def _iter_sse_payloads(
+        self, response: httpx.Response
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        data_lines: list[str] = []
+        async for raw_line in response.aiter_lines():
+            line = raw_line.strip()
+            if not line:
+                if data_lines:
+                    raw_data = "\n".join(data_lines).strip()
+                    data_lines = []
+                    if raw_data == "[DONE]":
+                        return
+                    try:
+                        payload = json.loads(raw_data)
+                    except json.JSONDecodeError as exc:
+                        raise LLMResponseError(f"Invalid LLM stream payload: {raw_data}") from exc
+                    if isinstance(payload, dict):
+                        yield payload
+                continue
+            if line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                value = line[5:]
+                data_lines.append(value[1:] if value.startswith(" ") else value)
+
+        if data_lines:
+            raw_data = "\n".join(data_lines).strip()
+            if raw_data and raw_data != "[DONE]":
+                try:
+                    payload = json.loads(raw_data)
+                except json.JSONDecodeError as exc:
+                    raise LLMResponseError(f"Invalid LLM stream payload: {raw_data}") from exc
+                if isinstance(payload, dict):
+                    yield payload
 
     async def _sleep_backoff(self, attempt: int, *, reason: str) -> None:
         delay = self.config.retry_base_delay * (2**attempt)
@@ -244,6 +421,19 @@ class LLMClient:
 
         return f"{provider} LLM request failed with HTTP {response.status_code}: {message}"
 
+    async def _format_provider_error_async(self, response: httpx.Response) -> str:
+        content = await response.aread()
+        try:
+            payload = json.loads(content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return (
+                f"{self.config.provider} LLM request failed with HTTP "
+                f"{response.status_code}: {content.decode('utf-8', errors='replace')}"
+            )
+        return self._format_provider_error(
+            httpx.Response(response.status_code, json=payload, request=response.request)
+        )
+
     def _parse_response(self, data: dict[str, Any]) -> LLMResponse:
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
@@ -272,6 +462,58 @@ class LLMClient:
             tool_calls=self._parse_tool_calls(message.get("tool_calls")),
             usage=usage,
         )
+
+    @classmethod
+    def _parse_stream_content(cls, data: dict[str, Any]) -> str:
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            return ""
+        delta = first_choice.get("delta")
+        if not isinstance(delta, dict):
+            return ""
+        return cls._normalize_content(delta.get("content"))
+
+    @staticmethod
+    def _accumulate_stream_tool_calls(
+        raw_tool_calls: Any, tool_call_parts: dict[int, dict[str, Any]]
+    ) -> None:
+        if not isinstance(raw_tool_calls, list):
+            return
+        for raw_call in raw_tool_calls:
+            if not isinstance(raw_call, dict):
+                continue
+            raw_index = raw_call.get("index", len(tool_call_parts))
+            try:
+                index = int(raw_index)
+            except (TypeError, ValueError):
+                index = len(tool_call_parts)
+            part = tool_call_parts.setdefault(
+                index,
+                {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+            )
+            if raw_call.get("id"):
+                part["id"] = str(raw_call["id"])
+            if raw_call.get("type"):
+                part["type"] = str(raw_call["type"])
+            function = raw_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            part_function = part.setdefault("function", {"name": "", "arguments": ""})
+            if function.get("name"):
+                part_function["name"] = f"{part_function.get('name', '')}{function['name']}"
+            if function.get("arguments"):
+                part_function["arguments"] = (
+                    f"{part_function.get('arguments', '')}{function['arguments']}"
+                )
+
+    @staticmethod
+    def _tool_call_parts_to_payload(
+        tool_call_parts: dict[int, dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return [tool_call_parts[index] for index in sorted(tool_call_parts)]
 
     @staticmethod
     def _parse_tool_calls(raw_tool_calls: Any) -> list[ToolCall]:
@@ -324,3 +566,14 @@ class LLMClient:
         if content is None:
             return ""
         return str(content)
+
+
+def new_llm_client() -> LLMClient:
+    """Create an application-configured LLM client from global settings.
+
+    Single construction point for the OpenAI-compatible client so callers don't
+    repeat ``LLMClient(LLMClientConfig.from_settings(config))`` everywhere.
+    """
+    from app.config import config
+
+    return LLMClient(LLMClientConfig.from_settings(config))

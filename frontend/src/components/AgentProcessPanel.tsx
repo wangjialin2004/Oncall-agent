@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Activity, CheckCircle2, CircleAlert, Wrench } from "lucide-react";
+import { Activity, CheckCircle2, CircleAlert, GitBranch, Wrench } from "lucide-react";
 
 import type { AgentRun, TimelineEvent } from "../types/events";
 
@@ -40,6 +40,7 @@ const modeLabels: Record<string, string> = {
 
 const agentLabels: Record<string, string> = {
   router: "路由分发",
+  harness: "统一 Harness",
   knowledge_expert: "知识问答专家",
   metric_expert: "告警/指标专家",
   log_expert: "日志分析专家",
@@ -48,11 +49,22 @@ const agentLabels: Record<string, string> = {
 };
 
 const stageLabels: Record<string, string> = {
+  route: "路由识别",
+  context: "上下文准备",
+  planning: "计划生成",
+  model_decision: "模型决策",
+  model_closing: "模型收尾",
+  report: "报告输出",
   start: "开始",
+  plan: "规划",
+  verify: "证据自检",
+  budget: "预算控制",
+  no_progress: "无进展检测",
   complete: "完成",
   error: "出错",
   log_pipeline: "日志预处理",
   log_mapreduce: "日志摘要",
+  clarify_missing_params: "补充参数",
   timeout_fallback: "超时降级",
 };
 
@@ -64,6 +76,9 @@ function labelFor(value: string | undefined, labels: Record<string, string>) {
 }
 
 function eventIcon(event: TimelineEvent) {
+  if (event.type === "route_event") {
+    return <GitBranch size={16} aria-hidden="true" />;
+  }
   if (event.type === "tool_event") {
     return <Wrench size={16} aria-hidden="true" />;
   }
@@ -77,6 +92,9 @@ function eventIcon(event: TimelineEvent) {
 }
 
 function eventTitle(event: TimelineEvent) {
+  if (event.type === "route_event") {
+    return "路由分发";
+  }
   if (event.type === "tool_event") {
     return `工具调用：${event.tool || "unknown"}`;
   }
@@ -84,10 +102,134 @@ function eventTitle(event: TimelineEvent) {
 }
 
 function eventSubtitle(event: TimelineEvent) {
+  if (event.type === "route_event") {
+    return labelFor(event.route, routeLabels) || event.route || "route";
+  }
   if (event.type === "tool_event") {
     return labelFor(event.status, statusLabels) || event.type;
   }
   return labelFor(event.stage, stageLabels) || labelFor(event.status, statusLabels) || event.type;
+}
+
+function asStringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.map((item) => String(item)).filter((item) => item.trim().length > 0)
+    : [];
+}
+
+function formatValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") {
+    return "无";
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function PayloadList({ title, items }: { title: string; items: string[] }) {
+  if (items.length === 0) {
+    return null;
+  }
+  return (
+    <div className="event-detail-block">
+      <span>{title}</span>
+      <ul>
+        {items.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function PayloadFields({ fields }: { fields: Array<[string, unknown]> }) {
+  const visible = fields.filter(([, value]) => value !== undefined && value !== null && value !== "");
+  if (visible.length === 0) {
+    return null;
+  }
+  return (
+    <dl className="event-detail-fields">
+      {visible.map(([label, value]) => (
+        <div key={label}>
+          <dt>{label}</dt>
+          <dd>{formatValue(value)}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function RequiredParams({ value }: { value: unknown }) {
+  if (!Array.isArray(value) || value.length === 0) {
+    return null;
+  }
+  return (
+    <div className="event-detail-block">
+      <span>必需参数</span>
+      <ul>
+        {value.map((item, index) => {
+          if (!item || typeof item !== "object") {
+            return <li key={index}>{formatValue(item)}</li>;
+          }
+          const data = item as Record<string, unknown>;
+          const prompt = formatValue(data.prompt || data.name || `参数 ${index + 1}`);
+          const reason = data.reason ? `：${formatValue(data.reason)}` : "";
+          return <li key={`${prompt}-${index}`}>{`${prompt}${reason}`}</li>;
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function EventDetails({ event }: { event: TimelineEvent }) {
+  const payload = (event.payload ?? {}) as Record<string, unknown>;
+  const todos = asStringList(payload.todos);
+  const requiredEvidence = asStringList(payload.required_evidence);
+  const gaps = asStringList(payload.gaps);
+  const hasDetails =
+    Object.keys(payload).length > 0 ||
+    event.duration_ms !== undefined ||
+    Boolean(event.usage) ||
+    Boolean(event.trace_id) ||
+    Boolean(event.span_id);
+
+  if (!hasDetails) {
+    return null;
+  }
+
+  return (
+    <details className="event-details">
+      <summary>查看调度详情</summary>
+      <PayloadList title="计划步骤" items={todos} />
+      <PayloadList title="要求证据" items={requiredEvidence} />
+      <RequiredParams value={payload.required_params} />
+      <PayloadList title="自检缺口" items={gaps} />
+      <PayloadFields
+        fields={[
+          ["置信度", payload.confidence],
+          ["成功证据数", payload.evidence_count],
+          ["失败证据数", payload.failed_evidence_count],
+          ["可用工具数", payload.tool_count],
+          ["最大步数", payload.max_steps],
+          ["历史轮数", payload.history_turns],
+          ["Token 估算", payload.token_estimate],
+          ["耗时 ms", event.duration_ms],
+          ["Trace", event.trace_id],
+          ["Span", event.span_id],
+          ["工具参数", payload.arguments],
+          ["默认值", payload.defaults],
+          ["原因", payload.reason],
+          ["证据缺口", payload.evidence_gap],
+          ["用量", event.usage],
+        ]}
+      />
+    </details>
+  );
 }
 
 function timelineKey(event: TimelineEvent, index: number) {
@@ -193,6 +335,7 @@ export function AgentProcessPanel({ run, onFeedback }: AgentProcessPanelProps) {
                   <span>{eventSubtitle(event)}</span>
                   <p>{event.summary || "事件已记录"}</p>
                   {event.evidence_id ? <code>{event.evidence_id}</code> : null}
+                  <EventDetails event={event} />
                 </div>
               </li>
             ))}

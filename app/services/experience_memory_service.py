@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-import json
-import re
 import sqlite3
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +13,9 @@ from loguru import logger
 
 from app.config import config
 from app.services.memory_safety import redact_memory_text
+from app.utils.serialization import json_dumps as _json_dumps, json_loads as _json_loads
+from app.utils.text import normalize_text as _normalize, text_similarity as _text_similarity
+from app.utils.time import utc_now as _utc_now
 
 
 class ExperienceMemoryService:
@@ -502,16 +501,6 @@ class ExperienceMemoryService:
 _PLACEHOLDER_ROOT_CAUSE = "用户反馈确认但未填写根因"
 
 
-def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").strip().lower())
-
-
-def _text_similarity(left: str, right: str) -> float:
-    if not left or not right:
-        return 0.0
-    return SequenceMatcher(None, left, right).ratio()
-
-
 def _is_placeholder_root_cause(root_cause: str) -> bool:
     normalized = _normalize(root_cause)
     return not normalized or normalized == _normalize(_PLACEHOLDER_ROOT_CAUSE)
@@ -602,21 +591,6 @@ def _memory_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat()
-
-
-def _json_dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, default=str)
-
-
-def _json_loads(value: str, default: Any) -> Any:
-    try:
-        return json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return default
 
 
 from app.services.experience_memory_index_service import experience_memory_index_service

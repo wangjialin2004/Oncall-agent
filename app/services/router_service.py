@@ -21,22 +21,32 @@ from pydantic import BaseModel, Field
 
 from app.agent.events import make_agent_event, make_route_event
 from app.agent.experts.registry import DEFAULT_ROUTE, EXPERT_ROUTES, get_expert
+from app.agent.stream_common import CLARIFY_TEXT, TIMELINE_EVENT_TYPES, build_timeout_report
 from app.config import config
-from app.core.llm_client import ChatMessage, LLMClient, LLMClientConfig
+from app.core.llm_client import ChatMessage, new_llm_client
 from app.services.user_preference_service import user_preference_service
 
-# Events persisted into the final response timeline (everything except content/complete).
-TIMELINE_EVENT_TYPES = {"route_event", "agent_event", "tool_event", "decision_event"}
 DEFAULT_EXPERT_TIMEOUT_SECONDS = 60.0
 
 SEMANTIC_ROUTER_SYSTEM_PROMPT = (
     "You are a routing classifier for an intelligent operations (OnCall) assistant. "
     "Classify the user request into exactly one route:\n"
-    "- knowledge: documentation / concept / how-to / knowledge-base Q&A\n"
-    "- metric: alerts, monitoring metrics, CPU/memory/disk/latency/error-rate/resource usage\n"
+    "- knowledge: documentation, concepts, generic how-to, runbooks, operating procedures, "
+    "and knowledge-base Q&A. Use this for generic questions such as how to solve high CPU "
+    "usage when no concrete target or time window is provided.\n"
+    "- metric: current/live alerts, monitoring metric lookup, Prometheus queries, CPU/memory/"
+    "disk/latency/error-rate checks for a concrete host, service, pod, instance, or time window.\n"
     "- log: log inspection, error logs, exception stacks, log analysis\n"
     "- change: recent deploys/releases, config changes, rollbacks, change tickets\n"
     "- diagnosis: complex or cross-domain incident root-cause analysis / troubleshooting\n"
+    "Business priority rules:\n"
+    "1. If the user asks for a generic solution, steps, explanation, or best practice "
+    "without a specific observed target/time range, prefer knowledge even if resource words "
+    "such as CPU, memory, disk, latency, or error rate appear.\n"
+    "2. Choose metric only when the user wants to inspect current monitoring data, active "
+    "alerts, dashboards, Prometheus, or provides a concrete target/time range.\n"
+    "3. Choose diagnosis when the request describes an ongoing incident, business impact, "
+    "multiple symptoms, or asks for root-cause troubleshooting across domains.\n"
     "When unsure or the request spans multiple domains, prefer diagnosis. "
     "Return only compact JSON with keys route, reason (short Chinese), and confidence "
     '(0..1), e.g. {"route":"metric","reason":"询问告警","confidence":0.9}'
@@ -48,6 +58,7 @@ class RouteDecision:
     route: str
     reason: str
     confidence: float = 1.0
+    hints: tuple[str, ...] = ()
 
 
 class SemanticRouteResult(BaseModel):
@@ -58,35 +69,57 @@ class SemanticRouteResult(BaseModel):
     confidence: float = Field(default=0.5, description="Confidence in [0, 1].")
 
 
-SemanticRouter = Callable[[str], RouteDecision | Awaitable[RouteDecision]]
+SemanticRouter = Callable[..., RouteDecision | Awaitable[RouteDecision]]
 
 
 class RouterService:
     """Route user messages to one expert agent and stream its events."""
 
-    # Per-category keyword fast path. Single-category hit → decide immediately;
-    # multi-category or no hit → fall through to the semantic classifier.
-    KEYWORDS: dict[str, tuple[str, ...]] = {
+    # Strong keywords keep the low-latency fast path. Weak keywords only hint
+    # semantic routing so generic how-to questions are not hijacked by one word.
+    STRONG_KEYWORDS: dict[str, tuple[str, ...]] = {
         "metric": (
-            "告警", "报警", "指标", "监控", "cpu", "内存", "memory", "磁盘", "disk",
-            "延迟", "耗时", "错误率", "资源", "负载", "qps", "prometheus", "水位",
+            "告警", "报警", "指标", "监控", "错误率", "qps", "prometheus", "水位",
         ),
         "log": (
-            "日志", "log", "报错", "堆栈", "异常栈", "traceback", "stacktrace",
+            "日志", "log", "堆栈", "异常栈", "traceback", "stacktrace",
             "错误日志", "栈信息",
         ),
         "change": (
             "变更", "发布", "上线", "部署", "deploy", "release", "回滚", "rollback",
-            "配置变更", "工单", "灰度",
+            "配置变更", "灰度",
         ),
         "knowledge": (
-            "文档", "知识库", "说明", "怎么", "如何", "步骤", "是什么", "解释",
-            "介绍", "含义", "定义",
+            "文档", "知识库", "含义", "定义",
         ),
         "diagnosis": (
-            "故障", "诊断", "根因", "排查", "不可用", "宕机", "全面分析", "综合",
-            "为什么", "挂了", "全链路",
+            "故障", "诊断", "根因", "不可用", "宕机", "全面分析", "全链路",
         ),
+    }
+    WEAK_KEYWORDS: dict[str, tuple[str, ...]] = {
+        "metric": (
+            "cpu", "内存", "memory", "磁盘", "disk", "延迟", "耗时", "资源", "负载",
+            "状态", "健康", "检测", "检查", "端口", "服务状态", "可达", "存活",
+        ),
+        "log": (
+            "报错",
+        ),
+        "change": (
+            "工单",
+        ),
+        "knowledge": (
+            "说明", "步骤", "是什么", "解释", "介绍",
+        ),
+        "diagnosis": (
+            "排查", "综合", "为什么", "挂了",
+        ),
+    }
+    KEYWORDS: dict[str, tuple[str, ...]] = {
+        "metric": STRONG_KEYWORDS["metric"] + WEAK_KEYWORDS["metric"],
+        "log": STRONG_KEYWORDS["log"] + WEAK_KEYWORDS["log"],
+        "change": STRONG_KEYWORDS["change"] + WEAK_KEYWORDS["change"],
+        "knowledge": STRONG_KEYWORDS["knowledge"] + WEAK_KEYWORDS["knowledge"],
+        "diagnosis": STRONG_KEYWORDS["diagnosis"] + WEAK_KEYWORDS["diagnosis"],
     }
 
     def __init__(
@@ -118,6 +151,16 @@ class RouterService:
             if any(keyword in normalized for keyword in keywords)
         ]
 
+    @staticmethod
+    def _matched_categories_for(
+        normalized: str, keywords_by_route: dict[str, tuple[str, ...]]
+    ) -> list[str]:
+        return [
+            route
+            for route, keywords in keywords_by_route.items()
+            if any(keyword in normalized for keyword in keywords)
+        ]
+
     def route_message(self, message: str) -> RouteDecision:
         """Keyword fast path (synchronous). Returns clarify / a single route / default."""
         normalized = message.strip().lower()
@@ -126,32 +169,63 @@ class RouterService:
         if not any(char.isalnum() for char in normalized):
             return RouteDecision(route="clarify", reason="no_meaningful_text", confidence=1.0)
 
-        matched = self._matched_categories(normalized)
-        if len(matched) == 1:
-            route = matched[0]
-            return RouteDecision(route=route, reason=f"matched_{route}_keyword", confidence=0.9)
-        if not matched:
-            return RouteDecision(route=DEFAULT_ROUTE, reason="default_no_keyword", confidence=0.3)
-        # Multiple categories matched → ambiguous, defer to semantic routing.
-        return RouteDecision(route=DEFAULT_ROUTE, reason="ambiguous_keywords", confidence=0.3)
+        if not getattr(config, "router_keyword_tiering_enabled", True):
+            matched = self._matched_categories(normalized)
+            if len(matched) == 1:
+                route = matched[0]
+                return RouteDecision(route=route, reason=f"matched_{route}_keyword", confidence=0.9)
+            if not matched:
+                return RouteDecision(route=DEFAULT_ROUTE, reason="default_no_keyword", confidence=0.3)
+            return RouteDecision(
+                route=DEFAULT_ROUTE, reason="ambiguous_keywords", confidence=0.3, hints=tuple(matched)
+            )
 
-    async def _semantic_route_message(self, message: str) -> RouteDecision:
+        strong_matched = self._matched_categories_for(normalized, self.STRONG_KEYWORDS)
+        weak_matched = self._matched_categories_for(normalized, self.WEAK_KEYWORDS)
+        hints = tuple(dict.fromkeys([*strong_matched, *weak_matched]))
+
+        if len(strong_matched) == 1 and len(hints) == 1:
+            route = strong_matched[0]
+            return RouteDecision(
+                route=route, reason=f"matched_strong_{route}_keyword", confidence=0.9, hints=hints
+            )
+        if hints:
+            return RouteDecision(
+                route=DEFAULT_ROUTE, reason="keyword_hints_semantic", confidence=0.3, hints=hints
+            )
+        return RouteDecision(route=DEFAULT_ROUTE, reason="default_no_keyword", confidence=0.3)
+
+    async def _semantic_route_message(
+        self, message: str, hints: tuple[str, ...] = ()
+    ) -> RouteDecision:
         if self.semantic_router:
-            result = self.semantic_router(message)
+            if self._semantic_router_accepts_hints():
+                result = self.semantic_router(message, hints=hints)
+            else:
+                result = self.semantic_router(message)
             if inspect.isawaitable(result):
                 result = await result
             return RouteDecision(
                 route=result.route,
                 reason=result.reason,
                 confidence=getattr(result, "confidence", 1.0),
+                hints=getattr(result, "hints", hints),
             )
 
         if self.llm_client is None:
-            self.llm_client = LLMClient(LLMClientConfig.from_settings(config))
+            self.llm_client = new_llm_client()
+        user_content = message
+        if hints:
+            user_content = (
+                f"{message}\n\nKeyword route hints: {', '.join(hints)}. "
+                "These are weak lexical signals only. Do not choose metric solely because "
+                "CPU/memory/disk/latency/error-rate words appear. For generic how-to or "
+                "runbook questions without a concrete target or time window, prefer knowledge."
+            )
         response = await self.llm_client.complete(
             [
                 ChatMessage(role="system", content=SEMANTIC_ROUTER_SYSTEM_PROMPT),
-                ChatMessage(role="user", content=message),
+                ChatMessage(role="user", content=user_content),
             ],
             temperature=0,
         )
@@ -160,6 +234,19 @@ class RouterService:
             route=result.route,
             reason=f"llm_semantic_{result.route}",
             confidence=result.confidence,
+            hints=hints,
+        )
+
+    def _semantic_router_accepts_hints(self) -> bool:
+        if self.semantic_router is None:
+            return False
+        try:
+            parameters = inspect.signature(self.semantic_router).parameters
+        except (TypeError, ValueError):
+            return False
+        return any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD or name == "hints"
+            for name, parameter in parameters.items()
         )
 
     @staticmethod
@@ -183,13 +270,13 @@ class RouterService:
         decision = self.route_message(message)
         if decision.route == "clarify":
             return decision
-        # High-confidence single-keyword hit: trust it.
-        if decision.confidence >= 0.9 and decision.reason.startswith("matched_"):
+        # High-confidence strong keyword hit: trust it.
+        if decision.confidence >= 0.9 and decision.reason.startswith("matched_strong_"):
             return decision
 
         # Ambiguous or signal-less: ask the semantic classifier.
         try:
-            semantic = await self._semantic_route_message(message)
+            semantic = await self._semantic_route_message(message, hints=decision.hints)
         except Exception as exc:
             logger.warning(f"LLM 语义路由失败，回退到综合诊断: {exc}")
             return RouteDecision(
@@ -221,7 +308,7 @@ class RouterService:
         yield route_event
 
         if decision.route == "clarify":
-            clarify_text = "请补充你想咨询的问题，或说明需要诊断的服务、告警、日志现象、近期变更。"
+            clarify_text = CLARIFY_TEXT
             yield {"type": "content", "data": clarify_text}
             yield {
                 "type": "complete",
@@ -275,7 +362,11 @@ class RouterService:
             )
             events.append(timeout_event)
             yield timeout_event
-            fallback = self._build_timeout_report(message, decision.route)
+            fallback = build_timeout_report(
+                subject=f"{decision.route} 专家",
+                message=message,
+                timeout_seconds=self.expert_timeout_seconds,
+            )
             answer_parts.append(fallback)
             yield {"type": "content", "data": fallback}
 
@@ -305,14 +396,6 @@ class RouterService:
             aclose = getattr(generator, "aclose", None)
             if aclose:
                 await aclose()
-
-    def _build_timeout_report(self, message: str, route: str) -> str:
-        return (
-            "# 降级响应\n\n"
-            f"- {route} 专家执行超过 {self.expert_timeout_seconds:g} 秒，已先返回可追踪的降级结果。\n"
-            "- 前后端链路与时间线可继续使用，请检查数据源（LLM、MCP、监控/日志）后重试。\n\n"
-            f"原始请求：{message}"
-        )
 
     # --------------------------------------------------------------- non-stream
 
