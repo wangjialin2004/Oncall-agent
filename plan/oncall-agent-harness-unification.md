@@ -147,7 +147,7 @@ HarnessService.stream:
 
 1. **单元（pytest + pytest-asyncio）**：循环停止条件、预算核算、guarded executor（超时/重试/权限/隔离）、上下文构建（历史回灌+压缩）、委派合并、自校验拦截。
 2. **集成**：开关开启时 `/api/assistant` 流出的事件序列正确（route/agent/tool/decision/content/complete），且形状对前端 [agentStream.ts](frontend/src/api/agentStream.ts) 兼容；开关关闭时与现状一致。
-3. **回归**：以 [aiops-docs/](aiops-docs/) 的 5 类场景 + 1 个跨域故障，比对 harness vs 旧路径的路由/证据/结论；断言**事件类型与路由**而非逐字文本（规避非确定性）。可挂接已有 [ragas_pipeline.py](app/evaluation/ragas_pipeline.py) 做答案质量打分。
+3. **回归**：以 [aiops-docs/](aiops-docs/) 的 5 类场景 + 1 个跨域故障，比对 harness vs 旧路径的路由/证据/结论；断言**事件类型与路由**而非逐字文本（规避非确定性）。可挂接 [local_eval_pipeline.py](app/evaluation/local_eval_pipeline.py) 做本地答案质量打分。
 4. **手动 E2E**：起后端（`uvicorn`，端口 9900）+ 前端（`cd frontend && npm run dev`），实际对话验证多轮引用、委派时间线、预算降级、前端面板渲染无异常。
 5. **守护演练**：强制工具超时 / 注入超大日志，确认压缩、降级、隔离按预期触发。
 

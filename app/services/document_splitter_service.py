@@ -1,4 +1,4 @@
-"""Document splitting service without LangChain dependencies."""
+"""Document splitting service without external framework dependencies."""
 
 import hashlib
 import re

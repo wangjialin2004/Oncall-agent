@@ -1,4 +1,4 @@
-"""Generate RAGAS evaluation cases from chunks stored in Milvus.
+"""Generate local RAG evaluation cases from chunks stored in Milvus.
 
 The generated JSONL keeps the existing evaluation contract:
 question, ground_truth, and expected_sources. Extra chunk trace fields are
@@ -235,7 +235,7 @@ def write_jsonl(cases: list[dict[str, Any]], output_path: Path) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate RAGAS cases from Milvus chunks.")
+    parser = argparse.ArgumentParser(description="Generate local RAG evaluation cases from Milvus chunks.")
     parser.add_argument("--output", default="evals/rag_cases_vector_100.jsonl")
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--chunk-limit", type=int, default=1000)

@@ -13,7 +13,7 @@ The system should route each request to a focused expert instead of sending oper
 The repository currently has two overlapping architectures:
 
 - the new flat expert router in `app/services/router_service.py`, with `knowledge`, `metric`, `log`, `change`, and `diagnosis` routes,
-- the old OnCall LangGraph pipeline in `app/services/aiops_service.py`, built from `triage`, `planner`, `executor`, `diagnosis`, and `reporter`.
+- the old fixed OnCall pipeline in `app/services/aiops_service.py`, built from `triage`, `planner`, `executor`, `diagnosis`, and `reporter`.
 
 The new `diagnosis` expert still wraps the old pipeline, so complex requests can fall back into the same planner/executor loop the new architecture is meant to avoid.
 
@@ -140,7 +140,7 @@ Existing SQLite memory databases can be left untouched on disk, but the applicat
 
 ## Success Criteria
 
-- Operational questions no longer enter the old fixed OnCall LangGraph pipeline through the new router.
+- Operational questions no longer enter the old fixed OnCall pipeline through the new router.
 - `diagnosis_expert` answers through the expert architecture, not through `AIOpsService`.
 - No active request creates diagnosis cases, evidence rows, feedback rows, or experience memories.
 - Short-term session identity still works for streamed requests.

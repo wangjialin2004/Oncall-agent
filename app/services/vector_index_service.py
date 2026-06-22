@@ -155,7 +155,7 @@ class VectorIndexService:
 
     def index_single_file(self, file_path: str) -> SingleFileIndexingResult:
         """
-        索引单个文件 (使用新的 LangChain 分割器)
+        索引单个文件 (使用本地文档分割器)
 
         Args:
             file_path: 文件路径

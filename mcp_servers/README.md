@@ -166,7 +166,6 @@ export PROMETHEUS_MEMORY_QUERY='app_memory_usage_percent{service="{service}"}'
 
 - [FastMCP 文档](https://github.com/jlowin/fastmcp)
 - [MCP 协议](https://modelcontextprotocol.io/)
-- [LangGraph 文档](https://langchain-ai.github.io/langgraph/)
 - [主项目 README](../README.md)
 
 ---

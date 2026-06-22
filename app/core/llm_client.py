@@ -109,7 +109,7 @@ class LLMClient:
     """Small OpenAI-compatible chat completions client.
 
     This client intentionally owns URL, API key, request payload, and response parsing
-    so application code can avoid provider-specific LangChain chat wrappers.
+    so application code can avoid provider-specific chat wrappers.
     """
 
     def __init__(

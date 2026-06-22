@@ -2,7 +2,7 @@
 
 This module defines the small protocol used by AIOps/RAG agents when exposing
 tools to the LLM and executing model-requested tool calls. It intentionally does
-not depend on LangChain tool wrappers.
+not depend on external tool wrappers.
 """
 
 from __future__ import annotations

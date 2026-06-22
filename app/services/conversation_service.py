@@ -2,7 +2,7 @@
 
 Stores the user-visible conversation (question + answer + the run's
 route/case/timeline) per ``(owner_key, session_id)`` in a plain SQLite table.
-This is deliberately independent of the LangGraph checkpointer: the checkpointer
+This is deliberately independent of the runtime checkpoint store: the checkpoint store
 is unused on the active ``/api/assistant`` path, so we persist turns directly,
 mirroring the ``UserPreferenceService`` / ``ServiceKnowledgeService`` pattern.
 """

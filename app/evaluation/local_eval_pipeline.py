@@ -1,4 +1,4 @@
-"""Small helpers for the offline RAGAS evaluation pipeline."""
+"""Small helpers for the offline local RAG evaluation pipeline."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def load_cases(path: str | Path) -> list[RagEvalCase]:
     return cases
 
 
-def build_ragas_row(
+def build_eval_row(
     *,
     case: RagEvalCase,
     response: str,
@@ -66,7 +66,7 @@ def build_ragas_row(
     retrieved_heading_paths: list[str] | None = None,
     retrieved_content_lengths: list[int | None] | None = None,
 ) -> dict[str, Any]:
-    """Build one row using RAGAS single-turn column names plus source metadata."""
+    """Build one local evaluation row plus source metadata."""
 
     row = {
         "user_input": case.question,
@@ -92,4 +92,4 @@ def default_output_path(now: datetime | None = None) -> Path:
     """Return the default timestamped CSV output path."""
 
     timestamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
-    return Path("evals") / "results" / f"ragas_{timestamp}.csv"
+    return Path("evals") / "results" / f"local_rag_{timestamp}.csv"

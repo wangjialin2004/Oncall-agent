@@ -121,7 +121,7 @@ class Settings(BaseSettings):
     monitor_target_mode: str = "self"
     log_provider: str = "local"
 
-    # Short-term LangGraph checkpoint (conversation context) — kept.
+    # Short-term conversation checkpoint storage path.
     checkpoint_db_path: str = "volumes/checkpoints.db"
 
     # Long-term memory

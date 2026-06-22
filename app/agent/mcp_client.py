@@ -197,7 +197,7 @@ async def get_mcp_client(
     """Get or initialize the global native MCP client."""
 
     if tool_interceptors:
-        logger.warning("Native MCP client ignores LangChain-style tool_interceptors")
+        logger.warning("Native MCP client ignores external tool_interceptors")
 
     global _mcp_client
     if force_new:
