@@ -40,9 +40,9 @@
 
 ## 界面预览
 
-| 登录页 | 运维助手工作台 |
+| 服务基线管理 | 运维助手工作台 |
 | --- | --- |
-| ![登录页](login-page.png) | ![运维助手工作台](main-app-violet.png) |
+| ![服务基线管理](readme-service-baseline.png) | ![运维助手工作台](readme-oncall-workspace.png) |
 
 > 截图仅展示界面，不含任何真实数据或凭证。
 
