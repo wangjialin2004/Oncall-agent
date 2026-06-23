@@ -1,7 +1,7 @@
 /* ────────────────────────────────────────────────────────
    GOOGLE FONTS
 ──────────────────────────────────────────────────────── */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 /* ────────────────────────────────────────────────────────
    DESIGN TOKENS
@@ -15,55 +15,58 @@ body,
 
 :root {
   /* ── Backgrounds ── */
-  --bg-void:    #06090d;   /* behind everything */
-  --bg-sidebar: #0a0e13;
-  --bg-base:    #0b0f14;   /* main app bg */
-  --bg-surface: #11161d;   /* panels, headers */
-  --bg-raised:  #161d27;   /* cards, elevated */
-  --bg-high:    #1f2732;   /* hover, active */
-  --bg-input:   #0d1218;   /* input fields */
+  --bg-void: #05080c;
+  --bg-sidebar: #081019;
+  --bg-base: #0b1117;
+  --bg-surface: #101923;
+  --bg-raised: #16212d;
+  --bg-high: #202d3b;
+  --bg-input: #0d151e;
+  --paper: #f4f7fb;
+  --paper-2: #e8eef6;
+  --ink: #0f1720;
 
   /* ── Borders ── */
-  --border-0: rgba(150, 170, 190, 0.06);
-  --border-1: rgba(150, 170, 190, 0.12);
-  --border-2: rgba(150, 170, 190, 0.20);
-  --border-3: rgba(150, 170, 190, 0.34);
+  --border-0: rgba(180, 199, 218, 0.08);
+  --border-1: rgba(180, 199, 218, 0.15);
+  --border-2: rgba(180, 199, 218, 0.24);
+  --border-3: rgba(180, 199, 218, 0.38);
 
   /* ── Text ── */
-  --text-0: #e8eef4;   /* headings */
-  --text-1: #aebac8;   /* body */
-  --text-2: #6f7e8e;   /* secondary */
-  --text-3: #46535f;   /* muted */
+  --text-0: #f3f8fd;
+  --text-1: #c3d0dc;
+  --text-2: #8495a7;
+  --text-3: #566474;
 
-  /* ── Brand Accent (cyan) ── */
-  --brand:        #22d3ee;
-  --brand-light:  #67e8f9;
-  --brand-dim:    #0891b2;
-  --brand-fill:   #0e7490;
-  --brand-fill-2: #0891b2;
-  --brand-glow:   rgba(34, 211, 238, 0.20);
-  --brand-subtle: rgba(34, 211, 238, 0.09);
-  --brand-border: rgba(34, 211, 238, 0.28);
+  /* ── Brand Accent ── */
+  --brand: #2dd4bf;
+  --brand-light: #7dded3;
+  --brand-dim: #0f766e;
+  --brand-fill: #0f766e;
+  --brand-fill-2: #0e7490;
+  --brand-glow: rgba(45, 212, 191, 0.18);
+  --brand-subtle: rgba(45, 212, 191, 0.10);
+  --brand-border: rgba(45, 212, 191, 0.30);
 
   /* ── Status: Running (amber) ── */
-  --s-run:        #f59e0b;
-  --s-run-sub:    rgba(245, 158, 11, 0.10);
-  --s-run-border: rgba(245, 158, 11, 0.28);
+  --s-run: #f59e0b;
+  --s-run-sub: rgba(245, 158, 11, 0.12);
+  --s-run-border: rgba(245, 158, 11, 0.32);
 
   /* ── Status: OK ── */
-  --s-ok:        #34d399;
-  --s-ok-sub:    rgba(52, 211, 153, 0.09);
-  --s-ok-border: rgba(52, 211, 153, 0.24);
+  --s-ok: #34d399;
+  --s-ok-sub: rgba(52, 211, 153, 0.10);
+  --s-ok-border: rgba(52, 211, 153, 0.26);
 
   /* ── Status: Error ── */
-  --s-err:        #f87171;
-  --s-err-sub:    rgba(248, 113, 113, 0.09);
-  --s-err-border: rgba(248, 113, 113, 0.24);
+  --s-err: #fb7185;
+  --s-err-sub: rgba(251, 113, 133, 0.10);
+  --s-err-border: rgba(251, 113, 133, 0.28);
 
   /* ── Status: Warn (orange) ── */
-  --s-warn:        #fb923c;
-  --s-warn-sub:    rgba(251, 146, 60, 0.09);
-  --s-warn-border: rgba(251, 146, 60, 0.24);
+  --s-warn: #fb923c;
+  --s-warn-sub: rgba(251, 146, 60, 0.10);
+  --s-warn-border: rgba(251, 146, 60, 0.28);
 
   /* ── Typography ── */
   --font-ui:   'Inter', ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
@@ -88,7 +91,7 @@ body,
   --r-lg:  14px;
   --r-xl:  18px;
   --r-2xl: 24px;
-  --r-∞:   9999px;
+  --r-full: 9999px;
 
   /* ── Spacing (4-pt grid) ── */
   --s1: 4px;
@@ -144,7 +147,7 @@ button { cursor: pointer; border: none; padding: 0; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
   background: var(--border-2);
-  border-radius: var(--r-∞);
+  border-radius: var(--r-full);
 }
 
 /* ────────────────────────────────────────────────────────
@@ -742,7 +745,7 @@ button { cursor: pointer; border: none; padding: 0; }
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  border-radius: var(--r-∞);
+  border-radius: var(--r-full);
   padding: 3px 10px;
   font-size: var(--fs-xs);
   font-weight: 600;
