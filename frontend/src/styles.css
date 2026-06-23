@@ -1545,3 +1545,149 @@ button { cursor: pointer; border: none; padding: 0; }
   line-height: var(--lh-normal);
   margin: 0;
 }
+
+/* --------------------------------------------------------------------------
+   COMMAND CENTER REDESIGN OVERRIDES
+   -------------------------------------------------------------------------- */
+.app-shell {
+  grid-template-columns: 244px minmax(420px, 1fr) minmax(380px, 34vw);
+  background:
+    linear-gradient(120deg, rgba(45, 212, 191, 0.06), transparent 28%),
+    var(--bg-void);
+}
+
+.sidebar {
+  background: linear-gradient(180deg, #081019 0%, #060b12 100%);
+  border-right: 1px solid var(--border-1);
+}
+
+.sidebar::before {
+  background: linear-gradient(135deg, rgba(45, 212, 191, 0.12), transparent 62%);
+}
+
+.sidebar-inner {
+  padding: 18px 16px;
+  gap: 16px;
+}
+
+.sidebar-brand {
+  min-height: 40px;
+}
+
+.sidebar-brand-icon,
+.login-brand-icon {
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--brand-fill-2), var(--brand-fill));
+  box-shadow: 0 10px 28px var(--brand-glow);
+}
+
+.sidebar h1 {
+  font-size: var(--fs-md);
+  font-weight: 800;
+}
+
+.sidebar-action {
+  min-height: 38px;
+  border-radius: 8px;
+  background: rgba(22, 33, 45, 0.74);
+  border-color: var(--border-1);
+}
+
+.sidebar-action.active,
+.session-item.active {
+  background: var(--brand-subtle);
+  border-color: var(--brand-border);
+  color: var(--brand-light);
+}
+
+.session-list {
+  gap: 4px;
+}
+
+.session-item {
+  border-radius: 8px;
+}
+
+.session-open {
+  padding: 8px 10px;
+}
+
+.sidebar-footer {
+  border-top-color: var(--border-1);
+}
+
+.workspace {
+  background: linear-gradient(180deg, #0d151e 0%, #0a1017 100%);
+}
+
+.chat-header {
+  min-height: 68px;
+  padding: 16px clamp(18px, 2.2vw, 34px);
+  background: rgba(16, 25, 35, 0.92);
+  border-bottom: 1px solid var(--border-1);
+}
+
+.chat-header h2 {
+  font-size: var(--fs-lg);
+  font-weight: 800;
+}
+
+.mode-select select {
+  border-radius: 8px;
+  background-color: rgba(22, 33, 45, 0.86);
+}
+
+.messages {
+  padding: 22px clamp(18px, 2.2vw, 34px);
+  gap: 12px;
+}
+
+.empty-state {
+  align-items: flex-start;
+  max-width: 520px;
+  margin: 0 auto;
+  text-align: left;
+}
+
+.empty-state-icon {
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.message-bubble {
+  max-width: min(760px, 86%);
+  border-radius: 12px;
+  padding: 11px 15px;
+}
+
+.message.user .message-bubble {
+  background: linear-gradient(135deg, var(--brand-fill-2), var(--brand-fill));
+  border-radius: 12px 12px 4px 12px;
+  box-shadow: 0 12px 28px rgba(14, 116, 144, 0.20);
+}
+
+.message.assistant .message-bubble {
+  background: rgba(22, 33, 45, 0.74);
+  border-color: var(--border-1);
+  border-radius: 4px 12px 12px 12px;
+}
+
+.message.assistant.selected .message-bubble {
+  border-color: var(--brand-border);
+  box-shadow: 0 0 0 1px var(--brand-border);
+}
+
+.composer {
+  padding: 14px clamp(18px, 2.2vw, 34px);
+  background: rgba(16, 25, 35, 0.96);
+  border-top: 1px solid var(--border-1);
+}
+
+.composer input {
+  border-radius: 8px;
+  background: rgba(13, 21, 30, 0.92);
+}
+
+.icon-button {
+  border-radius: 8px;
+}
