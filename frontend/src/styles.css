@@ -1691,3 +1691,109 @@ button { cursor: pointer; border: none; padding: 0; }
 .icon-button {
   border-radius: 8px;
 }
+
+.process-panel {
+  background: linear-gradient(180deg, #101923 0%, #0b1117 100%);
+  border-left: 1px solid var(--border-1);
+  overflow-y: auto;
+}
+
+.agent-panel {
+  padding: 16px;
+  gap: 12px;
+}
+
+.agent-panel header {
+  padding-bottom: 14px;
+  border-bottom-color: var(--border-1);
+}
+
+.agent-panel h2 {
+  font-size: var(--fs-md);
+  font-weight: 800;
+}
+
+.status-pill {
+  border-radius: var(--r-full);
+  background: rgba(22, 33, 45, 0.82);
+}
+
+.panel-card {
+  border: 1px solid var(--border-1);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(22, 33, 45, 0.76);
+  box-shadow: none;
+}
+
+.panel-card:hover {
+  border-color: var(--border-2);
+  box-shadow: none;
+}
+
+.label {
+  color: var(--text-3);
+}
+
+.timeline > li {
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  padding-bottom: 14px;
+}
+
+.timeline > li:not(:last-child)::before {
+  left: 13px;
+  top: 28px;
+  background: linear-gradient(to bottom, var(--border-2) 0%, transparent 92%);
+}
+
+.timeline-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--brand-subtle);
+  border-color: var(--brand-border);
+  color: var(--brand-light);
+}
+
+.timeline > li > div > strong {
+  color: var(--text-0);
+}
+
+.timeline > li > div > span {
+  color: var(--text-3);
+}
+
+.timeline > li > div > p,
+.event-detail-block li,
+.event-detail-fields dd {
+  overflow-wrap: anywhere;
+}
+
+.timeline > li > div > code {
+  border-radius: 4px;
+  background: rgba(13, 21, 30, 0.9);
+}
+
+.event-details {
+  border-radius: 7px;
+  background: rgba(13, 21, 30, 0.84);
+  border-color: var(--border-1);
+}
+
+.event-details summary {
+  color: var(--brand-light);
+}
+
+.event-detail-fields div {
+  grid-template-columns: 92px minmax(0, 1fr);
+}
+
+.report-card pre {
+  max-height: 32vh;
+  overflow: auto;
+}
+
+.feedback-actions button {
+  border-radius: 7px;
+}
