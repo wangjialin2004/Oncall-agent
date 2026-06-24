@@ -562,8 +562,8 @@ export default function App() {
           <div className="panel-card baseline-side-help">
             <h3>服务基线</h3>
             <p>
-              录入每个服务关键指标（CPU/内存/QPS/P95）的正常区间。诊断时会作为「服务知识增强」附在
-              指标/日志结果中，帮助区分噪声与真异常。
+              录入每个服务关键指标（CPU/内存/QPS/P95）的正常区间。诊断时会作为“服务知识增强”附在
+              指标/日志结果中，帮助区分噪声与真实异常。
             </p>
           </div>
         ) : (

@@ -281,7 +281,7 @@ function ServiceDetailView({ detail, onChanged, onError }: ServiceDetailViewProp
           {detail.baselines.length === 0 ? (
             <tr>
               <td colSpan={6} className="baseline-hint">
-                尚无基线，请在下方新增。
+                暂无基线，请在下方新增。
               </td>
             </tr>
           ) : (
@@ -349,7 +349,7 @@ function BaselineForm({ detail, onSaved, onError }: BaselineFormProps) {
     const min = Number(minValue);
     const max = Number(maxValue);
     if (minValue === "" || maxValue === "" || Number.isNaN(min) || Number.isNaN(max)) {
-      onError("上下限必须为数值");
+      onError("上下限必须为数字");
       return;
     }
     if (min > max) {
