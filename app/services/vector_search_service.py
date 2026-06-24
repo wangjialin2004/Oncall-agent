@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from loguru import logger
-from pymilvus import AnnSearchRequest, Collection, WeightedRanker
+from pymilvus import AnnSearchRequest, Collection, RRFRanker, WeightedRanker
 
 from app.config import config
 from app.core.milvus_client import milvus_manager
@@ -142,10 +142,21 @@ class VectorSearchService:
             raise RuntimeError(f"BM25 搜索失败: {e}") from e
 
     def search_hybrid_documents(self, query: str, top_k: int = 3) -> list[SearchResult]:
-        """使用 dense vector + BM25 sparse vector 混合检索文档。"""
+        """使用 dense vector + BM25 sparse vector 混合检索文档。
+
+        支持两种重排序策略：
+        - weighted: 按配置权重融合分数（WeightedRanker）
+        - rrf: Reciprocal Rank Fusion，基于排名融合（RRFRanker）
+        """
 
         try:
-            logger.info(f"开始 hybrid 搜索, 查询: {query}, topK: {top_k}")
+            hybrid_ranker = str(config.rag_hybrid_ranker or "weighted").strip().lower()
+            rerank = self._build_hybrid_reranker(hybrid_ranker)
+            retrieval_type = f"hybrid_{hybrid_ranker}"
+
+            logger.info(
+                f"开始 hybrid 搜索 (ranker={hybrid_ranker}), 查询: {query}, topK: {top_k}"
+            )
             query_vector = self._embed_query(query)
             collection: Collection = milvus_manager.get_collection()
             dense_request = AnnSearchRequest(
@@ -162,16 +173,31 @@ class VectorSearchService:
             )
             results = collection.hybrid_search(
                 reqs=[dense_request, sparse_request],
-                rerank=WeightedRanker(config.rag_dense_weight, config.rag_bm25_weight),
+                rerank=rerank,
                 limit=top_k,
                 output_fields=["id", "content", "metadata"],
             )
-            search_results = self._parse_results(results, retrieval_type="hybrid")
+            search_results = self._parse_results(results, retrieval_type=retrieval_type)
             logger.info(f"hybrid 搜索完成, 找到 {len(search_results)} 个文档")
             return search_results
         except Exception as e:
             logger.error(f"hybrid 搜索失败: {e}")
             raise RuntimeError(f"hybrid 搜索失败: {e}") from e
+
+    def _build_hybrid_reranker(self, ranker: str):
+        """构建混合检索重排序器。
+
+        Args:
+            ranker: "weighted" 使用 WeightedRanker，"rrf" 使用 RRFRanker。
+
+        Returns:
+            WeightedRanker 或 RRFRanker 实例。
+        """
+        if ranker == "rrf":
+            return RRFRanker(k=config.rag_rrf_k)
+        if ranker != "weighted":
+            logger.warning(f"未知 hybrid ranker: {ranker}，回退到 weighted")
+        return WeightedRanker(config.rag_dense_weight, config.rag_bm25_weight)
 
     def _embed_query(self, query: str) -> list[float]:
         from app.services.vector_embedding_service import vector_embedding_service

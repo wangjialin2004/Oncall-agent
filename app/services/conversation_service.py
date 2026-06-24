@@ -138,6 +138,59 @@ class ConversationService:
             for row in rows
         ]
 
+    def get_rolling_summary(self, owner_key: str, session_id: str) -> dict[str, Any]:
+        """Return the rolling summary state for a conversation."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT memory_summary, memory_summary_turn_index
+                FROM conversations
+                WHERE owner_key = ? AND session_id = ?
+                """,
+                (owner_key, session_id),
+            ).fetchone()
+        if row is None:
+            return {"summary": "", "turn_index": -1}
+        turn_index = row["memory_summary_turn_index"]
+        return {
+            "summary": str(row["memory_summary"] or ""),
+            "turn_index": int(turn_index) if turn_index is not None else -1,
+        }
+
+    def update_rolling_summary(
+        self,
+        *,
+        owner_key: str,
+        session_id: str,
+        summary: str,
+        turn_index: int,
+    ) -> None:
+        """Persist the rolling summary and the latest turn index it covers."""
+        timestamp = _utc_now()
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO conversations (
+                    owner_key, session_id, title, created_at, updated_at,
+                    memory_summary, memory_summary_turn_index
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_key, session_id) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    memory_summary = excluded.memory_summary,
+                    memory_summary_turn_index = excluded.memory_summary_turn_index
+                """,
+                (
+                    owner_key,
+                    session_id,
+                    "新会话",
+                    timestamp,
+                    timestamp,
+                    summary,
+                    int(turn_index),
+                ),
+            )
+
     def delete_session(self, owner_key: str, session_id: str) -> bool:
         """Delete a conversation and its turns. Returns True if it existed."""
         with self._connection() as connection:
@@ -164,9 +217,23 @@ class ConversationService:
                     title TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
+                    memory_summary TEXT NOT NULL DEFAULT '',
+                    memory_summary_turn_index INTEGER NOT NULL DEFAULT -1,
                     PRIMARY KEY (owner_key, session_id)
                 )
                 """
+            )
+            _ensure_column(
+                connection,
+                table="conversations",
+                column="memory_summary",
+                definition="TEXT NOT NULL DEFAULT ''",
+            )
+            _ensure_column(
+                connection,
+                table="conversations",
+                column="memory_summary_turn_index",
+                definition="INTEGER NOT NULL DEFAULT -1",
             )
             connection.execute(
                 """
@@ -207,6 +274,19 @@ def _make_title(user_message: str) -> str:
     if not text:
         return "新会话"
     return text[:_TITLE_MAX_LEN]
+
+
+def _ensure_column(
+    connection: sqlite3.Connection,
+    *,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    if any(row[1] == column for row in rows):
+        return
+    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 conversation_service = ConversationService()

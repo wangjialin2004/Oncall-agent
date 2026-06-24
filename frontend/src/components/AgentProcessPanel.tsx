@@ -66,6 +66,7 @@ const stageLabels: Record<string, string> = {
   log_mapreduce: "日志摘要",
   clarify_missing_params: "补充参数",
   timeout_fallback: "超时降级",
+  delegate_start: "专家委派",
 };
 
 function labelFor(value: string | undefined, labels: Record<string, string>) {
@@ -75,7 +76,38 @@ function labelFor(value: string | undefined, labels: Record<string, string>) {
   return labels[value] || value;
 }
 
+function payloadString(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function expertLabelFromEvent(event: TimelineEvent) {
+  const payload = (event.payload ?? {}) as Record<string, unknown>;
+  const argumentsPayload =
+    payload.arguments && typeof payload.arguments === "object"
+      ? (payload.arguments as Record<string, unknown>)
+      : {};
+  const expert =
+    payloadString(payload.delegated_expert) ||
+    payloadString(payload.expert) ||
+    payloadString(argumentsPayload.expert);
+  if (!expert) {
+    return "";
+  }
+  return agentLabels[expert] || agentLabels[`${expert}_expert`] || expert;
+}
+
+function isDelegateEvent(event: TimelineEvent) {
+  return (
+    event.stage === "delegate_start" ||
+    event.tool === "delegate_to_expert" ||
+    Boolean(expertLabelFromEvent(event))
+  );
+}
+
 function eventIcon(event: TimelineEvent) {
+  if (isDelegateEvent(event)) {
+    return <GitBranch size={16} aria-hidden="true" />;
+  }
   if (event.type === "route_event") {
     return <GitBranch size={16} aria-hidden="true" />;
   }
@@ -95,7 +127,13 @@ function eventTitle(event: TimelineEvent) {
   if (event.type === "route_event") {
     return "路由分发";
   }
+  if (event.stage === "delegate_start") {
+    return `进入专家：${expertLabelFromEvent(event) || "专项专家"}`;
+  }
   if (event.type === "tool_event") {
+    if (event.tool === "delegate_to_expert") {
+      return `专家委派：${expertLabelFromEvent(event) || "专项专家"}`;
+    }
     return `工具调用：${event.tool || "unknown"}`;
   }
   return labelFor(event.agent || event.tool || event.type, agentLabels);
@@ -107,6 +145,9 @@ function eventSubtitle(event: TimelineEvent) {
   }
   if (event.type === "tool_event") {
     return labelFor(event.status, statusLabels) || event.type;
+  }
+  if (event.stage === "delegate_start") {
+    return "进入子专家执行";
   }
   return labelFor(event.stage, stageLabels) || labelFor(event.status, statusLabels) || event.type;
 }
@@ -191,6 +232,7 @@ function EventDetails({ event }: { event: TimelineEvent }) {
   const todos = asStringList(payload.todos);
   const requiredEvidence = asStringList(payload.required_evidence);
   const gaps = asStringList(payload.gaps);
+  const delegatedExpert = expertLabelFromEvent(event);
   const hasDetails =
     Object.keys(payload).length > 0 ||
     event.duration_ms !== undefined ||
@@ -221,6 +263,9 @@ function EventDetails({ event }: { event: TimelineEvent }) {
           ["耗时 ms", event.duration_ms],
           ["Trace", event.trace_id],
           ["Span", event.span_id],
+          ["委派专家", delegatedExpert],
+          ["子任务", payload.subtask],
+          ["委派调用", payload.tool_call_id],
           ["工具参数", payload.arguments],
           ["默认值", payload.defaults],
           ["原因", payload.reason],
@@ -246,6 +291,10 @@ function timelineKey(event: TimelineEvent, index: number) {
   ]
     .filter(Boolean)
     .join("|");
+}
+
+function timelineItemClass(event: TimelineEvent) {
+  return isDelegateEvent(event) ? "delegate" : undefined;
 }
 
 function FeedbackCard({ run, onFeedback }: { run: AgentRun; onFeedback?: FeedbackHandler }) {
@@ -328,7 +377,7 @@ export function AgentProcessPanel({ run, onFeedback }: AgentProcessPanelProps) {
         ) : (
           <ol className="timeline">
             {run.events.map((event, index) => (
-              <li key={timelineKey(event, index)}>
+              <li key={timelineKey(event, index)} className={timelineItemClass(event)}>
                 <div className="timeline-icon">{eventIcon(event)}</div>
                 <div>
                   <strong>{eventTitle(event)}</strong>

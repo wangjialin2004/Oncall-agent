@@ -6,11 +6,17 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncGenerator, Sequence
+from dataclasses import replace
 from typing import Any
 
 from loguru import logger
 
-from app.agent.agent_loop import GuardedToolExecutor, stream_tool_results, tool_call_payload
+from app.agent.agent_loop import (
+    GuardedToolExecutor,
+    estimate_tokens,
+    stream_tool_results,
+    tool_call_payload,
+)
 from app.agent.events import make_agent_event, make_route_event
 from app.agent.experts.log_pipeline import analyze_logs
 from app.agent.experts.registry import DEFAULT_ROUTE, EXPERT_ROUTES, get_expert
@@ -63,6 +69,8 @@ class HarnessService:
             timeout_seconds=float(getattr(config, "harness_timeout_seconds", 90.0)),
             no_progress_limit=int(getattr(config, "harness_no_progress_limit", 2)),
         )
+        # 发往模型的 messages 体量安全网（与累计预算 token_budget 不同：这是“单次请求”护栏）
+        self.message_token_budget = int(getattr(config, "harness_message_token_budget", 60000))
 
     async def stream(
         self, message: str, session_id: str, owner_key: str = ""
@@ -143,7 +151,7 @@ class HarnessService:
                 context_getter=lambda: context_ref["value"],
             )
             tools = catalog.tools
-            context = self.context_builder.build(
+            context = await self.context_builder.abuild(
                 message=message,
                 owner_key=owner_key,
                 session_id=session_id,
@@ -152,9 +160,13 @@ class HarnessService:
                     f"候选领域：{route_decision.route}；原因：{route_decision.reason}；"
                     f"置信度：{route_decision.confidence:.2f}"
                 ),
+                llm_client=client,
             )
             context_ref["value"] = context.system_prompt
             state.add_text_budget(context.system_prompt)
+            for history_message in context.history_messages:
+                state.add_text_budget(history_message.content)
+            state.add_text_budget(message)
 
             start_event = make_agent_event(
                 agent="harness",
@@ -460,6 +472,58 @@ class HarnessService:
         state.timeline_events.append(event)
         return event
 
+    def _truncate_messages_for_model(self, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """Shrink an oversized prompt before sending it to the model.
+
+        The loop appends every tool result to ``messages`` and never drops them,
+        so a long multi-step run (or the no-tool closing call that re-sends the
+        whole history) can exceed the model context window and fail the request.
+        This is a per-request safety net: it compacts the *content* of the oldest
+        history / tool messages — never removing a message — so assistant
+        ``tool_calls`` stay paired with their ``tool`` results. The system prompt,
+        the most recent user question, and the latest assistant/tool tail (newest
+        evidence) are always preserved verbatim.
+        """
+        budget = self.message_token_budget
+        if budget <= 0 or not messages:
+            return messages
+        total = sum(estimate_tokens(item.content or "") for item in messages)
+        if total <= budget:
+            return messages
+
+        protected: set[int] = set()
+        if messages[0].role == "system":
+            protected.add(0)
+        last_user = max(
+            (index for index, item in enumerate(messages) if item.role == "user"),
+            default=-1,
+        )
+        if last_user >= 0:
+            protected.add(last_user)
+        # 只保护“最近一次” assistant 轮及其后续 tool 结果（最新证据），更早的取证轮可压缩。
+        # 注意只替换 content、保留 assistant.tool_calls 与 tool.tool_call_id，配对始终成立。
+        last_assistant = max(
+            (index for index, item in enumerate(messages) if item.role == "assistant"),
+            default=-1,
+        )
+        if last_assistant >= 0:
+            protected.update(range(last_assistant, len(messages)))
+
+        stub = "[早期上下文已压缩以控制 token 预算]"
+        stub_tokens = estimate_tokens(stub)
+        trimmed = list(messages)
+        for index, item in enumerate(trimmed):
+            if total <= budget:
+                break
+            if index in protected:
+                continue
+            original = item.content or ""
+            if estimate_tokens(original) <= stub_tokens:
+                continue
+            total -= estimate_tokens(original) - stub_tokens
+            trimmed[index] = replace(item, content=stub)
+        return trimmed
+
     async def _stream_final_answer(
         self,
         *,
@@ -467,6 +531,7 @@ class HarnessService:
         messages: list[ChatMessage],
         temperature: float,
     ) -> AsyncGenerator[str, None]:
+        messages = self._truncate_messages_for_model(messages)
         stream_complete = getattr(client, "stream_complete", None)
         if stream_complete is None:
             response = await client.complete(messages, temperature=temperature)
@@ -484,6 +549,7 @@ class HarnessService:
         tools: list[Any] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
+        messages = self._truncate_messages_for_model(messages)
         stream_chat = getattr(client, "stream_chat", None)
         if stream_chat is None:
             response = await client.complete(
@@ -516,6 +582,10 @@ class HarnessService:
         client: Any,
         state: HarnessState,
     ) -> AsyncGenerator[dict[str, Any], None]:
+        for event in self._delegate_start_events(tool_calls, state=state):
+            state.timeline_events.append(event)
+            yield event
+
         tool_results = await self.tool_executor.execute(tool_calls, tools)
         args_by_id = {tc.id: tc.arguments for tc in tool_calls}
 
@@ -543,6 +613,38 @@ class HarnessService:
             on_event=state.timeline_events.append,
         ):
             yield event
+
+    def _delegate_start_events(
+        self, tool_calls: list[ToolCall], *, state: HarnessState
+    ) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for tool_call in tool_calls:
+            if tool_call.name != "delegate_to_expert":
+                continue
+            arguments = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
+            expert = str(arguments.get("expert") or DEFAULT_ROUTE).strip()
+            if expert not in EXPERT_ROUTES:
+                expert = DEFAULT_ROUTE
+            subtask = str(arguments.get("subtask") or "").strip()
+            compact_subtask = (
+                f"{subtask[:500]}..." if len(subtask) > 500 else subtask
+            )
+            events.append(
+                make_agent_event(
+                    agent="harness",
+                    stage="delegate_start",
+                    status="in_progress",
+                    summary=f"进入 {expert} 专家处理子任务。",
+                    payload={
+                        "delegated_expert": expert,
+                        "subtask": compact_subtask,
+                        "tool_call_id": tool_call.id,
+                    },
+                    trace_id=state.trace_id,
+                    span_id=f"delegate:{tool_call.id}:start",
+                )
+            )
+        return events
 
     async def _fallback_stream(
         self,

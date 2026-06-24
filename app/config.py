@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # falls back to the legacy DashScope settings above.
     llm_provider: str = "openai"  # openai | azure | custom
     llm_base_url: str = "https://dasuapi.com/v1"
-    llm_api_key: str = ""
+    llm_api_key: str = "get.env('LLM_API_KEY')"
     llm_model: str = "gpt-5.4"
     llm_timeout: float = 60.0
     # 瞬时错误（429 / 5xx / 网络超时）的指数退避重试次数；鉴权错误不重试
@@ -53,11 +53,28 @@ class Settings(BaseSettings):
     # Harness 主循环配置（默认关闭，旧 RouterService 路径保留可回滚）
     harness_enabled: bool = False
     harness_max_steps: int = 6
-    harness_token_budget: int = 16000
-    harness_history_max_turns: int = 6
+    harness_token_budget: int = 80000
+    # 每次发往模型的 messages 体量安全网：超过则压缩最旧的历史/工具消息（保留 tool_call 配对），
+    # 防止收尾或多步取证后撞模型上下文上限导致 API 报错；<=0 关闭该裁剪
+    harness_message_token_budget: int = 60000
+    harness_history_max_turns: int = 16
+    # 关闭后退化为旧版“仅按最近 N 轮”截断，便于一键降级
+    harness_history_token_window_enabled: bool = True
+    # 历史对话注入的独立 token 预算；<=0 时退化为仅按轮数截断
+    harness_history_token_budget: int = 6000
+    # 单条历史消息过长时折叠，防止少数长答案撑爆上下文
+    harness_history_message_max_chars: int = 4000
+    # 维护更早对话的滚动摘要；异常或关闭时降级为仅最近窗口逐字历史
+    harness_rolling_summary_enabled: bool = True
+    harness_rolling_summary_max_chars: int = 4000
+    harness_rolling_summary_model: str = ""
+    # 滚动摘要在请求关键路径上同步调用 LLM，单独限时；超时则保留旧摘要不阻塞回答
+    harness_rolling_summary_timeout_seconds: float = 20.0
     harness_timeout_seconds: float = 90.0
     harness_mcp_enabled: bool = False
     harness_delegation_enabled: bool = True
+    # 委派子专家的独立超时，避免单个慢子专家吃光父级总超时；超时返回降级结果
+    harness_delegate_timeout_seconds: float = 45.0
     harness_tool_timeout_seconds: float = 30.0
     harness_tool_max_output_chars: int = 6000
     # 工具瞬时错误（超时/网络/5xx）的有限重试次数；鉴权/权限类错误不重试
@@ -96,6 +113,8 @@ class Settings(BaseSettings):
     rag_retrieval_mode: str = "dense"  # dense | bm25 | hybrid
     rag_dense_weight: float = 0.7
     rag_bm25_weight: float = 0.3
+    rag_hybrid_ranker: str = "weighted"  # weighted | rrf
+    rag_rrf_k: int = 60  # RRF constant, only used when rag_hybrid_ranker == "rrf"
     rag_dense_vector_field: str = "vector"
     rag_sparse_vector_field: str = "sparse_vector"
 
