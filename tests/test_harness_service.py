@@ -656,7 +656,78 @@ async def test_harness_delays_missing_param_clarification_until_after_tool_attem
 
 
 @pytest.mark.asyncio
-async def test_harness_stream_injects_delegate_events_into_main_timeline():
+async def test_harness_stream_forced_delegation_runs_routed_expert_first():
+    """开启强制委派后，被选专家在 harness 模型作答前就先执行核心调查（确定性 seed）。"""
+    delegate_tool = create_delegate_tool(
+        session_id="trace-delegate",
+        trace_id="trace-delegate",
+        context_getter=lambda: "parent context",
+        expert_getter=lambda route: FakeDelegateExpert(),
+    )
+    # 确定性委派由 harness 直接发起，无需 LLM 先返回 tool_call；模型只负责收尾综合。
+    fake_llm = FakeLLM(
+        [
+            LLMResponse(
+                content="delegated evidence summarized",
+                raw={},
+                usage={"total_tokens": 6},
+            ),
+        ]
+    )
+    service = HarnessService(
+        router=FakeRouter(route="metric"),
+        llm_client=fake_llm,
+        tools=[delegate_tool],
+        limits=HarnessLimits(max_steps=3, token_budget=1000, timeout_seconds=5),
+    )
+
+    events = [
+        event
+        async for event in service.stream(
+            "delegate metric check", session_id="trace-delegate", owner_key="user-1"
+        )
+    ]
+
+    # harness 只调了一次模型（收尾综合），核心调查由专家完成。
+    assert len(fake_llm.calls) == 1
+    dispatch_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "agent_event"
+        and event.get("stage") == "delegate_dispatch"
+    )
+    delegate_start_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "agent_event"
+        and event.get("stage") == "delegate_start"
+    )
+    delegate_tool_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "tool_event"
+        and event.get("tool") == "delegate_to_expert"
+    )
+    assert dispatch_index < delegate_start_index < delegate_tool_index
+    delegate_start = events[delegate_start_index]
+    assert delegate_start["payload"]["delegated_expert"] == "metric"
+    # 子任务取自用户原始问题，而非模型臆造。
+    assert delegate_start["payload"]["subtask"] == "delegate metric check"
+    child_events = [
+        event for event in events if event.get("agent") == "metric_expert"
+    ]
+    assert [event["type"] for event in child_events] == ["agent_event", "tool_event"]
+    assert child_events[0]["span_id"].startswith("delegate:seed-delegate:trace-delegate:")
+    assert child_events[0]["payload"]["parent_tool_call_id"] == "seed-delegate:trace-delegate"
+    assert any(event.get("agent") == "metric_expert" for event in events[-1]["events"])
+
+
+@pytest.mark.asyncio
+async def test_harness_stream_soft_delegation_lets_model_decide(monkeypatch):
+    """关闭强制委派后退化为旧软提示：是否委派由 harness 模型自行决定。"""
+    from app.config import config as app_config
+
+    monkeypatch.setattr(app_config, "harness_force_expert_delegation", False)
     delegate_tool = create_delegate_tool(
         session_id="trace-delegate",
         trace_id="trace-delegate",
@@ -698,9 +769,9 @@ async def test_harness_stream_injects_delegate_events_into_main_timeline():
         )
     ]
 
-    assert any(
-        event.get("type") == "tool_event"
-        and event.get("tool") == "delegate_to_expert"
+    # 没有确定性派发事件；委派完全由模型 tool_call 触发。
+    assert not any(
+        event.get("type") == "agent_event" and event.get("stage") == "delegate_dispatch"
         for event in events
     )
     delegate_start_index = next(
@@ -995,6 +1066,95 @@ async def test_context_builder_updates_and_injects_rolling_summary(tmp_path, mon
     assert "user fact 0" in summary_prompt
     assert "user fact 1" in summary_prompt
     assert "user fact 2" not in summary_prompt
+
+
+@pytest.mark.asyncio
+async def test_context_builder_limits_rolling_summary_input_and_advances_batch_only(
+    tmp_path, monkeypatch
+):
+    service = ConversationService(tmp_path / "conversation.db")
+    for index in range(6):
+        service.append_turn(
+            owner_key="owner-1",
+            session_id="session-1",
+            user_message=f"user fact {index}",
+            assistant_answer=f"assistant answer {index}",
+            route="metric",
+        )
+    fake_llm = FakeLLM([LLMResponse(content="batch one summary", raw={})])
+    monkeypatch.setattr("app.agent.harness.context.conversation_service", service)
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+
+    context = await ContextBuilder(
+        history_max_turns=1,
+        history_token_window_enabled=False,
+        history_message_max_chars=0,
+        rolling_summary_enabled=True,
+        rolling_summary_max_chars=1000,
+        rolling_summary_input_token_budget=40,
+    ).abuild(
+        message="current question",
+        owner_key="owner-1",
+        session_id="session-1",
+        tools=[],
+        llm_client=fake_llm,
+    )
+
+    assert [message.content for message in context.history_messages] == [
+        "user fact 5",
+        "assistant answer 5",
+    ]
+    summary_prompt = fake_llm.calls[0]["messages"][1].content
+    assert "user fact 0" in summary_prompt
+    assert "user fact 1" in summary_prompt
+    assert "user fact 2" not in summary_prompt
+    summary_state = service.get_rolling_summary("owner-1", "session-1")
+    assert summary_state["turn_index"] == 1
+
+
+@pytest.mark.asyncio
+async def test_context_builder_folds_oversized_rolling_summary_input_turn(
+    tmp_path, monkeypatch
+):
+    service = ConversationService(tmp_path / "conversation.db")
+    service.append_turn(
+        owner_key="owner-1",
+        session_id="session-1",
+        user_message="x" * 1000,
+        assistant_answer="y" * 1000,
+        route="metric",
+    )
+    service.append_turn(
+        owner_key="owner-1",
+        session_id="session-1",
+        user_message="recent user",
+        assistant_answer="recent answer",
+        route="metric",
+    )
+    fake_llm = FakeLLM([LLMResponse(content="folded summary", raw={})])
+    monkeypatch.setattr("app.agent.harness.context.conversation_service", service)
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+
+    await ContextBuilder(
+        history_max_turns=1,
+        history_token_window_enabled=False,
+        history_message_max_chars=0,
+        rolling_summary_enabled=True,
+        rolling_summary_input_token_budget=120,
+    ).abuild(
+        message="current question",
+        owner_key="owner-1",
+        session_id="session-1",
+        tools=[],
+        llm_client=fake_llm,
+    )
+
+    summary_prompt = fake_llm.calls[0]["messages"][1].content
+    assert "原始长度 1000 字符" in summary_prompt
+    assert "x" * 300 not in summary_prompt
+    assert "y" * 300 not in summary_prompt
+    summary_state = service.get_rolling_summary("owner-1", "session-1")
+    assert summary_state["turn_index"] == 0
 
 
 @pytest.mark.asyncio

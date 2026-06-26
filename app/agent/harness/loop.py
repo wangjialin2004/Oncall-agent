@@ -227,6 +227,18 @@ class HarnessService:
             seen_signatures: set[str] = set()
             no_progress_streak = 0
 
+            # 路由选中的专项专家先行执行核心调查（确定性委派），harness 随后只做核对/补充/收尾。
+            if self._should_seed_delegation(tools, state.route):
+                async for event in self._seed_expert_delegation(
+                    route=state.route,
+                    subtask=message,
+                    tools=tools,
+                    messages=messages,
+                    client=client,
+                    state=state,
+                ):
+                    yield event
+
             for step_index in range(self.limits.max_steps):
                 state.step = step_index + 1
                 if state.over_budget(self.limits):
@@ -572,6 +584,56 @@ class HarnessService:
             response = getattr(event, "response", None)
             if response is not None:
                 yield {"response": response}
+
+    def _should_seed_delegation(self, tools: Sequence[RuntimeTool], route: str) -> bool:
+        """Whether to deterministically hand the first investigation to the routed expert."""
+        if not getattr(config, "harness_force_expert_delegation", True):
+            return False
+        if route not in EXPERT_ROUTES:
+            return False
+        return any(tool.name == "delegate_to_expert" for tool in tools)
+
+    async def _seed_expert_delegation(
+        self,
+        *,
+        route: str,
+        subtask: str,
+        tools: list[RuntimeTool],
+        messages: list[ChatMessage],
+        client: Any,
+        state: HarnessState,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Seed a deterministic ``delegate_to_expert`` call to the routed expert.
+
+        The router's choice becomes authoritative: before the harness model gets a
+        turn, the selected expert runs the core investigation and its conclusion +
+        evidence are appended as a tool result. The subsequent loop then verifies,
+        does targeted follow-up, and synthesizes — it no longer re-investigates from
+        scratch. Reuses ``_execute_tools`` so delegate_start / tool / child events
+        surface into the timeline exactly like a model-initiated delegation.
+        """
+        yield self._progress_event(
+            state=state,
+            stage="delegate_dispatch",
+            summary=f"按路由焦点将核心调查委派给 {route} 专家执行。",
+            payload={"delegated_expert": route, "forced": True},
+        )
+        seed_call = ToolCall(
+            id=f"seed-delegate:{state.trace_id}",
+            name="delegate_to_expert",
+            arguments={"expert": route, "subtask": subtask},
+        )
+        messages.append(
+            ChatMessage(
+                role="assistant",
+                content="",
+                tool_calls=[tool_call_payload(seed_call)],
+            )
+        )
+        async for event in self._execute_tools(
+            [seed_call], tools, messages, client=client, state=state
+        ):
+            yield event
 
     async def _execute_tools(
         self,

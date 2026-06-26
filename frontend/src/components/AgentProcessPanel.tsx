@@ -132,9 +132,9 @@ function eventTitle(event: TimelineEvent) {
   }
   if (event.type === "tool_event") {
     if (event.tool === "delegate_to_expert") {
-      return `专家委派：${expertLabelFromEvent(event) || "专项专家"}`;
+      return "专家委派";
     }
-    return `工具调用：${event.tool || "unknown"}`;
+    return "工具执行";
   }
   return labelFor(event.agent || event.tool || event.type, agentLabels);
 }
@@ -233,6 +233,7 @@ function EventDetails({ event }: { event: TimelineEvent }) {
   const requiredEvidence = asStringList(payload.required_evidence);
   const gaps = asStringList(payload.gaps);
   const delegatedExpert = expertLabelFromEvent(event);
+  const toolName = event.type === "tool_event" ? event.tool : undefined;
   const hasDetails =
     Object.keys(payload).length > 0 ||
     event.duration_ms !== undefined ||
@@ -253,6 +254,7 @@ function EventDetails({ event }: { event: TimelineEvent }) {
       <PayloadList title="自检缺口" items={gaps} />
       <PayloadFields
         fields={[
+          ["工具名称", toolName],
           ["置信度", payload.confidence],
           ["成功证据数", payload.evidence_count],
           ["失败证据数", payload.failed_evidence_count],
@@ -376,18 +378,38 @@ export function AgentProcessPanel({ run, onFeedback }: AgentProcessPanelProps) {
           <p>暂无事件</p>
         ) : (
           <ol className="timeline">
-            {run.events.map((event, index) => (
-              <li key={timelineKey(event, index)} className={timelineItemClass(event)}>
-                <div className="timeline-icon">{eventIcon(event)}</div>
-                <div>
-                  <strong>{eventTitle(event)}</strong>
-                  <span>{eventSubtitle(event)}</span>
+            {run.events.map((event, index) => {
+              const collapsible = event.type === "tool_event";
+              const body = (
+                <>
                   <p>{event.summary || "事件已记录"}</p>
                   {event.evidence_id ? <code>{event.evidence_id}</code> : null}
                   <EventDetails event={event} />
-                </div>
-              </li>
-            ))}
+                </>
+              );
+              return (
+                <li key={timelineKey(event, index)} className={timelineItemClass(event)}>
+                  <div className="timeline-icon">{eventIcon(event)}</div>
+                  <div>
+                    {collapsible ? (
+                      <details className="timeline-tool">
+                        <summary>
+                          <strong>{eventTitle(event)}</strong>
+                          <span>{eventSubtitle(event)}</span>
+                        </summary>
+                        <div className="timeline-tool-body">{body}</div>
+                      </details>
+                    ) : (
+                      <>
+                        <strong>{eventTitle(event)}</strong>
+                        <span>{eventSubtitle(event)}</span>
+                        {body}
+                      </>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
           </ol>
         )}
       </div>

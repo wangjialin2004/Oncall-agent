@@ -67,12 +67,18 @@ class Settings(BaseSettings):
     # 维护更早对话的滚动摘要；异常或关闭时降级为仅最近窗口逐字历史
     harness_rolling_summary_enabled: bool = True
     harness_rolling_summary_max_chars: int = 4000
+    # 单次滚动摘要合并时，新增对话输入的独立 token 预算；<=0 关闭该限制
+    harness_rolling_summary_input_token_budget: int = 6000
     harness_rolling_summary_model: str = ""
     # 滚动摘要在请求关键路径上同步调用 LLM，单独限时；超时则保留旧摘要不阻塞回答
     harness_rolling_summary_timeout_seconds: float = 20.0
     harness_timeout_seconds: float = 90.0
     harness_mcp_enabled: bool = False
     harness_delegation_enabled: bool = True
+    # 路由选中的专项专家是否在主循环开始时被“确定性委派执行”：开启后 harness 作为编排器，
+    # 先把核心调查交给被选专家执行，再在其结论与证据上做核对/补充/收尾，而不是自己直接作答。
+    # 关闭后退化为旧的软提示行为（是否委派由 harness LLM 自行决定）。
+    harness_force_expert_delegation: bool = True
     # 委派子专家的独立超时，避免单个慢子专家吃光父级总超时；超时返回降级结果
     harness_delegate_timeout_seconds: float = 45.0
     harness_tool_timeout_seconds: float = 30.0
@@ -155,6 +161,15 @@ class Settings(BaseSettings):
     service_knowledge_enabled: bool = True
     user_preferences_enabled: bool = True
     auth_token_secret: str = "dev-auth-token-secret"
+
+    # Process-local L1 cache for the long-term memory subsystem
+    # (plan/memory-cache-layer.md §3.4 / §3.7). Disable via env
+    # ``MEMORY_CACHE_ENABLED=0`` to fall back to the raw SQLite path.
+    memory_cache_enabled: bool = True
+    memory_cache_max_entries: int = 1024
+    memory_cache_ttl_user_preference_seconds: float = 300.0
+    memory_cache_ttl_experience_seconds: float = 60.0
+    memory_cache_ttl_service_knowledge_seconds: float = 60.0
 
     @field_validator("debug", mode="before")
     @classmethod

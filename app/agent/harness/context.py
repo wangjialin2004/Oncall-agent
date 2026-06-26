@@ -41,6 +41,7 @@ class ContextBuilder:
         history_message_max_chars: int | None = None,
         rolling_summary_enabled: bool | None = None,
         rolling_summary_max_chars: int | None = None,
+        rolling_summary_input_token_budget: int | None = None,
     ) -> None:
         self.history_max_turns = (
             history_max_turns
@@ -71,6 +72,11 @@ class ContextBuilder:
             rolling_summary_max_chars
             if rolling_summary_max_chars is not None
             else int(getattr(config, "harness_rolling_summary_max_chars", 4000))
+        )
+        self.rolling_summary_input_token_budget = (
+            rolling_summary_input_token_budget
+            if rolling_summary_input_token_budget is not None
+            else int(getattr(config, "harness_rolling_summary_input_token_budget", 6000))
         )
 
     def build(
@@ -186,14 +192,15 @@ class ContextBuilder:
             for turn in old_turns
             if int(turn.get("turn_index", -1)) > summarized_turn_index
         ]
-        if unsummarized and llm_client is not None:
+        summary_turns = self._select_summary_input_turns(unsummarized)
+        if summary_turns and llm_client is not None:
             try:
                 summary = await self._summarize_turns_with_timeout(
                     llm_client=llm_client,
                     existing_summary=summary,
-                    turns=unsummarized,
+                    turns=summary_turns,
                 )
-                latest_index = max(int(turn.get("turn_index", -1)) for turn in old_turns)
+                latest_index = max(int(turn.get("turn_index", -1)) for turn in summary_turns)
                 self._update_summary_state(
                     owner_key=owner_key,
                     session_id=session_id,
@@ -237,6 +244,90 @@ class ContextBuilder:
             return list(turns)
         first_recent_index = min(int(turn.get("turn_index", -1)) for turn in recent_turns)
         return [turn for turn in turns if int(turn.get("turn_index", -1)) < first_recent_index]
+
+    def _select_summary_input_turns(
+        self, turns: Sequence[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        if not turns:
+            return []
+        budget = self.rolling_summary_input_token_budget
+        if budget <= 0:
+            return [self._compact_turn(turn) for turn in turns]
+
+        selected: list[dict[str, Any]] = []
+        used_tokens = 0
+        for turn in turns:
+            remaining = budget - used_tokens
+            if remaining <= 0:
+                break
+            compact_turn = self._compact_summary_input_turn(turn, remaining)
+            turn_tokens = self._estimate_summary_turn_tokens(compact_turn)
+            if selected and used_tokens + turn_tokens > budget:
+                break
+            selected.append(compact_turn)
+            used_tokens += turn_tokens
+        return selected
+
+    def _compact_summary_input_turn(
+        self, turn: dict[str, Any], token_budget: int
+    ) -> dict[str, Any]:
+        compact = self._compact_turn(turn)
+        if token_budget <= 0 or self._estimate_summary_turn_tokens(compact) <= token_budget:
+            return compact
+
+        user_message = str(compact.get("user_message") or "")
+        assistant_answer = str(compact.get("assistant_answer") or "")
+        user_tokens = estimate_tokens(user_message) if user_message else 0
+        assistant_tokens = estimate_tokens(assistant_answer) if assistant_answer else 0
+        text_tokens = user_tokens + assistant_tokens
+        overhead = self._estimate_summary_turn_tokens(
+            {**compact, "user_message": "", "assistant_answer": ""}
+        )
+        available = max(1, token_budget - overhead)
+        if text_tokens <= available:
+            return compact
+
+        if user_message and assistant_answer:
+            user_budget = max(1, int(available * user_tokens / max(text_tokens, 1)))
+            assistant_budget = max(1, available - user_budget)
+            if user_budget + assistant_budget > available:
+                if user_tokens >= assistant_tokens:
+                    user_budget = max(1, available - assistant_budget)
+                else:
+                    assistant_budget = max(1, available - user_budget)
+        elif user_message:
+            user_budget = available
+            assistant_budget = 0
+        else:
+            user_budget = 0
+            assistant_budget = available
+
+        compact["user_message"] = self._compact_text_to_token_budget(
+            user_message, user_budget
+        )
+        compact["assistant_answer"] = self._compact_text_to_token_budget(
+            assistant_answer, assistant_budget
+        )
+        return compact
+
+    def _estimate_summary_turn_tokens(self, turn: dict[str, Any]) -> int:
+        return estimate_tokens(self._format_turns_for_summary([turn]))
+
+    @staticmethod
+    def _compact_text_to_token_budget(text: str, token_budget: int) -> str:
+        text = (text or "").strip()
+        if not text:
+            return ""
+        if token_budget <= 0:
+            return "[已折叠]"
+        if estimate_tokens(text) <= token_budget:
+            return text
+
+        max_chars = max(1, int(token_budget * 2.5))
+        suffix = f"\n\n[滚动摘要输入已折叠：原始长度 {len(text)} 字符]"
+        if max_chars <= len(suffix):
+            return "[已折叠]"
+        return f"{text[: max_chars - len(suffix)]}{suffix}"
 
     def _get_summary_state(self, owner_key: str, session_id: str) -> dict[str, Any]:
         getter = getattr(conversation_service, "get_rolling_summary", None)
@@ -326,7 +417,13 @@ class ContextBuilder:
     ) -> str:
         sections = [HARNESS_SYSTEM_PROMPT]
         if focus_hint:
-            sections.append(f"路由焦点提示（仅作规划参考，不是强制分派）：\n{focus_hint}")
+            sections.append(
+                "路由焦点（该领域的核心调查会委派给对应专项专家执行，其结论与证据将作为"
+                "工具结果出现在对话中）：\n"
+                f"{focus_hint}\n"
+                "你的职责是编排与收尾：核对专家给出的证据、必要时用工具做针对性补充验证、"
+                "再整合为最终回答；不要无视专家结论从零重启调查，也不要对同一子任务重复委派。"
+            )
 
         preference_context = (
             user_preference_service.format_for_prompt(owner_key)

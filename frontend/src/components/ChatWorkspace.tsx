@@ -1,4 +1,4 @@
-import { Activity, Send, Square } from "lucide-react";
+import { Activity, Search, Send, Square } from "lucide-react";
 import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -77,11 +77,11 @@ export function ChatWorkspace({
         </label>
       </header>
 
-      <div className="messages" ref={messagesRef}>
+      <div className={`messages${isRunning ? " is-running" : ""}`} ref={messagesRef}>
         {messages.length === 0 ? (
           <div className="empty-state">
             <div className="empty-state-icon">
-              <Activity size={22} aria-hidden="true" />
+              <Activity size={24} aria-hidden="true" />
             </div>
             <strong className="empty-state-title">运维助手已就绪</strong>
             <span className="empty-state-hint">描述一个告警事件，或向知识库提问</span>
@@ -129,14 +129,17 @@ export function ChatWorkspace({
         <label className="sr-only" htmlFor="message-input">
           消息
         </label>
-        <input
-          id="message-input"
-          aria-label="消息"
-          value={message}
-          onChange={(event) => setMessage(event.target.value)}
-          placeholder="描述告警事件或提出运维问题..."
-          disabled={isRunning}
-        />
+        <div className="composer-input-wrap">
+          <Search size={14} className="composer-input-icon" aria-hidden="true" />
+          <input
+            id="message-input"
+            aria-label="消息"
+            value={message}
+            onChange={(event) => setMessage(event.target.value)}
+            placeholder="描述告警事件或提出运维问题..."
+            disabled={isRunning}
+          />
+        </div>
         {isRunning ? (
           <button className="icon-button" type="button" onClick={onStop} aria-label="停止">
             <Square size={17} aria-hidden="true" />
