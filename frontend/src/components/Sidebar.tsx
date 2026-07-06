@@ -1,6 +1,7 @@
-import { Activity, Gauge, LogOut, MessageSquarePlus, Trash2 } from "lucide-react";
+import { Activity, CircleDot, Gauge, LogOut, MessageSquarePlus, Trash2 } from "lucide-react";
 
 import type { ConversationSummary } from "../api/conversationApi";
+import type { CheckpointSummary } from "../api/checkpointApi";
 
 type SidebarView = "chat" | "baseline";
 
@@ -9,6 +10,7 @@ type SidebarProps = {
   activeView: SidebarView;
   sessions: ConversationSummary[];
   activeSessionId: string;
+  checkpointStatus: Record<string, CheckpointSummary>;
   onNewSession: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
@@ -21,6 +23,7 @@ export function Sidebar({
   activeView,
   sessions,
   activeSessionId,
+  checkpointStatus,
   onNewSession,
   onSelectSession,
   onDeleteSession,
@@ -60,10 +63,11 @@ export function Sidebar({
           <ul className="session-list">
             {sessions.map((session) => {
               const isActive = activeView === "chat" && session.session_id === activeSessionId;
+              const resumable = checkpointStatus[session.session_id]?.resumable === true;
               return (
                 <li
                   key={session.session_id}
-                  className={`session-item${isActive ? " active" : ""}`}
+                  className={`session-item${isActive ? " active" : ""}${resumable ? " resumable" : ""}`}
                 >
                   <button
                     type="button"
@@ -72,7 +76,15 @@ export function Sidebar({
                     onClick={() => onSelectSession(session.session_id)}
                   >
                     <span className="session-title">{session.title || "未命名会话"}</span>
-                    <span className="session-meta">{session.turn_count} 轮</span>
+                    <span className="session-meta">
+                      {resumable ? (
+                        <span className="session-resumable-badge" aria-label="可继续未完成排查">
+                          <CircleDot size={12} aria-hidden="true" />
+                          可继续
+                        </span>
+                      ) : null}
+                      <span className="session-turn-count">{session.turn_count} 轮</span>
+                    </span>
                   </button>
                   <button
                     type="button"

@@ -10,6 +10,7 @@ from loguru import logger
 
 from app.config import config
 from app.core.milvus_client import milvus_manager
+from app.services.memory_cache import get_default_cache
 
 router = APIRouter()
 
@@ -37,6 +38,36 @@ def _llm_config_status() -> dict[str, str]:
         "embedding_model": config.dashscope_embedding_model,
         "message": "LLM 配置已存在" if configured else "DASHSCOPE_API_KEY 未配置",
     }
+
+
+def _memory_cache_status() -> dict[str, Any]:
+    """Surface the long-term memory L1 cache stats on ``/health``.
+
+    The cache is process-local so stats reflect the *current* API process.
+    Failures here must never break ``/health`` — the call sites already
+    treat the cache as best-effort.
+    """
+
+    base = {
+        "enabled": bool(config.memory_cache_enabled),
+        "max_entries": int(config.memory_cache_max_entries),
+        "ttls": {
+            "user_preference_seconds": float(
+                config.memory_cache_ttl_user_preference_seconds
+            ),
+            "experience_seconds": float(config.memory_cache_ttl_experience_seconds),
+            "service_knowledge_seconds": float(
+                config.memory_cache_ttl_service_knowledge_seconds
+            ),
+        },
+    }
+    try:
+        stats = get_default_cache().stats_snapshot()
+        base.update(stats)
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning(f"memory_cache stats snapshot failed: {exc}")
+        base["error"] = str(exc)
+    return base
 
 
 def build_health_data() -> dict[str, Any]:
@@ -89,6 +120,7 @@ def build_health_data() -> dict[str, Any]:
     health_data["logs"] = {
         "provider": config.log_provider,
     }
+    health_data["memory_cache"] = _memory_cache_status()
 
     if health_data["milvus"]["status"] != "connected":
         health_data["status"] = "unhealthy"

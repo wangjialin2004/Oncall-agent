@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 from app.agent.experts.registry import DEFAULT_ROUTE, EXPERT_ROUTES, get_expert
+from app.config import config
 from app.core.runtime_tools import RuntimeTool
 
 
@@ -15,7 +17,14 @@ def create_delegate_tool(
     trace_id: str,
     context_getter: Callable[[], str],
     expert_getter: Callable[[str], Any] = get_expert,
+    timeout_seconds: float | None = None,
 ) -> RuntimeTool:
+    resolved_timeout = (
+        float(timeout_seconds)
+        if timeout_seconds is not None
+        else float(getattr(config, "harness_delegate_timeout_seconds", 45.0) or 0.0)
+    )
+
     async def handler(arguments: dict[str, Any]) -> dict[str, Any]:
         route = str(arguments.get("expert") or DEFAULT_ROUTE).strip()
         if route not in EXPERT_ROUTES:
@@ -32,17 +41,38 @@ def create_delegate_tool(
         expert = expert_getter(route)
         answer_parts: list[str] = []
         timeline: list[dict[str, Any]] = []
-        async for event in expert.run(
+        generator = expert.run(
             message=subtask,
             session_id=session_id,
             trace_id=f"{trace_id}:delegate:{route}",
             context=context_getter(),
-        ):
-            event_type = event.get("type")
-            if event_type == "content":
-                answer_parts.append(str(event.get("data") or ""))
-            elif event_type in {"agent_event", "tool_event", "decision_event"}:
-                timeline.append(event)
+        )
+
+        async def _drain() -> None:
+            async for event in generator:
+                event_type = event.get("type")
+                if event_type == "content":
+                    answer_parts.append(str(event.get("data") or ""))
+                elif event_type in {"agent_event", "tool_event", "decision_event"}:
+                    timeline.append(event)
+
+        # 子专家独立限时，避免单个慢子专家吃光父级 harness 的总超时
+        try:
+            if resolved_timeout > 0:
+                async with asyncio.timeout(resolved_timeout):
+                    await _drain()
+            else:
+                await _drain()
+        except TimeoutError:
+            await _aclose(generator)
+            return {
+                "expert": route,
+                "status": "degraded",
+                "subtask": subtask,
+                "answer": "".join(answer_parts),
+                "error": f"delegate timed out after {resolved_timeout:g}s",
+                "events": timeline[-12:],
+            }
 
         return {
             "expert": route,
@@ -75,3 +105,13 @@ def create_delegate_tool(
         },
         handler=handler,
     )
+
+
+async def _aclose(generator: AsyncGenerator[dict[str, Any], None]) -> None:
+    aclose = getattr(generator, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await aclose()
+    except Exception:
+        pass

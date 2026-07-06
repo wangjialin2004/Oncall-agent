@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import httpx
 from loguru import logger
-
 
 ChatRole = Literal["system", "user", "assistant", "tool"]
 
@@ -26,6 +25,41 @@ class ChatMessage:
     tool_call_id: str | None = None
     # raw OpenAI-format tool_calls array, used on the assistant turn after a tool call
     tool_calls: list[dict[str, Any]] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "role": str(self.role),
+            "content": str(self.content or ""),
+        }
+        if self.tool_call_id is not None:
+            payload["tool_call_id"] = str(self.tool_call_id)
+        if self.tool_calls:
+            payload["tool_calls"] = [dict(call) for call in self.tool_calls]
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: Any) -> ChatMessage | None:
+        if not isinstance(data, dict):
+            return None
+        role = str(data.get("role") or "").strip()
+        if role not in {"system", "user", "assistant", "tool"}:
+            return None
+        content = str(data.get("content") or "")
+        tool_call_id = data.get("tool_call_id")
+        if tool_call_id is not None:
+            tool_call_id = str(tool_call_id).strip() or None
+        raw_calls = data.get("tool_calls")
+        tool_calls: list[dict[str, Any]] | None = None
+        if isinstance(raw_calls, list):
+            tool_calls = [dict(call) for call in raw_calls if isinstance(call, dict)]
+            if not tool_calls:
+                tool_calls = None
+        return cls(
+            role=role,  # type: ignore[arg-type]
+            content=content,
+            tool_call_id=tool_call_id,
+            tool_calls=tool_calls,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +88,7 @@ class LLMClientConfig:
     default_headers: dict[str, str] = field(default_factory=dict)
 
     @classmethod
-    def from_settings(cls, settings: Any) -> "LLMClientConfig":
+    def from_settings(cls, settings: Any) -> LLMClientConfig:
         provider = _clean(getattr(settings, "llm_provider", "")) or "dashscope"
         base_url = _clean(getattr(settings, "llm_base_url", "")) or (
             "https://dashscope.aliyuncs.com/compatible-mode/v1"

@@ -33,16 +33,17 @@
 本项目是一个「OnCall 值班智能体」后端 + Web 控制台：
 
 - 输入一条告警事件或运维问题，平台自动完成 **路由 → 规划 → 工具调用 → 证据自检 → 诊断结论** 的闭环；
-- 通过 SSE 流式实时展示智能体的思考过程、工具调用和阶段性结论；
-- 内置 RAG 知识库与长期记忆，让历史经验、服务基线和用户偏好可被持续沉淀和复用。
+- 通过 SSE 流式实时展示智能体的思考过程、工具调用和阶段性结论，并附带可拖拽重置宽度的「智能体过程」侧栏；
+- 内置 RAG 知识库、长期记忆、服务基线与检查点（checkpoint）续跑能力，让历史经验、服务知识、用户偏好可被持续沉淀、复用甚至中断后重放；
+- 支持文件上传与重索引、激进恢复（replay checkpoint 中非白名单工具）等运维场景。
 
 后端基于 FastAPI，Agent 编排使用自研 Harness 主循环；前端为 React 18 + Vite 单页应用。
 
 ## 界面预览
 
-| 服务基线管理 | 运维助手工作台 |
+| 运维助手工作台 | 服务基线管理 |
 | --- | --- |
-| ![服务基线管理](readme-service-baseline.png) | ![运维助手工作台](readme-oncall-workspace.png) |
+| ![运维助手工作台](readme-oncall-workspace.png) | ![服务基线管理](readme-service-baseline.png) |
 
 > 截图仅展示界面，不含任何真实数据或凭证。
 
@@ -260,12 +261,25 @@ SSE `message` 数据包含不同类型事件：`route_selected`、`agent_event`�
 | GET | `/api/conversations/{session_id}` | 恢复指定会话 |
 | DELETE | `/api/conversations/{session_id}` | 删除指定会话 |
 
+### 会话检查点（断点续跑）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/checkpoint/{session_id}` | 查询会话的最新 Harness checkpoint |
+| DELETE | `/api/checkpoint/{session_id}` | 清除指定会话的 checkpoint |
+
+> 前端「激进恢复」勾选项会触发 `replay checkpoint` 行为，重放过程中非白名单工具（包括可能的副作用）。
+
 ### 文件与知识库
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/upload` | 上传文件并创建向量索引 |
-| POST | `/api/index_directory` | 索引受信目录内的文件 |
+| POST | `/api/files` | 上传文件并创建向量索引 |
+| GET | `/api/files` | 查询已上传文件列表 |
+| GET | `/api/files/{file_id}` | 查询文件详情 |
+| GET | `/api/files/{file_id}/download` | 下载文件原文 |
+| DELETE | `/api/files/{file_id}` | 删除文件及其向量索引 |
+| POST | `/api/files/{file_id}/reindex` | 重建指定文件的向量索引 |
 
 ### 长期记忆与服务知识
 
@@ -291,7 +305,7 @@ SSE `message` 数据包含不同类型事件：`route_selected`、`agent_event`�
 ```text
 .
 ├── app/
-│   ├── api/                 # FastAPI 路由（assistant / auth / conversations / file / memory / health）
+│   ├── api/                 # FastAPI 路由（assistant / auth / checkpoint / conversations / file / memory / health）
 │   ├── agent/               # Agent 事件、专家、Harness 编排
 │   ├── core/                # LLM、Milvus、工具调用等运行时
 │   ├── models/              # Pydantic 请求/响应/记忆模型

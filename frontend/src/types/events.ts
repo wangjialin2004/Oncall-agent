@@ -61,13 +61,42 @@ export type ErrorEvent = {
   message: string;
 };
 
+/**
+ * Surfaced at the start of a resumed run when the harness loop picks up an
+ * existing checkpoint for this session. Distinct from a timeline event so it
+ * cannot be deduped or replayed through the normal timeline channel.
+ */
+export type CheckpointResumeEvent = {
+  type: "checkpoint_resume";
+  resumedFromStep: number;
+  replayedSteps: number;
+  startedAt: string;
+  /** Mirrors backend ``config.harness_checkpoint_replay`` at the time of resume. */
+  conservative: boolean;
+  /** ``true`` / ``false`` if the caller passed ``CheckpointReplay`` in the body,
+   *  ``null`` when the request fell back to the server default. */
+  replayOverride: boolean | null;
+};
+
+/**
+ * Surfaced mid-run when the harness decided to close the resumed run without
+ * replaying any non-whitelisted tool. Only ever emitted alongside a
+ * ``CheckpointResumeEvent``.
+ */
+export type CheckpointConservativeCloseEvent = {
+  type: "checkpoint_conservative_close";
+  step: number;
+};
+
 export type AgentStreamEvent =
   | RouteSelectedEvent
   | TimelineEvent
   | ContentEvent
   | ReportEvent
   | CompleteEvent
-  | ErrorEvent;
+  | ErrorEvent
+  | CheckpointResumeEvent
+  | CheckpointConservativeCloseEvent;
 
 export type ChatMessage = {
   id: string;
@@ -92,4 +121,8 @@ export type AgentRun = {
   userMessage: string;
   /** Long-term-memory feedback already given for this run, if any. */
   feedback: FeedbackState;
+  /** Set when this run picked up a saved checkpoint from Redis. */
+  checkpointResume?: CheckpointResumeEvent;
+  /** Set when the resumed run closed without re-running non-whitelisted tools. */
+  checkpointConservativeClose?: CheckpointConservativeCloseEvent;
 };

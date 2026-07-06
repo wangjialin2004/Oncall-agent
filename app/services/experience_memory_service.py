@@ -1,7 +1,31 @@
-"""SQLite-backed long-term diagnosis experience memory."""
+"""SQLite-backed long-term diagnosis experience memory with L1 cache.
+
+The service persists long-term diagnosis experience cards. Two read paths
+matter for the cache (see ``plan/memory-cache-layer.md`` §2.1):
+
+* ``get`` — single-row lookup, called once per Milvus candidate during recall.
+* ``list`` — full project scan, called by the SQLite fallback recall path
+  (``_recall_from_sqlite``) and by the write-time merge target search
+  (``_find_merge_target``). Both iterate the whole result set, so caching the
+  list result is the highest-ROI win.
+
+Cache strategy
+==============
+
+* ``get`` and ``list`` are cached, copy-on-read (dict payloads).
+* ``recall`` is **not** cached (plan §3.3.1 — option A). The result has
+  query-dependent ``similarity`` / ``conflict_count`` fields and changing
+  them implicitly would also stop ``hit_count`` from growing; we cache
+  ``list`` instead and let recall run its own similarity computation.
+* ``_find_merge_target`` benefits transparently from the cached ``list``.
+* ``create_*`` / ``_merge_into`` / ``update`` invalidate the relevant prefix
+  *after* the SQLite write succeeds. ``_increment_hit`` deliberately does
+  not invalidate (counter, not UI-visible field).
+"""
 
 from __future__ import annotations
 
+import copy
 import sqlite3
 import uuid
 from collections.abc import Iterator
@@ -12,10 +36,23 @@ from typing import Any
 from loguru import logger
 
 from app.config import config
+from app.services.memory_cache import db_tag_for, get_default_cache
 from app.services.memory_safety import redact_memory_text
 from app.utils.serialization import json_dumps as _json_dumps, json_loads as _json_loads
 from app.utils.text import normalize_text as _normalize, text_similarity as _text_similarity
 from app.utils.time import utc_now as _utc_now
+
+
+def _cache_prefix(db_path: Path) -> str:
+    return f"memory:{db_tag_for(db_path)}:exp:"
+
+
+def _key_get(db_path: Path, experience_id: str) -> str:
+    return f"{_cache_prefix(db_path)}get:{experience_id}"
+
+
+def _key_list(db_path: Path, project_id: str, enabled: str, limit: int) -> str:
+    return f"{_cache_prefix(db_path)}list:{project_id}:{enabled}:{limit}"
 
 
 class ExperienceMemoryService:
@@ -148,13 +185,38 @@ class ExperienceMemoryService:
         memories.sort(key=lambda item: (item.get("confidence", 0), item.get("similarity", 0)), reverse=True)
         return memories[:top_k]
 
+    # ------------------------------------------------------------------ read
+
     def get(self, experience_id: str) -> dict[str, Any] | None:
+        key = _key_get(self.db_path, experience_id)
+        cache = get_default_cache()
+        try:
+            cached = cache.get(key)
+        except Exception as exc:  # defensive
+            logger.warning(f"experience_memory cache get failed: {exc}")
+            cached = None
+        if cached is not None:
+            return cached or None  # cached empty dict sentinel = missing row
         with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM experience_memories WHERE experience_id = ?",
                 (experience_id,),
             ).fetchone()
-        return _memory_from_row(row) if row else None
+        if row is None:
+            try:
+                cache.set(key, {})
+            except Exception as exc:  # pragma: no cover
+                logger.warning(f"experience_memory cache set failed: {exc}")
+            return None
+        memory = _memory_from_row(row)
+        try:
+            cache.set(key, memory, ttl=float(config.memory_cache_ttl_experience_seconds))
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"experience_memory cache set failed: {exc}")
+        # Return a deep copy so caller mutations never poison the cached
+        # entry — same aliasing invariant that ``cache.get`` enforces on
+        # the hit path.
+        return copy.deepcopy(memory)
 
     def list(
         self,
@@ -163,6 +225,16 @@ class ExperienceMemoryService:
         enabled: bool | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
+        enabled_marker = "*" if enabled is None else ("1" if enabled else "0")
+        key = _key_list(self.db_path, project_id, enabled_marker, limit)
+        cache = get_default_cache()
+        try:
+            cached = cache.get(key)
+        except Exception as exc:  # defensive
+            logger.warning(f"experience_memory cache get failed: {exc}")
+            cached = None
+        if cached is not None:
+            return cached
         clauses = ["project_id = ?"]
         params: list[Any] = [project_id]
         if enabled is not None:
@@ -179,7 +251,16 @@ class ExperienceMemoryService:
                 """,
                 params,
             ).fetchall()
-        return [_memory_from_row(row) for row in rows]
+        memories = [_memory_from_row(row) for row in rows]
+        try:
+            cache.set(key, memories, ttl=float(config.memory_cache_ttl_experience_seconds))
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"experience_memory cache set failed: {exc}")
+        # Deep copy on the cold path too, so callers that mutate list
+        # elements don't poison the cached entry.
+        return copy.deepcopy(memories)
+
+    # ----------------------------------------------------------------- write
 
     def update(
         self,
@@ -207,6 +288,15 @@ class ExperienceMemoryService:
             )
         updated = cursor.rowcount > 0
         if updated:
+            # Drop every cached list for this DB and the targeted ``get`` so
+            # the next read re-fetches. ``_increment_hit`` deliberately does
+            # not invalidate (counter, not UI-visible field).
+            cache = get_default_cache()
+            try:
+                cache.invalidate(_key_get(self.db_path, experience_id))
+                cache.invalidate_prefix(f"{_cache_prefix(self.db_path)}list:")
+            except Exception as exc:  # pragma: no cover
+                logger.warning(f"experience_memory cache invalidate failed: {exc}")
             self._sync_index_after_update(experience_id, enabled=enabled)
         return updated
 
@@ -219,6 +309,8 @@ class ExperienceMemoryService:
         except Exception as exc:
             logger.warning(f"experience index rebuild failed: {exc}")
             return 0
+
+    # ---------------------------------------------------------------- internal
 
     def _create_memory(
         self,
@@ -298,6 +390,17 @@ class ExperienceMemoryService:
                 ),
             )
         self._upsert_index(memory)
+        # The write affects every list/get for this DB. We could invalidate
+        # only the project's list prefix, but we don't know the project_id of
+        # a brand-new memory here only; instead the new memory id is fresh so
+        # dropping the entire domain prefix is safe and bounded by the
+        # ``list:`` prefix (cheap to scan).
+        cache = get_default_cache()
+        try:
+            cache.invalidate(f"{_cache_prefix(self.db_path)}get:{memory['experience_id']}")
+            cache.invalidate_prefix(f"{_cache_prefix(self.db_path)}list:")
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"experience_memory cache invalidate failed: {exc}")
         return str(memory["experience_id"])
 
     def _find_merge_target(
@@ -315,6 +418,8 @@ class ExperienceMemoryService:
             return None
         best: dict[str, Any] | None = None
         best_score = 0.0
+        # ``list`` is now cached, so this scan does not always hit SQLite —
+        # that's the §R4 hot-spot fix.
         for candidate in self.list(project_id=project_id, enabled=True, limit=1000):
             score = _text_similarity(new_symptoms, _normalize(candidate["symptoms"]))
             if score >= threshold and score > best_score:
@@ -367,6 +472,14 @@ class ExperienceMemoryService:
                     target["experience_id"],
                 ),
             )
+        # ``_merge_into`` mutates an existing row; drop every list/get so the
+        # next read recomputes the merged shape.
+        cache = get_default_cache()
+        try:
+            cache.invalidate(f"{_cache_prefix(self.db_path)}get:{target['experience_id']}")
+            cache.invalidate_prefix(f"{_cache_prefix(self.db_path)}list:")
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"experience_memory cache invalidate failed: {exc}")
         updated = self.get(target["experience_id"])
         if updated:
             self._upsert_index(updated)
@@ -394,6 +507,10 @@ class ExperienceMemoryService:
             logger.warning(f"experience index update sync failed: {exc}")
 
     def _increment_hit(self, experience_id: str, *, session_id: str = "") -> None:
+        # Deliberately does not invalidate the cache — hit_count is a
+        # write-side counter, not a UI-displayed field. We keep the cache
+        # value as-is; the next ``update`` / create invalidation cycle will
+        # surface the new count.
         with self._connection() as connection:
             connection.execute(
                 """
@@ -416,6 +533,8 @@ class ExperienceMemoryService:
         if not normalized_query:
             return []
         memories = []
+        # ``list`` is cached, so the per-token SQLite hit only happens on
+        # cache miss (cold start / post-write).
         for memory in self.list(project_id=project_id, enabled=True, limit=1000):
             similarity = _text_similarity(normalized_query, _normalize(memory["symptoms"]))
             if similarity <= 0:

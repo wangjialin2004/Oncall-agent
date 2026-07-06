@@ -66,6 +66,7 @@ const stageLabels: Record<string, string> = {
   log_mapreduce: "日志摘要",
   clarify_missing_params: "补充参数",
   timeout_fallback: "超时降级",
+  delegate_start: "专家委派",
 };
 
 function labelFor(value: string | undefined, labels: Record<string, string>) {
@@ -75,7 +76,38 @@ function labelFor(value: string | undefined, labels: Record<string, string>) {
   return labels[value] || value;
 }
 
+function payloadString(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function expertLabelFromEvent(event: TimelineEvent) {
+  const payload = (event.payload ?? {}) as Record<string, unknown>;
+  const argumentsPayload =
+    payload.arguments && typeof payload.arguments === "object"
+      ? (payload.arguments as Record<string, unknown>)
+      : {};
+  const expert =
+    payloadString(payload.delegated_expert) ||
+    payloadString(payload.expert) ||
+    payloadString(argumentsPayload.expert);
+  if (!expert) {
+    return "";
+  }
+  return agentLabels[expert] || agentLabels[`${expert}_expert`] || expert;
+}
+
+function isDelegateEvent(event: TimelineEvent) {
+  return (
+    event.stage === "delegate_start" ||
+    event.tool === "delegate_to_expert" ||
+    Boolean(expertLabelFromEvent(event))
+  );
+}
+
 function eventIcon(event: TimelineEvent) {
+  if (isDelegateEvent(event)) {
+    return <GitBranch size={16} aria-hidden="true" />;
+  }
   if (event.type === "route_event") {
     return <GitBranch size={16} aria-hidden="true" />;
   }
@@ -95,8 +127,14 @@ function eventTitle(event: TimelineEvent) {
   if (event.type === "route_event") {
     return "路由分发";
   }
+  if (event.stage === "delegate_start") {
+    return `进入专家：${expertLabelFromEvent(event) || "专项专家"}`;
+  }
   if (event.type === "tool_event") {
-    return `工具调用：${event.tool || "unknown"}`;
+    if (event.tool === "delegate_to_expert") {
+      return "专家委派";
+    }
+    return "工具执行";
   }
   return labelFor(event.agent || event.tool || event.type, agentLabels);
 }
@@ -107,6 +145,9 @@ function eventSubtitle(event: TimelineEvent) {
   }
   if (event.type === "tool_event") {
     return labelFor(event.status, statusLabels) || event.type;
+  }
+  if (event.stage === "delegate_start") {
+    return "进入子专家执行";
   }
   return labelFor(event.stage, stageLabels) || labelFor(event.status, statusLabels) || event.type;
 }
@@ -191,6 +232,8 @@ function EventDetails({ event }: { event: TimelineEvent }) {
   const todos = asStringList(payload.todos);
   const requiredEvidence = asStringList(payload.required_evidence);
   const gaps = asStringList(payload.gaps);
+  const delegatedExpert = expertLabelFromEvent(event);
+  const toolName = event.type === "tool_event" ? event.tool : undefined;
   const hasDetails =
     Object.keys(payload).length > 0 ||
     event.duration_ms !== undefined ||
@@ -211,6 +254,7 @@ function EventDetails({ event }: { event: TimelineEvent }) {
       <PayloadList title="自检缺口" items={gaps} />
       <PayloadFields
         fields={[
+          ["工具名称", toolName],
           ["置信度", payload.confidence],
           ["成功证据数", payload.evidence_count],
           ["失败证据数", payload.failed_evidence_count],
@@ -221,6 +265,9 @@ function EventDetails({ event }: { event: TimelineEvent }) {
           ["耗时 ms", event.duration_ms],
           ["Trace", event.trace_id],
           ["Span", event.span_id],
+          ["委派专家", delegatedExpert],
+          ["子任务", payload.subtask],
+          ["委派调用", payload.tool_call_id],
           ["工具参数", payload.arguments],
           ["默认值", payload.defaults],
           ["原因", payload.reason],
@@ -246,6 +293,10 @@ function timelineKey(event: TimelineEvent, index: number) {
   ]
     .filter(Boolean)
     .join("|");
+}
+
+function timelineItemClass(event: TimelineEvent) {
+  return isDelegateEvent(event) ? "delegate" : undefined;
 }
 
 function FeedbackCard({ run, onFeedback }: { run: AgentRun; onFeedback?: FeedbackHandler }) {
@@ -307,6 +358,59 @@ function FeedbackCard({ run, onFeedback }: { run: AgentRun; onFeedback?: Feedbac
   );
 }
 
+function describeReplayMode(replayOverride: boolean | null, conservative: boolean): string {
+  if (replayOverride === true) {
+    return "激进模式：本次主动重放了非白名单工具";
+  }
+  if (replayOverride === false) {
+    return "强制保守：本次明确拒绝重放非白名单工具";
+  }
+  return conservative ? "保守模式：默认未重放非白名单工具" : "激进模式：按服务端默认重放了工具";
+}
+
+function CheckpointBanner({ run }: { run: AgentRun }) {
+  const resume = run.checkpointResume;
+  const close = run.checkpointConservativeClose;
+  if (!resume && !close) {
+    return null;
+  }
+  return (
+    <>
+      {resume ? (
+        <div
+          className="panel-card checkpoint-banner"
+          role="status"
+          aria-live="polite"
+          data-testid="checkpoint-resume-banner"
+        >
+          <span className="label">检查点恢复</span>
+          <p>
+            已从步骤 <strong>{resume.resumedFromStep}</strong> 的检查点恢复，共
+            <strong> {resume.replayedSteps} </strong>步已落盘。
+          </p>
+          <p className="checkpoint-banner-meta">
+            {describeReplayMode(resume.replayOverride, resume.conservative)}
+            {resume.startedAt ? ` · 上次开始于 ${resume.startedAt}` : ""}
+          </p>
+        </div>
+      ) : null}
+      {close ? (
+        <div
+          className="panel-card checkpoint-banner conservative"
+          role="status"
+          aria-live="polite"
+          data-testid="checkpoint-conservative-close-banner"
+        >
+          <span className="label">保守收口</span>
+          <p>
+            上一步骤（{close.step}）包含非白名单工具，本次未自动重放，将基于已落盘证据直接收口。
+          </p>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 export function AgentProcessPanel({ run, onFeedback }: AgentProcessPanelProps) {
   return (
     <section className="agent-panel">
@@ -314,6 +418,8 @@ export function AgentProcessPanel({ run, onFeedback }: AgentProcessPanelProps) {
         <h2>智能体过程</h2>
         <span className={`status-pill ${run.status}`}>{labelFor(run.status, statusLabels)}</span>
       </header>
+
+      <CheckpointBanner run={run} />
 
       <div className="panel-card">
         <span className="label">路由</span>
@@ -327,18 +433,38 @@ export function AgentProcessPanel({ run, onFeedback }: AgentProcessPanelProps) {
           <p>暂无事件</p>
         ) : (
           <ol className="timeline">
-            {run.events.map((event, index) => (
-              <li key={timelineKey(event, index)}>
-                <div className="timeline-icon">{eventIcon(event)}</div>
-                <div>
-                  <strong>{eventTitle(event)}</strong>
-                  <span>{eventSubtitle(event)}</span>
+            {run.events.map((event, index) => {
+              const collapsible = event.type === "tool_event";
+              const body = (
+                <>
                   <p>{event.summary || "事件已记录"}</p>
                   {event.evidence_id ? <code>{event.evidence_id}</code> : null}
                   <EventDetails event={event} />
-                </div>
-              </li>
-            ))}
+                </>
+              );
+              return (
+                <li key={timelineKey(event, index)} className={timelineItemClass(event)}>
+                  <div className="timeline-icon">{eventIcon(event)}</div>
+                  <div>
+                    {collapsible ? (
+                      <details className="timeline-tool">
+                        <summary>
+                          <strong>{eventTitle(event)}</strong>
+                          <span>{eventSubtitle(event)}</span>
+                        </summary>
+                        <div className="timeline-tool-body">{body}</div>
+                      </details>
+                    ) : (
+                      <>
+                        <strong>{eventTitle(event)}</strong>
+                        <span>{eventSubtitle(event)}</span>
+                        {body}
+                      </>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
           </ol>
         )}
       </div>

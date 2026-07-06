@@ -1,255 +1,147 @@
-"""文件上传接口模块"""
+"""File upload / management API.
 
-from pathlib import Path
+Endpoints (mounted under ``/api`` by ``main.py``):
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
-from loguru import logger
+  POST   /files                  upload a file (multipart)
+  GET    /files                  list current user's files
+  GET    /files/{file_id}        fetch metadata
+  GET    /files/{file_id}/download
+                                 download raw bytes
+  DELETE /files/{file_id}        soft delete (metadata + vectors + storage)
+  POST   /files/{file_id}/reindex
+                                 rebuild Milvus index
+"""
 
-from app.services.document_extraction_service import SUPPORTED_EXTENSIONS
-from app.services.vector_index_service import vector_index_service
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import JSONResponse, Response
+
+from app.services.file_storage_service import file_storage_service
+from app.services.session_scope_service import require_session_owner
+from app.services.storage_adapter import safe_storage_name
 
 router = APIRouter()
 
-# 文件上传后存储的路径
-UPLOAD_DIR = Path("./uploads")
-TRUSTED_INDEX_DIRS = (Path("./aiops-docs"),)
-# 支持的文件类型
-ALLOWED_EXTENSIONS = sorted(extension.lstrip(".") for extension in SUPPORTED_EXTENSIONS)
-# 单个文件支持最大大小
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-WINDOWS_RESERVED_FILENAMES = {
-    "CON",
-    "PRN",
-    "AUX",
-    "NUL",
-    "COM1",
-    "COM2",
-    "COM3",
-    "COM4",
-    "COM5",
-    "COM6",
-    "COM7",
-    "COM8",
-    "COM9",
-    "LPT1",
-    "LPT2",
-    "LPT3",
-    "LPT4",
-    "LPT5",
-    "LPT6",
-    "LPT7",
-    "LPT8",
-    "LPT9",
-}
+
+def _ok(data, message: str = "success", status: int = 200):
+    return JSONResponse(
+        status_code=status, content={"code": status, "message": message, "data": data}
+    )
 
 
-@router.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+def _validate_file_id(file_id: str) -> None:
+    """Reject anything that doesn't look like a UUID4-generated file id.
+
+    This is a cheap front-line defense; the storage layer still scopes
+    access by ``owner_key``, so even a known ID from another user returns
+    404 via the service layer.
     """
-    上传文件并自动创建向量索引
+    if not file_id.startswith("file_") or len(file_id) <= 5:
+        raise HTTPException(status_code=400, detail="invalid file_id")
 
-    Args:
-        file: 上传的文件
 
-    Returns:
-        JSONResponse: 上传结果
+@router.post("/files")
+async def upload_file(
+    file: UploadFile = File(...),
+    auto_index: bool = Form(
+        False, description="If true, immediately index into Milvus after upload."
+    ),
+    owner_key: str = Depends(require_session_owner),
+):
+    """Upload a file. Returns ``{file, deduplicated}``.
+
+    ``deduplicated=True`` means the bytes were already stored for this
+    user (matched by SHA256); no new copy was written.
     """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="filename is required")
     try:
-        # 1. 验证文件
-        if not file.filename:
-            raise HTTPException(status_code=400, detail="文件名不能为空")
-
-        # 2. 规范化文件名（去除空格，处理 Windows 上传的文件）
-        safe_filename = _sanitize_filename(file.filename)
-
-        # 3. 验证文件扩展名
-        file_extension = _get_file_extension(safe_filename)
-        if file_extension not in ALLOWED_EXTENSIONS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"不支持的文件格式，仅支持: {', '.join(ALLOWED_EXTENSIONS)}",
-            )
-
-        # 4. 创建上传目录
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-        # 5. 保存文件
-        file_path = _unique_upload_path(UPLOAD_DIR, safe_filename)
-
-        # 读取并保存文件内容
-        content = await file.read()
-
-        # 验证文件大小
-        if len(content) > MAX_FILE_SIZE:
-            raise HTTPException(
-                status_code=400, detail=f"文件大小超过限制（最大 {MAX_FILE_SIZE} 字节）"
-            )
-
-        safe_filename = file_path.name
-        file_path.write_bytes(content)
-
-        logger.info(f"文件上传成功: {file_path}")
-
-        # 5. 自动创建向量索引
-        indexing_status = "pending"
-        indexing_error = ""
-        indexed_chunks = 0
-
-        try:
-            logger.info(f"开始为上传文件创建向量索引: {file_path}")
-            indexing_result = vector_index_service.index_single_file(str(file_path))
-            result_data = (
-                indexing_result.to_dict()
-                if hasattr(indexing_result, "to_dict")
-                else indexing_result
-            )
-            indexing_status = str(result_data.get("status", "completed"))
-            indexed_chunks = int(result_data.get("chunk_count", 0))
-            indexing_error = str(result_data.get("error_message", ""))
-            logger.info(f"向量索引创建成功: {file_path}")
-        except Exception as e:
-            indexing_status = "failed"
-            indexing_error = str(e)
-            indexed_chunks = 0
-            logger.error(f"向量索引创建失败: {file_path}, 错误: {e}")
-            # 注意：即使索引失败，文件上传仍然成功，只是记录错误日志
-
-        # 6. 返回响应
-        return JSONResponse(
-            status_code=200,
-            content={
-                "code": 200,
-                "message": "success",
-                "data": {
-                    "filename": safe_filename,
-                    "file_path": str(file_path),
-                    "size": len(content),
-                    "indexing_status": indexing_status,
-                    "indexing_error": indexing_error,
-                    "indexed_chunks": indexed_chunks,
-                },
-            },
+        metadata, dedup = await file_storage_service.upload(
+            owner_key=owner_key,
+            file_stream=file.file,
+            original_name=file.filename,
+            content_type=file.content_type or "",
+            auto_index=bool(auto_index),
         )
-
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"文件上传失败: {e}")
-        raise HTTPException(status_code=500, detail=f"文件上传失败: {e}") from e
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"upload failed: {exc}") from exc
+
+    return _ok({"file": metadata, "deduplicated": dedup})
 
 
-@router.post("/index_directory")
-async def index_directory(directory_path: str = None):
-    """
-    索引指定目录下的所有文件
-
-    Args:
-        directory_path: 目录路径（可选，默认使用 uploads 目录）
-
-    Returns:
-        JSONResponse: 索引结果
-    """
-    try:
-        trusted_directory = _resolve_trusted_index_directory(directory_path)
-        logger.info(f"开始索引目录: {trusted_directory}")
-
-        # 执行索引
-        result = vector_index_service.index_directory(str(trusted_directory))
-        if result.error_message:
-            raise HTTPException(status_code=400, detail=result.error_message)
-
-        return JSONResponse(
-            status_code=200,
-            content={
-                "code": 200,
-                "message": "success" if result.success else "partial_success",
-                "data": result.to_dict(),
-            },
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"索引目录失败: {e}")
-        raise HTTPException(status_code=500, detail=f"索引目录失败: {e}") from e
+@router.get("/files")
+async def list_files(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    status: str | None = Query(
+        None, description="Filter by status: pending | indexed | failed | deleted"
+    ),
+    owner_key: str = Depends(require_session_owner),
+):
+    items, total = file_storage_service.list(
+        owner_key, page=page, page_size=page_size, status_filter=status
+    )
+    return _ok(
+        {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+    )
 
 
-def _get_file_extension(filename: str) -> str:
-    """
-    获取文件扩展名
-
-    Args:
-        filename: 文件名
-
-    Returns:
-        str: 扩展名（小写，不含点）
-    """
-    parts = filename.rsplit(".", 1)
-    if len(parts) == 2:
-        return parts[1].lower()
-    return ""
+@router.get("/files/{file_id}")
+async def get_file_metadata(
+    file_id: str,
+    owner_key: str = Depends(require_session_owner),
+):
+    _validate_file_id(file_id)
+    meta = file_storage_service.get(owner_key, file_id)
+    return _ok({"file": meta})
 
 
-def _unique_upload_path(upload_dir: Path, filename: str) -> Path:
-    """Return a non-overwriting path inside the upload directory."""
-
-    candidate = upload_dir / filename
-    if not candidate.exists():
-        return candidate
-
-    stem = candidate.stem
-    suffix = candidate.suffix
-    counter = 1
-    while True:
-        next_candidate = upload_dir / f"{stem}_{counter}{suffix}"
-        if not next_candidate.exists():
-            return next_candidate
-        counter += 1
-
-
-def _resolve_trusted_index_directory(directory_path: str | None) -> Path:
-    """Resolve index_directory input and keep it inside trusted roots."""
-
-    target = Path(directory_path).resolve() if directory_path else UPLOAD_DIR.resolve()
-    if not target.exists() or not target.is_dir():
-        raise HTTPException(status_code=400, detail=f"目录不存在或不是有效目录: {target}")
-
-    trusted_roots = [UPLOAD_DIR.resolve()]
-    trusted_roots.extend(root.resolve() for root in TRUSTED_INDEX_DIRS)
-
-    if not any(_is_relative_to(target, root) for root in trusted_roots):
-        roots = ", ".join(str(root) for root in trusted_roots)
-        raise HTTPException(
-            status_code=400,
-            detail=f"directory_path must stay within trusted knowledge roots: {roots}",
-        )
-    return target
+@router.get("/files/{file_id}/download")
+async def download_file(
+    file_id: str,
+    owner_key: str = Depends(require_session_owner),
+):
+    _validate_file_id(file_id)
+    data, meta, original_name = await file_storage_service.download(
+        owner_key, file_id
+    )
+    headers = {
+        "Content-Disposition": (
+            f'attachment; filename="{safe_storage_name(original_name)}"'
+        ),
+        "X-File-Id": meta["file_id"],
+        "X-File-Hash": meta["file_hash"],
+    }
+    return Response(
+        content=data,
+        media_type=meta.get("mime_type") or "application/octet-stream",
+        headers=headers,
+    )
 
 
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
+@router.delete("/files/{file_id}")
+async def delete_file(
+    file_id: str,
+    owner_key: str = Depends(require_session_owner),
+):
+    _validate_file_id(file_id)
+    await file_storage_service.delete(owner_key, file_id)
+    return _ok({"file_id": file_id, "deleted": True})
 
 
-def _sanitize_filename(filename: str) -> str:
-    """
-    规范化文件名，去除空格和特殊字符
-
-    Args:
-        filename: 原始文件名
-
-    Returns:
-        str: 规范化后的文件名
-    """
-    # 去除空格
-    sanitized = "".join("_" if char.isspace() or not char.isprintable() else char for char in filename)
-    # 去除其他可能导致问题的字符
-    for char in ["\\", "/", ":", "*", "?", '"', "<", ">", "|"]:
-        sanitized = sanitized.replace(char, "_")
-    if Path(sanitized).stem.upper() in WINDOWS_RESERVED_FILENAMES:
-        sanitized = f"_{sanitized}"
-    return sanitized
+@router.post("/files/{file_id}/reindex")
+async def reindex_file(
+    file_id: str,
+    owner_key: str = Depends(require_session_owner),
+):
+    _validate_file_id(file_id)
+    meta = await file_storage_service.reindex(owner_key, file_id)
+    return _ok({"file": meta})

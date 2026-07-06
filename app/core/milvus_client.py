@@ -32,7 +32,7 @@ class MilvusClientManager:
         self._client: MilvusClient | None = None
         self._collection: Collection | None = None
 
-    def connect(self) -> MilvusClient:
+    def connect(self, validate_schema: bool = True) -> MilvusClient:
         """
         连接到 Milvus 服务器并初始化 collection
 
@@ -44,6 +44,8 @@ class MilvusClientManager:
         """
         # 幂等：导入阶段可能已由 VectorStoreManager 等提前连接，避免重复初始化
         if self._collection is not None and self._client is not None:
+            if validate_schema:
+                self._validate_or_warn_schema(self._collection.schema)
             logger.debug("Milvus 已连接，跳过重复 connect")
             return self._client
 
@@ -72,8 +74,13 @@ class MilvusClientManager:
             else:
                 logger.info(f"collection '{self.COLLECTION_NAME}' 已存在")
                 self._collection = Collection(self.COLLECTION_NAME)
+                if not validate_schema:
+                    self._load_collection()
+                    return self._client
 
-                self._warn_if_schema_is_missing_expected_fields(self._collection.schema)
+                # 验证 schema 是否与当前检索模式匹配；
+                # bm25/hybrid 模式下缺少 sparse_vector 字段会直接报错
+                self._validate_or_warn_schema(self._collection.schema)
 
                 # 检查向量维度是否匹配
                 schema = self._collection.schema
@@ -144,7 +151,7 @@ class MilvusClientManager:
             raise ValueError("重建 collection 会删除现有向量数据，请传入 confirm=True 确认执行")
 
         if self._client is None:
-            _ = self.connect()
+            _ = self.connect(validate_schema=False)
 
         if self._collection is not None:
             try:
@@ -269,13 +276,28 @@ class MilvusClientManager:
             names.add(config.rag_sparse_vector_field)
         return names
 
-    def _warn_if_schema_is_missing_expected_fields(self, schema: CollectionSchema) -> None:
+    def _validate_or_warn_schema(self, schema: CollectionSchema) -> None:
         existing = {field.name for field in schema.fields}
         missing = sorted(self._expected_field_names() - existing)
-        if missing:
+        if not missing:
+            return
+
+        retrieval_mode = self._retrieval_mode()
+        missing_desc = ", ".join(missing)
+        if retrieval_mode in {"bm25", "hybrid"}:
+            # BM25/hybrid 模式必须要有 sparse_vector 字段 + BM25 Function，
+            # 否则检索会静默失败。直接报错并给出修复指引。
+            raise RuntimeError(
+                f"Collection '{self.COLLECTION_NAME}' 缺少当前检索模式 "
+                f"({retrieval_mode}) 需要的字段: {missing_desc}。\n"
+                "该 collection 可能是在 dense 模式下创建的，不支持 BM25/hybrid 检索。\n"
+                "请执行以下命令重建 collection 并重新索引文档：\n"
+                "  python scripts/rebuild_vector_collection.py --yes\n"
+            )
+        else:
             logger.warning(
-                f"collection '{self.COLLECTION_NAME}' 缺少当前检索模式需要的字段: {missing}。"
-                "如需启用 BM25/hybrid，请重建 collection 并重新索引文档。"
+                f"collection '{self.COLLECTION_NAME}' 缺少字段: {missing_desc}。"
+                "如需启用 BM25/hybrid，请先设置 RAG_RETRIEVAL_MODE=hybrid 再重建 collection。"
             )
 
     def _load_collection(self) -> None:

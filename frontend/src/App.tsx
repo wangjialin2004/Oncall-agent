@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { clearAuth, loadAuth, logout } from "./api/authApi";
 import { streamAgent } from "./api/agentStream";
+import { type CheckpointSummary, getCheckpoint } from "./api/checkpointApi";
 import {
   type ConversationSummary,
   deleteConversation,
   getConversation,
   listConversations,
 } from "./api/conversationApi";
+import { uploadFile } from "./api/fileApi";
 import { submitFeedback } from "./api/memoryApi";
 import { AgentProcessPanel } from "./components/AgentProcessPanel";
 import { AppShell } from "./components/AppShell";
@@ -23,10 +25,9 @@ import type {
   ChatMessage,
   TimelineEvent,
 } from "./types/events";
+import type { PendingAttachment } from "./components/ChatWorkspace";
 
 const SESSION_STORAGE_KEY = "currentSessionId";
-const RUNNING_PLACEHOLDER = "Running...";
-const TYPING_INTERVAL_MS = 28;
 
 function createId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -118,106 +119,53 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string>("");
   const [sessions, setSessions] = useState<ConversationSummary[]>([]);
   const [sessionId, setSessionId] = useState<string>(loadOrCreateSessionId);
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [checkpointStatus, setCheckpointStatus] = useState<Record<string, CheckpointSummary>>({});
+  // Per-session opt-in for aggressive checkpoint replay on the next send.
+  // Reset whenever the active session changes so we never leak the toggle
+  // across unrelated threads.
+  const [checkpointReplay, setCheckpointReplay] = useState<boolean>(false);
   const abortRef = useRef<AbortController | null>(null);
   // Assistant message id of the turn currently streaming, so events route correctly.
   const activeIdRef = useRef<string>("");
-  const typingQueuesRef = useRef<Record<string, string[]>>({});
-  const typingTimersRef = useRef<Record<string, number>>({});
-  const completedAnswersRef = useRef<Record<string, string>>({});
 
-  function clearTyping(assistantId?: string) {
-    const ids = assistantId ? [assistantId] : Object.keys(typingTimersRef.current);
-    for (const id of ids) {
-      const timer = typingTimersRef.current[id];
-      if (timer) {
-        window.clearInterval(timer);
-      }
-      delete typingTimersRef.current[id];
-      delete typingQueuesRef.current[id];
-      delete completedAnswersRef.current[id];
+  function appendStreamedChunk(assistantId: string, chunk: string) {
+    if (!chunk) {
+      return;
     }
-  }
-
-  function finishTyping(assistantId: string) {
-    const completedAnswer = completedAnswersRef.current[assistantId];
-    if (completedAnswer !== undefined) {
-      setMessages((items) =>
-        items.map((item) =>
-          item.id === assistantId
-            ? { ...item, content: completedAnswer || item.content, status: "completed" }
-            : item,
-        ),
-      );
-      delete completedAnswersRef.current[assistantId];
-    }
-  }
-
-  function flushTyping(assistantId: string) {
-    const timer = typingTimersRef.current[assistantId];
-    if (timer) {
-      window.clearInterval(timer);
-    }
-    delete typingTimersRef.current[assistantId];
-    delete typingQueuesRef.current[assistantId];
-    finishTyping(assistantId);
-  }
-
-  function appendTypedCharacter(assistantId: string, character: string) {
     setMessages((items) =>
       items.map((item) =>
-        item.id === assistantId
-          ? {
-              ...item,
-              content: (item.content === RUNNING_PLACEHOLDER ? "" : item.content) + character,
-            }
-          : item,
+        item.id === assistantId ? { ...item, content: item.content + chunk } : item,
       ),
     );
   }
 
-  function startTyping(assistantId: string) {
-    if (typingTimersRef.current[assistantId]) {
-      return;
-    }
-
-    typingTimersRef.current[assistantId] = window.setInterval(() => {
-      const queue = typingQueuesRef.current[assistantId] ?? [];
-      const next = queue.shift();
-
-      if (next) {
-        appendTypedCharacter(assistantId, next);
-        return;
-      }
-
-      window.clearInterval(typingTimersRef.current[assistantId]);
-      delete typingTimersRef.current[assistantId];
-      delete typingQueuesRef.current[assistantId];
-      finishTyping(assistantId);
-    }, TYPING_INTERVAL_MS);
-  }
-
-  function enqueueTypingText(assistantId: string, text: string) {
-    if (!text) {
-      return;
-    }
-    typingQueuesRef.current[assistantId] = [
-      ...(typingQueuesRef.current[assistantId] ?? []),
-      ...Array.from(text),
-    ];
-    startTyping(assistantId);
-  }
-
   const refreshSessions = useCallback(async () => {
+    let summaries: ConversationSummary[] = [];
     try {
-      setSessions(await listConversations());
+      summaries = await listConversations();
+      setSessions(summaries);
     } catch {
       // best-effort: the chat still works without the history list
+      return;
     }
+    // Fan out one GET /api/checkpoint per session. Failures degrade to "no
+    // checkpoint" silently — the feature is opt-in, so missing data should
+    // not break the sidebar.
+    const updates = await Promise.all(
+      summaries.map(async (summary) => [summary.session_id, await getCheckpoint(summary.session_id)] as const),
+    );
+    const next: Record<string, CheckpointSummary> = {};
+    for (const [sid, status] of updates) {
+      if (status.enabled) {
+        next[sid] = status;
+      }
+    }
+    setCheckpointStatus(next);
   }, []);
 
   const loadSession = useCallback(async (sid: string) => {
     abortRef.current?.abort();
-    clearTyping();
     activeIdRef.current = "";
     localStorage.setItem(SESSION_STORAGE_KEY, sid);
     setSessionId(sid);
@@ -251,6 +199,12 @@ export default function App() {
       setMessages(restoredMessages);
       setRuns(restoredRuns);
       setSelectedId(lastAssistantId);
+      // Refreshing the per-session checkpoint status here keeps the sidebar
+      // badge and any "continue" affordances in sync right after switching.
+      const status = await getCheckpoint(sid);
+      setCheckpointStatus((current) =>
+        status.enabled ? { ...current, [sid]: status } : current,
+      );
     } catch {
       setMessages([]);
       setRuns({});
@@ -268,15 +222,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auth]);
 
-  useEffect(() => () => clearTyping(), []);
-
   function handleLogin(token: string, username: string) {
     setAuth({ token, username });
   }
 
   async function handleLogout() {
     abortRef.current?.abort();
-    clearTyping();
     weakAcceptIfNeeded(runs[activeIdRef.current]);
     if (auth?.token) {
       await logout(auth.token);
@@ -297,39 +248,30 @@ export default function App() {
     }
 
     if (event.type === "content") {
-      enqueueTypingText(assistantId, event.data);
+      appendStreamedChunk(assistantId, event.data);
     } else if (event.type === "report") {
-      clearTyping(assistantId);
       setMessages((items) =>
         items.map((item) => (item.id === assistantId ? { ...item, content: event.report } : item)),
       );
     } else if (event.type === "complete") {
-      if (typingTimersRef.current[assistantId]) {
-        completedAnswersRef.current[assistantId] = event.answer;
-      } else if (event.answer) {
-        completedAnswersRef.current[assistantId] = event.answer;
-        enqueueTypingText(assistantId, event.answer);
-      } else {
-        setMessages((items) =>
-          items.map((item) =>
-            item.id === assistantId
-              ? {
-                  ...item,
-                  content: item.content === RUNNING_PLACEHOLDER ? "" : item.content,
-                  status: "completed",
-                }
-              : item,
-          ),
-        );
-      }
-    } else if (event.type === "error") {
-      clearTyping(assistantId);
       setMessages((items) =>
         items.map((item) =>
           item.id === assistantId
             ? {
                 ...item,
-                content: item.content === RUNNING_PLACEHOLDER ? "（执行失败）" : item.content,
+                content: item.content || event.answer || "",
+                status: "completed",
+              }
+            : item,
+        ),
+      );
+    } else if (event.type === "error") {
+      setMessages((items) =>
+        items.map((item) =>
+          item.id === assistantId
+            ? {
+                ...item,
+                content: item.content ? item.content : "（执行失败）",
                 status: "error",
               }
             : item,
@@ -378,16 +320,34 @@ export default function App() {
           error: event.message,
           caseId: event.case_id ?? prev.caseId,
         };
+      } else if (event.type === "checkpoint_resume") {
+        next = { ...prev, checkpointResume: event };
+      } else if (event.type === "checkpoint_conservative_close") {
+        next = { ...prev, checkpointConservativeClose: event };
       }
       return { ...current, [assistantId]: next };
     });
+
+    // When the harness tells us it consumed a checkpoint, refresh the sidebar
+    // badge: that session's checkpoint is either gone (completed) or about to
+    // be replaced by the new run's first save. Either way, drop the badge.
+    if (
+      event.type === "checkpoint_resume" ||
+      event.type === "checkpoint_conservative_close"
+    ) {
+      setCheckpointStatus((current) => {
+        if (!current[sessionId]) {
+          return current;
+        }
+        const next = { ...current };
+        delete next[sessionId];
+        return next;
+      });
+    }
   }
 
   async function handleSend(message: string) {
     abortRef.current?.abort();
-    if (activeIdRef.current) {
-      flushTyping(activeIdRef.current);
-    }
     weakAcceptIfNeeded(runs[activeIdRef.current]);
     const controller = new AbortController();
     abortRef.current = controller;
@@ -399,7 +359,7 @@ export default function App() {
     setMessages((items) => [
       ...items,
       { id: userId, role: "user", content: message },
-      { id: assistantId, role: "assistant", content: RUNNING_PLACEHOLDER, status: "running" },
+      { id: assistantId, role: "assistant", content: "", status: "running" },
     ]);
     setRuns((current) => ({
       ...current,
@@ -412,12 +372,16 @@ export default function App() {
       }),
     }));
     setSelectedId(assistantId);
+    const currentAttachments = pendingAttachments;
+    setPendingAttachments([]);
 
     try {
       await streamAgent({
         sessionId,
         message,
         mode,
+        attachmentIds: currentAttachments.map((item) => item.fileId),
+        checkpointReplay,
         signal: controller.signal,
         onEvent: applyEvent,
       });
@@ -459,14 +423,15 @@ export default function App() {
 
   function handleNewSession() {
     abortRef.current?.abort();
-    clearTyping();
     weakAcceptIfNeeded(runs[activeIdRef.current]);
     const id = createId("session");
     localStorage.setItem(SESSION_STORAGE_KEY, id);
     setSessionId(id);
     setMessages([]);
     setRuns({});
+    setPendingAttachments([]);
     setSelectedId("");
+    setCheckpointReplay(false);
     activeIdRef.current = "";
     setView("chat");
   }
@@ -477,6 +442,8 @@ export default function App() {
       return;
     }
     weakAcceptIfNeeded(runs[activeIdRef.current]);
+    // Aggressive replay only makes sense for the session it was opted into.
+    setCheckpointReplay(false);
     await loadSession(sid);
   }
 
@@ -498,14 +465,13 @@ export default function App() {
     if (!assistantId) {
       return;
     }
-    clearTyping(assistantId);
     setMessages((items) =>
       items.map((item) =>
         item.id === assistantId && item.status === "running"
           ? {
               ...item,
               status: "cancelled",
-              content: item.content === RUNNING_PLACEHOLDER ? "（已取消）" : item.content,
+              content: item.content ? item.content : "（已取消）",
             }
           : item,
       ),
@@ -515,6 +481,21 @@ export default function App() {
         ? { ...current, [assistantId]: { ...current[assistantId], status: "cancelled" } }
         : current,
     );
+  }
+
+  async function handleUploadFile(file: File) {
+    const uploaded = await uploadFile(file);
+    setPendingAttachments((current) => {
+      if (current.some((item) => item.fileId === uploaded.fileId)) {
+        return current;
+      }
+      return [...current, { fileId: uploaded.fileId, fileName: uploaded.fileName }];
+    });
+    return uploaded;
+  }
+
+  function handleRemoveAttachment(fileId: string) {
+    setPendingAttachments((current) => current.filter((item) => item.fileId !== fileId));
   }
 
   if (!auth) {
@@ -534,6 +515,7 @@ export default function App() {
           activeView={view}
           sessions={sessions}
           activeSessionId={sessionId}
+          checkpointStatus={checkpointStatus}
           onNewSession={handleNewSession}
           onSelectSession={handleSelectSession}
           onDeleteSession={handleDeleteSession}
@@ -549,9 +531,14 @@ export default function App() {
             mode={mode}
             messages={messages}
             runStatus={isStreaming ? "running" : "idle"}
+            pendingAttachments={pendingAttachments}
             selectedId={selectedId}
+            checkpointReplay={checkpointReplay}
+            onCheckpointReplayChange={setCheckpointReplay}
             onModeChange={setMode}
             onSend={handleSend}
+            onRemoveAttachment={handleRemoveAttachment}
+            onUploadFile={handleUploadFile}
             onSelectMessage={setSelectedId}
             onStop={handleStop}
           />
@@ -562,8 +549,8 @@ export default function App() {
           <div className="panel-card baseline-side-help">
             <h3>服务基线</h3>
             <p>
-              录入每个服务关键指标（CPU/内存/QPS/P95）的正常区间。诊断时会作为「服务知识增强」附在
-              指标/日志结果中，帮助区分噪声与真异常。
+              录入每个服务关键指标（CPU/内存/QPS/P95）的正常区间。诊断时会作为“服务知识增强”附在
+              指标/日志结果中，帮助区分噪声与真实异常。
             </p>
           </div>
         ) : (

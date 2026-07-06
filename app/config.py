@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # falls back to the legacy DashScope settings above.
     llm_provider: str = "openai"  # openai | azure | custom
     llm_base_url: str = "https://dasuapi.com/v1"
-    llm_api_key: str = ""
+    llm_api_key: str = "get.env('LLM_API_KEY')"
     llm_model: str = "gpt-5.4"
     llm_timeout: float = 60.0
     # 瞬时错误（429 / 5xx / 网络超时）的指数退避重试次数；鉴权错误不重试
@@ -53,12 +53,39 @@ class Settings(BaseSettings):
     # Harness 主循环配置（默认关闭，旧 RouterService 路径保留可回滚）
     harness_enabled: bool = False
     harness_max_steps: int = 6
-    harness_token_budget: int = 16000
-    harness_history_max_turns: int = 6
+    harness_token_budget: int = 80000
+    # 每次发往模型的 messages 体量安全网：超过则压缩最旧的历史/工具消息（保留 tool_call 配对），
+    # 防止收尾或多步取证后撞模型上下文上限导致 API 报错；<=0 关闭该裁剪
+    harness_message_token_budget: int = 60000
+    harness_history_max_turns: int = 16
+    # 关闭后退化为旧版“仅按最近 N 轮”截断，便于一键降级
+    harness_history_token_window_enabled: bool = True
+    # 历史对话注入的独立 token 预算；<=0 时退化为仅按轮数截断
+    harness_history_token_budget: int = 6000
+    # 单条历史消息过长时折叠，防止少数长答案撑爆上下文
+    harness_history_message_max_chars: int = 4000
+    harness_attachment_context_max_chars: int = 12000
+    harness_attachment_summary_max_chars: int = 600
+    harness_attachment_keyword_limit: int = 12
+    # 维护更早对话的滚动摘要；异常或关闭时降级为仅最近窗口逐字历史
+    harness_rolling_summary_enabled: bool = True
+    harness_rolling_summary_max_chars: int = 4000
+    # 单次滚动摘要合并时，新增对话输入的独立 token 预算；<=0 关闭该限制
+    harness_rolling_summary_input_token_budget: int = 6000
+    harness_rolling_summary_model: str = ""
+    # 滚动摘要在请求关键路径上同步调用 LLM，单独限时；超时则保留旧摘要不阻塞回答
+    harness_rolling_summary_timeout_seconds: float = 20.0
     harness_timeout_seconds: float = 90.0
     harness_mcp_enabled: bool = False
     harness_delegation_enabled: bool = True
+    # 路由选中的专项专家是否在主循环开始时被“确定性委派执行”：开启后 harness 作为编排器，
+    # 先把核心调查交给被选专家执行，再在其结论与证据上做核对/补充/收尾，而不是自己直接作答。
+    # 关闭后退化为旧的软提示行为（是否委派由 harness LLM 自行决定）。
+    harness_force_expert_delegation: bool = True
+    # 委派子专家的独立超时，避免单个慢子专家吃光父级总超时；超时返回降级结果
+    harness_delegate_timeout_seconds: float = 45.0
     harness_tool_timeout_seconds: float = 30.0
+    harness_tool_collection_timeout_seconds: float = 5.0
     harness_tool_max_output_chars: int = 6000
     # 工具瞬时错误（超时/网络/5xx）的有限重试次数；鉴权/权限类错误不重试
     harness_tool_max_retries: int = 1
@@ -96,6 +123,8 @@ class Settings(BaseSettings):
     rag_retrieval_mode: str = "dense"  # dense | bm25 | hybrid
     rag_dense_weight: float = 0.7
     rag_bm25_weight: float = 0.3
+    rag_hybrid_ranker: str = "weighted"  # weighted | rrf
+    rag_rrf_k: int = 60  # RRF constant, only used when rag_hybrid_ranker == "rrf"
     rag_dense_vector_field: str = "vector"
     rag_sparse_vector_field: str = "sparse_vector"
 
@@ -124,6 +153,23 @@ class Settings(BaseSettings):
     # Short-term conversation checkpoint storage path.
     checkpoint_db_path: str = "volumes/checkpoints.db"
 
+    # Redis client (used by the harness checkpoint subsystem).
+    redis_enabled: bool = False
+    redis_url: str = "redis://localhost:6379/0"
+    redis_namespace: str = "super_biz_agent"
+    redis_socket_timeout: float = 5.0
+
+    # Harness loop checkpoint (step-level, Redis-backed).
+    # Only effective when all three of harness_enabled, harness_checkpoint_enabled,
+    # and redis_enabled are True. Conservative replay is the default: on resume the
+    # harness skips any step that contains a non-idempotent tool and goes straight
+    # to a single closing LLM call. Set harness_checkpoint_replay=True to replay
+    # remaining steps verbatim (best-effort; external side effects may double-fire).
+    harness_checkpoint_enabled: bool = False
+    harness_checkpoint_ttl_seconds: int = 1800
+    harness_checkpoint_replay: bool = False
+    harness_checkpoint_max_idempotent_tools: int = 32
+
     # Long-term memory
     memory_db_path: str = "volumes/long_term_memory.db"
     project_id: str = "super_biz_agent"
@@ -136,6 +182,34 @@ class Settings(BaseSettings):
     service_knowledge_enabled: bool = True
     user_preferences_enabled: bool = True
     auth_token_secret: str = "dev-auth-token-secret"
+
+    # Process-local L1 cache for the long-term memory subsystem
+    # (plan/memory-cache-layer.md §3.4 / §3.7). Disable via env
+    # ``MEMORY_CACHE_ENABLED=0`` to fall back to the raw SQLite path.
+    memory_cache_enabled: bool = True
+    memory_cache_max_entries: int = 1024
+    memory_cache_ttl_user_preference_seconds: float = 300.0
+    memory_cache_ttl_experience_seconds: float = 60.0
+    memory_cache_ttl_service_knowledge_seconds: float = 60.0
+
+    # File storage backend.
+    # ``local`` uses the local filesystem; ``minio|oss|s3|cos`` use the
+    # S3-compatible adapter against the configured endpoint/bucket.
+    storage_backend: str = "local"
+    storage_local_root: str = "volumes/file_storage"
+    storage_cache_dir: str = "volumes/file_storage/_cache"
+    storage_max_file_size_mb: int = 50
+    storage_allowed_extensions: str = ".txt,.text,.md,.markdown,.pdf,.docx"
+
+    # S3-compatible shared settings (used when storage_backend != local).
+    storage_endpoint: str = ""
+    storage_region: str = "us-east-1"
+    storage_access_key: str = ""
+    storage_secret_key: str = ""
+    storage_bucket: str = ""
+    storage_use_ssl: bool = False
+    storage_url_style: str = "path"  # path | virtual-hosted
+    storage_public_url_base: str = ""
 
     @field_validator("debug", mode="before")
     @classmethod

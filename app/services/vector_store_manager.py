@@ -5,7 +5,7 @@ import uuid
 from typing import Any
 
 from loguru import logger
-from pymilvus import Collection
+from pymilvus import Collection, FunctionType
 
 from app.config import config
 from app.core.milvus_client import milvus_manager
@@ -22,7 +22,12 @@ class VectorStoreManager:
         self.collection_name = COLLECTION_NAME
 
     def add_documents(self, documents: list[RetrievedDocument]) -> list[str]:
-        """Embed and insert documents into Milvus."""
+        """Embed and insert documents into Milvus.
+
+        每次插入同时写入 dense 向量和 content 字段。
+        当 collection 以 bm25/hybrid 模式创建时，Milvus 内置的 BM25 Function
+        会自动从 content 计算 sparse_vector，无需客户端显式传入稀疏向量。
+        """
         if not documents:
             return []
 
@@ -37,6 +42,9 @@ class VectorStoreManager:
                 raise RuntimeError(
                     f"Embedding count mismatch: documents={len(documents)}, embeddings={len(vectors)}"
                 )
+
+            # 检测 collection 是否具备 BM25 稀疏向量自动生成能力
+            bm25_enabled = self._collection_has_bm25_function(collection)
 
             rows = [
                 {
@@ -58,14 +66,54 @@ class VectorStoreManager:
             collection.flush()
 
             elapsed = time.time() - start_time
+            vector_info = (
+                "dense + BM25 sparse (auto)" if bm25_enabled else "dense only"
+            )
             logger.info(
-                f"Added {len(documents)} documents to Milvus, elapsed={elapsed:.2f}s, "
-                f"avg={elapsed / len(documents):.2f}s"
+                f"Added {len(documents)} documents to Milvus [{vector_info}], "
+                f"elapsed={elapsed:.2f}s, avg={elapsed / len(documents):.2f}s"
             )
             return ids
         except Exception as e:
             logger.error(f"Add documents failed: {e}")
             raise
+
+    @staticmethod
+    def _is_bm25_function_type(func_type: Any) -> bool:
+        if func_type is None:
+            return False
+
+        if getattr(func_type, "name", "").lower() == "bm25":
+            return True
+
+        func_type_text = str(func_type).lower()
+        if func_type_text == "bm25" or func_type_text.endswith(".bm25"):
+            return True
+
+        try:
+            return func_type == FunctionType.BM25 or int(func_type) == int(FunctionType.BM25)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _collection_has_bm25_function(collection: Collection) -> bool:
+        """检查 collection schema 中是否注册了 BM25 Function。
+
+        当 BM25 Function 存在时，Milvus 会在 insert 时自动从 content 字段
+        计算 SPARSE_FLOAT_VECTOR，无需客户端手动传入稀疏向量。
+        """
+        try:
+            funcs = getattr(collection.schema, "functions", None) or []
+            for func in funcs:
+                func_type = (
+                    getattr(func, "function_type", None)
+                    or getattr(func, "type", None)
+                )
+                if VectorStoreManager._is_bm25_function_type(func_type):
+                    return True
+        except Exception:
+            pass
+        return False
 
     def delete_by_source(self, file_path: str) -> int:
         """Delete all chunks for a source file."""

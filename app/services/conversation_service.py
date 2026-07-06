@@ -35,6 +35,8 @@ class ConversationService:
         owner_key: str,
         session_id: str,
         user_message: str,
+        user_context: str = "",
+        attachment_refs: list[dict[str, Any]] | None = None,
         assistant_answer: str,
         route: str = "",
         case_id: str = "",
@@ -55,16 +57,18 @@ class ConversationService:
             connection.execute(
                 """
                 INSERT INTO conversation_turns (
-                    owner_key, session_id, turn_index, user_message,
-                    assistant_answer, route, case_id, events_json, created_at
+                    owner_key, session_id, turn_index, user_message, user_context,
+                    attachment_refs_json, assistant_answer, route, case_id, events_json, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     owner_key,
                     session_id,
                     turn_index,
                     user_message,
+                    user_context,
+                    json.dumps(attachment_refs or [], ensure_ascii=False),
                     assistant_answer,
                     route,
                     case_id,
@@ -117,8 +121,8 @@ class ConversationService:
         with self._connection() as connection:
             rows = connection.execute(
                 """
-                SELECT turn_index, user_message, assistant_answer, route,
-                       case_id, events_json, created_at
+                SELECT turn_index, user_message, user_context, attachment_refs_json,
+                       assistant_answer, route, case_id, events_json, created_at
                 FROM conversation_turns
                 WHERE owner_key = ? AND session_id = ?
                 ORDER BY turn_index ASC
@@ -129,6 +133,8 @@ class ConversationService:
             {
                 "turn_index": int(row["turn_index"]),
                 "user_message": row["user_message"],
+                "user_context": row["user_context"],
+                "attachment_refs": _json_loads(row["attachment_refs_json"], []),
                 "assistant_answer": row["assistant_answer"],
                 "route": row["route"],
                 "case_id": row["case_id"],
@@ -137,6 +143,59 @@ class ConversationService:
             }
             for row in rows
         ]
+
+    def get_rolling_summary(self, owner_key: str, session_id: str) -> dict[str, Any]:
+        """Return the rolling summary state for a conversation."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT memory_summary, memory_summary_turn_index
+                FROM conversations
+                WHERE owner_key = ? AND session_id = ?
+                """,
+                (owner_key, session_id),
+            ).fetchone()
+        if row is None:
+            return {"summary": "", "turn_index": -1}
+        turn_index = row["memory_summary_turn_index"]
+        return {
+            "summary": str(row["memory_summary"] or ""),
+            "turn_index": int(turn_index) if turn_index is not None else -1,
+        }
+
+    def update_rolling_summary(
+        self,
+        *,
+        owner_key: str,
+        session_id: str,
+        summary: str,
+        turn_index: int,
+    ) -> None:
+        """Persist the rolling summary and the latest turn index it covers."""
+        timestamp = _utc_now()
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO conversations (
+                    owner_key, session_id, title, created_at, updated_at,
+                    memory_summary, memory_summary_turn_index
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_key, session_id) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    memory_summary = excluded.memory_summary,
+                    memory_summary_turn_index = excluded.memory_summary_turn_index
+                """,
+                (
+                    owner_key,
+                    session_id,
+                    "新会话",
+                    timestamp,
+                    timestamp,
+                    summary,
+                    int(turn_index),
+                ),
+            )
 
     def delete_session(self, owner_key: str, session_id: str) -> bool:
         """Delete a conversation and its turns. Returns True if it existed."""
@@ -164,9 +223,23 @@ class ConversationService:
                     title TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
+                    memory_summary TEXT NOT NULL DEFAULT '',
+                    memory_summary_turn_index INTEGER NOT NULL DEFAULT -1,
                     PRIMARY KEY (owner_key, session_id)
                 )
                 """
+            )
+            _ensure_column(
+                connection,
+                table="conversations",
+                column="memory_summary",
+                definition="TEXT NOT NULL DEFAULT ''",
+            )
+            _ensure_column(
+                connection,
+                table="conversations",
+                column="memory_summary_turn_index",
+                definition="INTEGER NOT NULL DEFAULT -1",
             )
             connection.execute(
                 """
@@ -176,6 +249,8 @@ class ConversationService:
                     session_id TEXT NOT NULL,
                     turn_index INTEGER NOT NULL,
                     user_message TEXT NOT NULL DEFAULT '',
+                    user_context TEXT NOT NULL DEFAULT '',
+                    attachment_refs_json TEXT NOT NULL DEFAULT '[]',
                     assistant_answer TEXT NOT NULL DEFAULT '',
                     route TEXT NOT NULL DEFAULT '',
                     case_id TEXT NOT NULL DEFAULT '',
@@ -187,6 +262,18 @@ class ConversationService:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_conversation_turns_session "
                 "ON conversation_turns (owner_key, session_id, turn_index)"
+            )
+            _ensure_column(
+                connection,
+                table="conversation_turns",
+                column="user_context",
+                definition="TEXT NOT NULL DEFAULT ''",
+            )
+            _ensure_column(
+                connection,
+                table="conversation_turns",
+                column="attachment_refs_json",
+                definition="TEXT NOT NULL DEFAULT '[]'",
             )
         self._initialized = True
 
@@ -207,6 +294,19 @@ def _make_title(user_message: str) -> str:
     if not text:
         return "新会话"
     return text[:_TITLE_MAX_LEN]
+
+
+def _ensure_column(
+    connection: sqlite3.Connection,
+    *,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    if any(row[1] == column for row in rows):
+        return
+    connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 conversation_service = ConversationService()

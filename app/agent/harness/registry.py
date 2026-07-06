@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+
+from loguru import logger
 
 from app.agent.experts.base import collect_tools
 from app.agent.harness.subagent import create_delegate_tool
@@ -53,12 +56,29 @@ class HarnessToolRegistry:
         local_tools, mcp_server = _tools_for_route(route)
         if not config.harness_mcp_enabled:
             mcp_server = None
-        tools = await collect_tools(local_tools, mcp_server=mcp_server)
+        try:
+            timeout_seconds = float(
+                getattr(config, "harness_tool_collection_timeout_seconds", 5.0)
+                or 5.0
+            )
+            if timeout_seconds > 0:
+                async with asyncio.timeout(timeout_seconds):
+                    tools = await collect_tools(local_tools, mcp_server=mcp_server)
+            else:
+                tools = await collect_tools(local_tools, mcp_server=mcp_server)
+        except TimeoutError:
+            logger.warning(
+                "Harness tool collection timed out after {}s; continuing with local tools only.",
+                timeout_seconds,
+            )
+            tools = list(local_tools)
         metadata = {
             tool.name: ToolMetadata(name=tool.name, source="local") for tool in tools
         }
 
-        if config.harness_delegation_enabled and route == "diagnosis":
+        # 委派工具对所有 route 可用：harness 作为编排器，需要能把核心调查委派给
+        # 任一被选专项专家执行（不再仅限 diagnosis）。
+        if config.harness_delegation_enabled:
             delegate_tool = create_delegate_tool(
                 session_id=session_id,
                 trace_id=trace_id,

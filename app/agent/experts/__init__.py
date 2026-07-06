@@ -16,8 +16,8 @@ from app.agent.experts.registry import (
 
 __all__ = [
     "ExpertAgent",
-    "ToolCallingExpert",
-    "EXPERT_REGISTRY",
+    "ToolCalli.gExpert",
+    "EXPERT_EGISTRY",
     "EXPERT_ROUTES",
     "DEFAULT_ROUTE",
     "get_expert",

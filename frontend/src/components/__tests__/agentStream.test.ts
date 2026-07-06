@@ -75,6 +75,68 @@ describe("translateBackendEvent", () => {
     const ev = { type: "tool_event", agent: "log_expert", tool: "logs", status: "completed" };
     expect(translateBackendEvent(ev, "auto")).toBe(ev);
   });
+
+  it("translates checkpoint_resume agent_event to a banner event", () => {
+    const payload = {
+      type: "agent_event",
+      agent: "harness",
+      stage: "checkpoint_resume",
+      status: "completed",
+      summary: "resumed",
+      payload: {
+        resumed_from_step: 2,
+        replayed_steps: 3,
+        started_at: "2026-07-05T00:00:00Z",
+        conservative: true,
+        replay_override: false,
+      },
+    };
+    expect(translateBackendEvent(payload, "auto")).toEqual({
+      type: "checkpoint_resume",
+      resumedFromStep: 2,
+      replayedSteps: 3,
+      startedAt: "2026-07-05T00:00:00Z",
+      conservative: true,
+      replayOverride: false,
+    });
+  });
+
+  it("translates checkpoint_resume with null replay_override", () => {
+    const payload = {
+      type: "agent_event",
+      stage: "checkpoint_resume",
+      payload: {
+        resumed_from_step: 1,
+        replayed_steps: 0,
+        conservative: false,
+      },
+    };
+    const result = translateBackendEvent(payload, "auto") as { replayOverride: boolean | null };
+    expect(result.replayOverride).toBeNull();
+  });
+
+  it("translates checkpoint_conservative_close to a banner event", () => {
+    const payload = {
+      type: "agent_event",
+      stage: "checkpoint_conservative_close",
+      payload: { step: 4, checkpoint_resume: true },
+    };
+    expect(translateBackendEvent(payload, "auto")).toEqual({
+      type: "checkpoint_conservative_close",
+      step: 4,
+    });
+  });
+
+  it("still passes non-checkpoint agent_event through as a timeline event", () => {
+    const ev = {
+      type: "agent_event",
+      agent: "harness",
+      stage: "plan",
+      status: "completed",
+      summary: "ok",
+    };
+    expect(translateBackendEvent(ev, "auto")).toBe(ev);
+  });
 });
 
 describe("streamAgent", () => {
@@ -96,6 +158,62 @@ describe("streamAgent", () => {
       "/api/assistant",
       expect.objectContaining({
         headers: expect.objectContaining({ "X-Session-Owner": "owner-a" }),
+      }),
+    );
+  });
+
+  it("includes attachment ids in the assistant request body", async () => {
+    localStorage.setItem("sessionOwnerToken", "owner-a");
+    const fetchMock = vi.fn(async () =>
+      sseResponse([frame({ type: "complete", route: "metric", answer: "ok", case_id: "", events: [] })]),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await streamAgent({
+      sessionId: "s1",
+      message: "checkout-api slow",
+      mode: "auto",
+      attachmentIds: ["file_1", "file_2"],
+      onEvent: vi.fn(),
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/assistant",
+      expect.objectContaining({
+        body: JSON.stringify({
+          Id: "s1",
+          Question: "checkout-api slow",
+          AttachmentIds: ["file_1", "file_2"],
+          CheckpointReplay: undefined,
+        }),
+      }),
+    );
+  });
+
+  it("forwards checkpointReplay=true to the assistant request body", async () => {
+    localStorage.setItem("sessionOwnerToken", "owner-a");
+    const fetchMock = vi.fn(async () =>
+      sseResponse([frame({ type: "complete", route: "metric", answer: "ok", case_id: "", events: [] })]),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await streamAgent({
+      sessionId: "s1",
+      message: "checkout-api slow",
+      mode: "auto",
+      checkpointReplay: true,
+      onEvent: vi.fn(),
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/assistant",
+      expect.objectContaining({
+        body: JSON.stringify({
+          Id: "s1",
+          Question: "checkout-api slow",
+          AttachmentIds: [],
+          CheckpointReplay: true,
+        }),
       }),
     );
   });

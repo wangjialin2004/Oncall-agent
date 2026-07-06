@@ -95,7 +95,10 @@ export function LoginPage({ onLogin }: LoginPageProps) {
             disabled={loading || !username.trim() || !password}
           >
             {loading ? (
-              "登录中..."
+              <>
+                <span className="accent-breathe" aria-hidden="true" />
+                登录中...
+              </>
             ) : (
               <>
                 <LogIn size={15} aria-hidden="true" style={{ marginRight: 6, verticalAlign: "middle" }} />

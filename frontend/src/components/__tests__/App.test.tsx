@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "../../App";
+import type { CheckpointSummary } from "../../api/checkpointApi";
 import { streamAgent } from "../../api/agentStream";
 
 Element.prototype.scrollIntoView = vi.fn();
@@ -43,6 +44,33 @@ vi.mock("../../api/agentStream", () => ({
         required_params: [{ name: "target", prompt: "服务名", reason: "指标查询需要目标" }],
       },
     });
+    onEvent({
+      type: "agent_event",
+      agent: "harness",
+      stage: "delegate_start",
+      status: "in_progress",
+      summary: "进入 log 专家处理子任务。",
+      payload: {
+        delegated_expert: "log",
+        subtask: "查询 checkout-api 同时间段 ERROR 日志",
+        tool_call_id: "call-log",
+      },
+    });
+    onEvent({
+      type: "tool_event",
+      agent: "harness",
+      tool: "get_service_ports_status",
+      stage: "complete",
+      status: "completed",
+      summary: "端口状态已确认",
+      payload: {
+        arguments: { timezone: "Asia/Shanghai" },
+        tool_call_id: "call-port-status",
+      },
+      duration_ms: 246.66,
+      trace_id: "session-1782204557962-0740b1cf3bef",
+      span_id: "tool-call-1",
+    });
     onEvent({ type: "content", data: "诊断结论已确认" });
     onEvent({
       type: "agent_event",
@@ -67,6 +95,17 @@ vi.mock("../../api/memoryApi", () => ({
   submitFeedback: (...args: unknown[]) => mockSubmitFeedback(...args),
 }));
 
+const mockGetCheckpoint = vi.fn<(sessionId: string) => Promise<CheckpointSummary>>(async (sessionId) => ({
+  sessionId,
+  enabled: false,
+  resumable: false,
+}));
+const mockDeleteCheckpoint = vi.fn<(sessionId: string) => Promise<number>>(async () => 0);
+vi.mock("../../api/checkpointApi", () => ({
+  getCheckpoint: (sessionId: string) => mockGetCheckpoint(sessionId),
+  deleteCheckpoint: (sessionId: string) => mockDeleteCheckpoint(sessionId),
+}));
+
 vi.mock("../../api/conversationApi", () => ({
   listConversations: vi.fn(async () => []),
   getConversation: vi.fn(async () => []),
@@ -77,6 +116,8 @@ describe("App", () => {
   afterEach(() => {
     cleanup();
     vi.mocked(streamAgent).mockClear();
+    mockGetCheckpoint.mockReset();
+    mockDeleteCheckpoint.mockReset();
   });
 
   it("sends a message and renders realtime agent events", async () => {
@@ -91,13 +132,22 @@ describe("App", () => {
     expect(await screen.findByText("路由分发")).toBeInTheDocument();
     expect(await screen.findByText("综合诊断开始")).toBeInTheDocument();
     expect(await screen.findByText("已生成调度计划")).toBeInTheDocument();
+    expect(await screen.findByText("进入专家：日志分析专家")).toBeInTheDocument();
+    expect(await screen.findByText("进入子专家执行")).toBeInTheDocument();
+    expect(await screen.findByText("工具执行")).toBeInTheDocument();
+    expect(screen.getByText("工具执行").closest("summary")).not.toHaveTextContent("get_service_ports_status");
     for (const detailsToggle of screen.getAllByText("查看调度详情")) {
       await user.click(detailsToggle);
     }
+    await user.click(screen.getByText("工具执行"));
+    await user.click(screen.getAllByText("查看调度详情").at(-1)!);
     expect(await screen.findByText("计划步骤")).toBeInTheDocument();
     expect(await screen.findByText("确认目标")).toBeInTheDocument();
     expect(await screen.findByText("服务名：指标查询需要目标")).toBeInTheDocument();
-    expect(await screen.findByText("已完成")).toBeInTheDocument();
+    expect(await screen.findByText("查询 checkout-api 同时间段 ERROR 日志")).toBeInTheDocument();
+    expect(await screen.findByText("工具名称")).toBeInTheDocument();
+    expect(await screen.findByText("get_service_ports_status")).toBeInTheDocument();
+    expect((await screen.findAllByText("已完成")).length).toBeGreaterThan(0);
     expect((await screen.findAllByText("诊断结论已确认")).length).toBeGreaterThan(0);
   });
 
@@ -137,6 +187,102 @@ describe("App", () => {
     await user.type(screen.getByRole("textbox"), "hello");
     await user.keyboard("{Enter}");
 
-    expect(await screen.findByText("fallback answer")).toBeInTheDocument();
+    expect((await screen.findAllByText("fallback answer")).length).toBeGreaterThan(0);
+  });
+
+  it("shows a checkpoint_resume banner when the harness reports a resumed run", async () => {
+    vi.mocked(streamAgent).mockImplementationOnce(async ({ onEvent }) => {
+      onEvent({
+        type: "checkpoint_resume",
+        resumedFromStep: 2,
+        replayedSteps: 3,
+        startedAt: "2026-07-05T00:00:00Z",
+        conservative: true,
+        replayOverride: false,
+      });
+      onEvent({
+        type: "agent_event",
+        agent: "harness",
+        stage: "model_decision",
+        status: "in_progress",
+        summary: "resumed step 3",
+        payload: {},
+      });
+      onEvent({
+        type: "complete",
+        route: "metric",
+        answer: "resumed answer",
+        case_id: "",
+        events: [],
+      });
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(screen.getByLabelText("消息"), "resume me");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByTestId("checkpoint-resume-banner")).toBeInTheDocument();
+    expect(screen.getByText(/强制保守：本次明确拒绝重放非白名单工具/)).toBeInTheDocument();
+    expect(screen.getByText("激进恢复")).toBeInTheDocument();
+  });
+
+  it("renders both resume and conservative close banners when the harness skips replay", async () => {
+    vi.mocked(streamAgent).mockImplementationOnce(async ({ onEvent }) => {
+      onEvent({
+        type: "checkpoint_resume",
+        resumedFromStep: 2,
+        replayedSteps: 3,
+        startedAt: "",
+        conservative: true,
+        replayOverride: null,
+      });
+      onEvent({
+        type: "checkpoint_conservative_close",
+        step: 2,
+      });
+      onEvent({
+        type: "complete",
+        route: "metric",
+        answer: "closed without replay",
+        case_id: "",
+        events: [],
+      });
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(screen.getByLabelText("消息"), "resume conservatively");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByTestId("checkpoint-resume-banner")).toBeInTheDocument();
+    expect(await screen.findByTestId("checkpoint-conservative-close-banner")).toBeInTheDocument();
+  });
+
+  it("marks sidebar sessions with a resumable badge when a checkpoint exists", async () => {
+    const { listConversations, getConversation } = await import("../../api/conversationApi");
+    vi.mocked(listConversations).mockResolvedValueOnce([
+      {
+        session_id: "sid-resumable",
+        title: "上次没排完",
+        created_at: "",
+        updated_at: "",
+        turn_count: 2,
+      },
+    ]);
+    vi.mocked(getConversation).mockResolvedValueOnce([]);
+    mockGetCheckpoint.mockResolvedValueOnce({
+      sessionId: "sid-resumable",
+      enabled: true,
+      resumable: true,
+      step: 3,
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByText("上次没排完")).toBeInTheDocument();
+    expect(await screen.findByText("可继续")).toBeInTheDocument();
+    expect(mockGetCheckpoint).toHaveBeenCalledWith("sid-resumable");
   });
 });

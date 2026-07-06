@@ -1,23 +1,32 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from dataclasses import dataclass
+from unittest.mock import AsyncMock
 
 import pytest
 
-from app.agent.agent_loop import GuardedToolExecutor
+from app.agent.agent_loop import GuardedToolExecutor, estimate_tokens
 from app.agent.experts.base import ToolCallingExpert
 from app.agent.harness.context import ContextBuilder
 from app.agent.harness.loop import HarnessService
 from app.agent.harness.registry import HarnessToolRegistry
-from app.agent.harness.state import HarnessLimits
+from app.agent.harness.state import HarnessLimits, HarnessState
 from app.agent.harness.subagent import create_delegate_tool
 from app.api.assistant import assistant
-from app.core.llm_client import LLMResponse, LLMStreamChunk, ToolCall
+from app.core.llm_client import ChatMessage, LLMResponse, LLMStreamChunk, ToolCall
 from app.core.runtime_tools import RuntimeTool
 from app.models.request import ChatRequest
+from app.services.attachment_reference_service import (
+    AttachmentReference,
+    AttachmentReferenceService,
+)
 from app.services.conversation_service import ConversationService
+from app.services.harness_checkpoint import HarnessCheckpointStore
 from app.services.router_service import RouteDecision, RouterService
+from tests._fake_redis import FakeRedis
 
 
 @dataclass
@@ -289,6 +298,91 @@ async def test_assistant_stream_always_uses_harness_when_flag_is_false(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_assistant_stream_injects_attachment_context_into_message(monkeypatch):
+    fake_harness = FakeStreamService()
+    monkeypatch.setattr("app.api.assistant.harness_service", fake_harness)
+    monkeypatch.setattr("app.api.assistant._persist_turn", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "app.api.assistant.attachment_context_service.build_context",
+        AsyncMock(return_value="[附件 incident.md]\ncontent:\nCPU reached 95%"),
+    )
+
+    response = await assistant(
+        ChatRequest(
+            id="visible-session",
+            question="请分析这个附件里的 CPU 异常",
+            attachment_ids=["file_123"],
+        ),
+        owner_key="owner-1",
+    )
+    await _drain_event_source_response(response)
+
+    injected_message = fake_harness.calls[0]["message"]
+    assert "[附件 incident.md]" in injected_message
+    assert "CPU reached 95%" in injected_message
+    assert "用户问题" in injected_message
+    assert "请分析这个附件里的 CPU 异常" in injected_message
+
+
+@pytest.mark.asyncio
+async def test_assistant_history_keeps_attachment_context_for_follow_up(tmp_path, monkeypatch):
+    conversation_service = ConversationService(tmp_path / "conversation.db")
+    first_answer = "附件内容是软件体系结构复习资料"
+    second_answer = "延续上一轮附件，这份资料主要讲分层和模块化"
+    fake_llm = FakeLLM(
+        [
+            LLMResponse(content=first_answer, raw={}, usage={"total_tokens": 5}),
+            LLMResponse(content=second_answer, raw={}, usage={"total_tokens": 6}),
+        ]
+    )
+    harness = HarnessService(
+        context_builder=ContextBuilder(history_max_turns=3),
+        router=FakeRouter(route="knowledge"),
+        llm_client=fake_llm,
+        tools=[],
+        limits=HarnessLimits(max_steps=3, token_budget=1000, timeout_seconds=5),
+    )
+    monkeypatch.setattr("app.api.assistant.harness_service", harness)
+    monkeypatch.setattr("app.api.assistant.conversation_service", conversation_service)
+    monkeypatch.setattr("app.agent.harness.context.conversation_service", conversation_service)
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+    monkeypatch.setattr("app.agent.harness.loop.config.harness_corrective_verify_enabled", False)
+    monkeypatch.setattr(
+        "app.api.assistant.attachment_context_service.build_context",
+        AsyncMock(return_value="[附件 软件体系结构复习资料.pdf]\ncontent:\n软件体系结构关注分层、模块化与质量属性。"),
+    )
+
+    first_response = await assistant(
+        ChatRequest(
+            id="visible-session",
+            question="请总结这个附件",
+            attachment_ids=["file_attachment_1"],
+        ),
+        owner_key="owner-1",
+    )
+    await _drain_event_source_response(first_response)
+    second_response = await assistant(
+        ChatRequest(id="visible-session", question="继续说说它的重点"),
+        owner_key="owner-1",
+    )
+    await _drain_event_source_response(second_response)
+
+    turns = conversation_service.get_turns("owner-1", "visible-session")
+    assert turns[0]["user_message"] == "请总结这个附件"
+    assert "软件体系结构关注分层" in turns[0]["user_context"]
+    second_messages = fake_llm.calls[1]["messages"]
+    assert [message.role for message in second_messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert "软件体系结构关注分层、模块化与质量属性" in second_messages[1].content
+    assert "用户问题：\n请总结这个附件" in second_messages[1].content
+    assert second_messages[-1].content == "继续说说它的重点"
+
+
+@pytest.mark.asyncio
 async def test_harness_error_falls_back_to_knowledge_expert():
     class FailingRouter:
         async def _resolve_route(self, message: str) -> RouteDecision:
@@ -526,6 +620,244 @@ async def test_harness_stream_executes_tool_and_completes():
     assert "".join(str(event["data"]) for event in content_events) == final_answer
 
 
+def _checkpoint_state(*, session_id: str, owner_key: str, step: int) -> HarnessState:
+    return HarnessState(
+        trace_id=session_id,
+        session_id=session_id,
+        owner_key=owner_key,
+        route="diagnosis",
+        route_reason="checkpoint-test",
+        step=step,
+        timeline_events=[
+            {
+                "type": "tool_event",
+                "agent": "harness",
+                "tool": "checkpoint_tool",
+                "status": "completed",
+                "summary": "checkpoint evidence",
+            }
+        ],
+    )
+
+
+def _checkpoint_messages(tool_name: str) -> list[ChatMessage]:
+    return [
+        ChatMessage(role="system", content="system prompt from checkpoint"),
+        ChatMessage(role="user", content="original user question"),
+        ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "checkpoint-call",
+                    "type": "function",
+                    "function": {"name": tool_name, "arguments": "{}"},
+                }
+            ],
+        ),
+        ChatMessage(role="tool", content="checkpoint evidence", tool_call_id="checkpoint-call"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_harness_checkpoint_resume_replays_from_next_step_without_skipping():
+    fake_redis = FakeRedis()
+    store = HarnessCheckpointStore(
+        namespace="test",
+        ttl_seconds=300,
+        idempotent_tools=("echo_tool",),
+        redis_factory=lambda: fake_redis,
+    )
+    await store.save_step(
+        owner_key="user-1",
+        session_id="trace-resume-step",
+        state=_checkpoint_state(session_id="trace-resume-step", owner_key="user-1", step=2),
+        messages=_checkpoint_messages("echo_tool"),
+        step_index=2,
+        step_payload={
+            "step": 2,
+            "tool_calls": [{"id": "checkpoint-call", "function": {"name": "echo_tool"}}],
+            "events": [],
+            "completed": True,
+        },
+    )
+    tool = RuntimeTool(
+        name="echo_tool",
+        description="Echoes input for deterministic tests.",
+        handler=lambda arguments: f"echo:{arguments.get('text', '')}",
+    )
+    fake_llm = FakeLLM(
+        [LLMResponse(content="resumed final answer", raw={}, usage={"total_tokens": 5})]
+    )
+    service = HarnessService(
+        router=FakeRouter(),
+        llm_client=fake_llm,
+        tools=[tool],
+        limits=HarnessLimits(max_steps=4, token_budget=1000, timeout_seconds=5),
+        checkpoint_store=store,
+    )
+
+    events = [
+        event
+        async for event in service.stream(
+            "resume this run",
+            session_id="trace-resume-step",
+            owner_key="user-1",
+        )
+    ]
+
+    resume_event = next(event for event in events if event.get("stage") == "checkpoint_resume")
+    model_steps = [
+        event["payload"]["step"]
+        for event in events
+        if event.get("stage") == "model_decision"
+    ]
+    assert resume_event["payload"]["resumed_from_step"] == 2
+    assert model_steps[0] == 3
+    assert fake_llm.calls[0]["messages"][0].content == "system prompt from checkpoint"
+
+
+@pytest.mark.asyncio
+async def test_harness_checkpoint_resume_non_idempotent_closes_without_tool_replay():
+    fake_redis = FakeRedis()
+    store = HarnessCheckpointStore(
+        namespace="test",
+        ttl_seconds=300,
+        idempotent_tools=("delegate_to_expert",),
+        redis_factory=lambda: fake_redis,
+    )
+    await store.save_step(
+        owner_key="user-1",
+        session_id="trace-resume-close",
+        state=_checkpoint_state(session_id="trace-resume-close", owner_key="user-1", step=2),
+        messages=_checkpoint_messages("query_prometheus_alerts"),
+        step_index=2,
+        step_payload={
+            "step": 2,
+            "tool_calls": [
+                {"id": "checkpoint-call", "function": {"name": "query_prometheus_alerts"}}
+            ],
+            "events": [],
+            "completed": True,
+        },
+    )
+    dangerous_tool = RuntimeTool(
+        name="query_prometheus_alerts",
+        description="Should not be replayed in conservative checkpoint resume.",
+        handler=lambda arguments: (_ for _ in ()).throw(AssertionError("tool replayed")),
+    )
+    fake_llm = FakeLLM(
+        [LLMResponse(content="checkpoint close answer", raw={}, usage={"total_tokens": 5})]
+    )
+    service = HarnessService(
+        router=FakeRouter(route="metric"),
+        llm_client=fake_llm,
+        tools=[dangerous_tool],
+        limits=HarnessLimits(max_steps=4, token_budget=1000, timeout_seconds=5),
+        checkpoint_store=store,
+    )
+
+    events = [
+        event
+        async for event in service.stream(
+            "resume conservatively",
+            session_id="trace-resume-close",
+            owner_key="user-1",
+        )
+    ]
+
+    stages = [event.get("stage") for event in events]
+    content = "".join(str(event["data"]) for event in events if event.get("type") == "content")
+    assert "checkpoint_resume" in stages
+    assert "checkpoint_conservative_close" in stages
+    assert "model_decision" not in stages
+    assert len(fake_llm.calls) == 1
+    assert "tools" not in fake_llm.calls[0]["kwargs"]
+    assert fake_llm.calls[0]["messages"][0].content == "system prompt from checkpoint"
+    assert content == "checkpoint close answer"
+
+
+@pytest.mark.asyncio
+async def test_harness_checkpoint_resume_replay_override_replays_non_idempotent_tool():
+    """When the caller passes ``checkpoint_replay=True``, the conservative
+    short-circuit is bypassed: a non-whitelisted step still gets replayed.
+
+    The dangerous tool's handler is wired to raise if invoked, so reaching it
+    is itself the success signal. We also assert the conservative_close event
+    never fires (because we asked for verbatim replay).
+    """
+    fake_redis = FakeRedis()
+    store = HarnessCheckpointStore(
+        namespace="test",
+        ttl_seconds=300,
+        idempotent_tools=("delegate_to_expert",),
+        redis_factory=lambda: fake_redis,
+    )
+    await store.save_step(
+        owner_key="user-1",
+        session_id="trace-resume-replay",
+        state=_checkpoint_state(session_id="trace-resume-replay", owner_key="user-1", step=2),
+        messages=_checkpoint_messages("query_prometheus_alerts"),
+        step_index=2,
+        step_payload={
+            "step": 2,
+            "tool_calls": [
+                {"id": "checkpoint-call", "function": {"name": "query_prometheus_alerts"}}
+            ],
+            "events": [],
+            "completed": True,
+        },
+    )
+    replayed_tool = RuntimeTool(
+        name="query_prometheus_alerts",
+        description="Caller explicitly opted into replay; must run.",
+        handler=lambda arguments: "replayed evidence",
+    )
+    fake_llm = FakeLLM(
+        [
+            LLMResponse(
+                content="",
+                raw={},
+                tool_calls=[
+                    {
+                        "id": "replayed-call",
+                        "type": "function",
+                        "function": {"name": "query_prometheus_alerts", "arguments": "{}"},
+                    }
+                ],
+                usage={"total_tokens": 3},
+            ),
+            LLMResponse(content="replay completed", raw={}, usage={"total_tokens": 5}),
+        ]
+    )
+    service = HarnessService(
+        router=FakeRouter(route="metric"),
+        llm_client=fake_llm,
+        tools=[replayed_tool],
+        limits=HarnessLimits(max_steps=4, token_budget=1000, timeout_seconds=5),
+        checkpoint_store=store,
+    )
+
+    events = [
+        event
+        async for event in service.stream(
+            "resume aggressively",
+            session_id="trace-resume-replay",
+            owner_key="user-1",
+            checkpoint_replay=True,
+        )
+    ]
+
+    stages = [event.get("stage") for event in events]
+    resume_events = [event for event in events if event.get("stage") == "checkpoint_resume"]
+    assert "checkpoint_resume" in stages
+    assert "checkpoint_conservative_close" not in stages
+    assert resume_events
+    assert resume_events[0]["payload"]["replay_override"] is True
+    assert "model_decision" in stages
+    assert len(fake_llm.calls) >= 1
+
+
 @pytest.mark.asyncio
 async def test_harness_verify_marks_answer_without_tool_evidence_as_degraded():
     fake_llm = FakeLLM(
@@ -655,7 +987,78 @@ async def test_harness_delays_missing_param_clarification_until_after_tool_attem
 
 
 @pytest.mark.asyncio
-async def test_harness_stream_injects_delegate_events_into_main_timeline():
+async def test_harness_stream_forced_delegation_runs_routed_expert_first():
+    """开启强制委派后，被选专家在 harness 模型作答前就先执行核心调查（确定性 seed）。"""
+    delegate_tool = create_delegate_tool(
+        session_id="trace-delegate",
+        trace_id="trace-delegate",
+        context_getter=lambda: "parent context",
+        expert_getter=lambda route: FakeDelegateExpert(),
+    )
+    # 确定性委派由 harness 直接发起，无需 LLM 先返回 tool_call；模型只负责收尾综合。
+    fake_llm = FakeLLM(
+        [
+            LLMResponse(
+                content="delegated evidence summarized",
+                raw={},
+                usage={"total_tokens": 6},
+            ),
+        ]
+    )
+    service = HarnessService(
+        router=FakeRouter(route="metric"),
+        llm_client=fake_llm,
+        tools=[delegate_tool],
+        limits=HarnessLimits(max_steps=3, token_budget=1000, timeout_seconds=5),
+    )
+
+    events = [
+        event
+        async for event in service.stream(
+            "delegate metric check", session_id="trace-delegate", owner_key="user-1"
+        )
+    ]
+
+    # harness 只调了一次模型（收尾综合），核心调查由专家完成。
+    assert len(fake_llm.calls) == 1
+    dispatch_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "agent_event"
+        and event.get("stage") == "delegate_dispatch"
+    )
+    delegate_start_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "agent_event"
+        and event.get("stage") == "delegate_start"
+    )
+    delegate_tool_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "tool_event"
+        and event.get("tool") == "delegate_to_expert"
+    )
+    assert dispatch_index < delegate_start_index < delegate_tool_index
+    delegate_start = events[delegate_start_index]
+    assert delegate_start["payload"]["delegated_expert"] == "metric"
+    # 子任务取自用户原始问题，而非模型臆造。
+    assert delegate_start["payload"]["subtask"] == "delegate metric check"
+    child_events = [
+        event for event in events if event.get("agent") == "metric_expert"
+    ]
+    assert [event["type"] for event in child_events] == ["agent_event", "tool_event"]
+    assert child_events[0]["span_id"].startswith("delegate:seed-delegate:trace-delegate:")
+    assert child_events[0]["payload"]["parent_tool_call_id"] == "seed-delegate:trace-delegate"
+    assert any(event.get("agent") == "metric_expert" for event in events[-1]["events"])
+
+
+@pytest.mark.asyncio
+async def test_harness_stream_soft_delegation_lets_model_decide(monkeypatch):
+    """关闭强制委派后退化为旧软提示：是否委派由 harness 模型自行决定。"""
+    from app.config import config as app_config
+
+    monkeypatch.setattr(app_config, "harness_force_expert_delegation", False)
     delegate_tool = create_delegate_tool(
         session_id="trace-delegate",
         trace_id="trace-delegate",
@@ -697,11 +1100,27 @@ async def test_harness_stream_injects_delegate_events_into_main_timeline():
         )
     ]
 
-    assert any(
-        event.get("type") == "tool_event"
-        and event.get("tool") == "delegate_to_expert"
+    # 没有确定性派发事件；委派完全由模型 tool_call 触发。
+    assert not any(
+        event.get("type") == "agent_event" and event.get("stage") == "delegate_dispatch"
         for event in events
     )
+    delegate_start_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "agent_event"
+        and event.get("stage") == "delegate_start"
+    )
+    delegate_tool_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "tool_event"
+        and event.get("tool") == "delegate_to_expert"
+    )
+    delegate_start = events[delegate_start_index]
+    assert delegate_start_index < delegate_tool_index
+    assert delegate_start["payload"]["delegated_expert"] == "metric"
+    assert delegate_start["payload"]["subtask"] == "check CPU"
     child_events = [
         event for event in events if event.get("agent") == "metric_expert"
     ]
@@ -747,6 +1166,371 @@ def test_context_builder_includes_recent_history(monkeypatch):
     assert "recent CPU answer" not in context.system_prompt
     assert "metric focus" in context.system_prompt
     assert "current metric question" not in context.system_prompt
+
+
+def test_context_builder_keeps_most_recent_history_within_token_budget(monkeypatch):
+    monkeypatch.setattr(
+        "app.agent.harness.context.conversation_service",
+        FakeConversationService(
+            [
+                {
+                    "turn_index": index,
+                    "user_message": f"user-{index}",
+                    "assistant_answer": f"answer-{index}",
+                }
+                for index in range(5)
+            ]
+        ),
+    )
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+
+    context = ContextBuilder(
+        history_max_turns=20,
+        history_token_budget=10,
+        history_message_max_chars=0,
+    ).build(
+        message="current question",
+        owner_key="user-1",
+        session_id="session-1",
+        tools=[],
+    )
+
+    assert [message.content for message in context.history_messages] == [
+        "user-3",
+        "answer-3",
+        "user-4",
+        "answer-4",
+    ]
+    assert sum(estimate_tokens(message.content) for message in context.history_messages) <= 10
+
+
+def test_context_builder_still_applies_history_turn_hard_cap(monkeypatch):
+    monkeypatch.setattr(
+        "app.agent.harness.context.conversation_service",
+        FakeConversationService(
+            [
+                {
+                    "turn_index": index,
+                    "user_message": f"user-{index}",
+                    "assistant_answer": f"answer-{index}",
+                }
+                for index in range(5)
+            ]
+        ),
+    )
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+
+    context = ContextBuilder(
+        history_max_turns=3,
+        history_token_budget=1000,
+        history_message_max_chars=0,
+    ).build(
+        message="current question",
+        owner_key="user-1",
+        session_id="session-1",
+        tools=[],
+    )
+
+    assert [message.content for message in context.history_messages] == [
+        "user-2",
+        "answer-2",
+        "user-3",
+        "answer-3",
+        "user-4",
+        "answer-4",
+    ]
+
+
+def test_context_builder_degrades_to_turn_window_when_token_window_disabled(monkeypatch):
+    monkeypatch.setattr(
+        "app.agent.harness.context.conversation_service",
+        FakeConversationService(
+            [
+                {
+                    "turn_index": index,
+                    "user_message": f"user-{index}",
+                    "assistant_answer": "x" * 50,
+                }
+                for index in range(4)
+            ]
+        ),
+    )
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+
+    context = ContextBuilder(
+        history_max_turns=3,
+        history_token_window_enabled=False,
+        history_token_budget=1,
+        history_message_max_chars=0,
+    ).build(
+        message="current question",
+        owner_key="user-1",
+        session_id="session-1",
+        tools=[],
+    )
+
+    assert [message.content for message in context.history_messages] == [
+        "user-1",
+        "x" * 50,
+        "user-2",
+        "x" * 50,
+        "user-3",
+        "x" * 50,
+    ]
+
+
+def test_context_builder_degrades_to_turn_window_when_history_budget_disabled(monkeypatch):
+    monkeypatch.setattr(
+        "app.agent.harness.context.conversation_service",
+        FakeConversationService(
+            [
+                {
+                    "turn_index": index,
+                    "user_message": f"user-{index}",
+                    "assistant_answer": "y" * 50,
+                }
+                for index in range(4)
+            ]
+        ),
+    )
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+
+    context = ContextBuilder(
+        history_max_turns=2,
+        history_token_window_enabled=True,
+        history_token_budget=0,
+        history_message_max_chars=0,
+    ).build(
+        message="current question",
+        owner_key="user-1",
+        session_id="session-1",
+        tools=[],
+    )
+
+    assert [message.content for message in context.history_messages] == [
+        "user-2",
+        "y" * 50,
+        "user-3",
+        "y" * 50,
+    ]
+
+
+def test_context_builder_folds_oversized_history_messages(monkeypatch):
+    monkeypatch.setattr(
+        "app.agent.harness.context.conversation_service",
+        FakeConversationService(
+            [
+                {
+                    "turn_index": 1,
+                    "user_message": "short question",
+                    "assistant_answer": "x" * 40,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+
+    context = ContextBuilder(
+        history_max_turns=3,
+        history_token_budget=1000,
+        history_message_max_chars=10,
+    ).build(
+        message="current question",
+        owner_key="user-1",
+        session_id="session-1",
+        tools=[],
+    )
+
+    assert context.history_messages[1].content.startswith("x" * 10)
+    assert "历史消息已折叠" in context.history_messages[1].content
+    assert "x" * 40 not in context.history_messages[1].content
+
+
+@pytest.mark.asyncio
+async def test_context_builder_updates_and_injects_rolling_summary(tmp_path, monkeypatch):
+    service = ConversationService(tmp_path / "conversation.db")
+    for index in range(4):
+        service.append_turn(
+            owner_key="owner-1",
+            session_id="session-1",
+            user_message=f"user fact {index}",
+            assistant_answer=f"assistant answer {index}",
+            route="metric",
+        )
+    fake_llm = FakeLLM(
+        [
+            LLMResponse(
+                content="早期摘要：用户确认 service=checkout，CPU 阈值为 85%。",
+                raw={},
+            )
+        ]
+    )
+    monkeypatch.setattr("app.agent.harness.context.conversation_service", service)
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+
+    context = await ContextBuilder(
+        history_max_turns=2,
+        history_token_window_enabled=False,
+        history_message_max_chars=0,
+        rolling_summary_enabled=True,
+        rolling_summary_max_chars=1000,
+    ).abuild(
+        message="current question",
+        owner_key="owner-1",
+        session_id="session-1",
+        tools=[],
+        llm_client=fake_llm,
+    )
+
+    assert "更早对话滚动摘要" in context.system_prompt
+    assert "service=checkout" in context.system_prompt
+    assert [message.content for message in context.history_messages] == [
+        "user fact 2",
+        "assistant answer 2",
+        "user fact 3",
+        "assistant answer 3",
+    ]
+    summary_state = service.get_rolling_summary("owner-1", "session-1")
+    assert summary_state["turn_index"] == 1
+    assert "CPU 阈值" in summary_state["summary"]
+    summary_prompt = fake_llm.calls[0]["messages"][1].content
+    assert "user fact 0" in summary_prompt
+    assert "user fact 1" in summary_prompt
+    assert "user fact 2" not in summary_prompt
+
+
+@pytest.mark.asyncio
+async def test_context_builder_limits_rolling_summary_input_and_advances_batch_only(
+    tmp_path, monkeypatch
+):
+    service = ConversationService(tmp_path / "conversation.db")
+    for index in range(6):
+        service.append_turn(
+            owner_key="owner-1",
+            session_id="session-1",
+            user_message=f"user fact {index}",
+            assistant_answer=f"assistant answer {index}",
+            route="metric",
+        )
+    fake_llm = FakeLLM([LLMResponse(content="batch one summary", raw={})])
+    monkeypatch.setattr("app.agent.harness.context.conversation_service", service)
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+
+    context = await ContextBuilder(
+        history_max_turns=1,
+        history_token_window_enabled=False,
+        history_message_max_chars=0,
+        rolling_summary_enabled=True,
+        rolling_summary_max_chars=1000,
+        rolling_summary_input_token_budget=40,
+    ).abuild(
+        message="current question",
+        owner_key="owner-1",
+        session_id="session-1",
+        tools=[],
+        llm_client=fake_llm,
+    )
+
+    assert [message.content for message in context.history_messages] == [
+        "user fact 5",
+        "assistant answer 5",
+    ]
+    summary_prompt = fake_llm.calls[0]["messages"][1].content
+    assert "user fact 0" in summary_prompt
+    assert "user fact 1" in summary_prompt
+    assert "user fact 2" not in summary_prompt
+    summary_state = service.get_rolling_summary("owner-1", "session-1")
+    assert summary_state["turn_index"] == 1
+
+
+@pytest.mark.asyncio
+async def test_context_builder_folds_oversized_rolling_summary_input_turn(
+    tmp_path, monkeypatch
+):
+    service = ConversationService(tmp_path / "conversation.db")
+    service.append_turn(
+        owner_key="owner-1",
+        session_id="session-1",
+        user_message="x" * 1000,
+        assistant_answer="y" * 1000,
+        route="metric",
+    )
+    service.append_turn(
+        owner_key="owner-1",
+        session_id="session-1",
+        user_message="recent user",
+        assistant_answer="recent answer",
+        route="metric",
+    )
+    fake_llm = FakeLLM([LLMResponse(content="folded summary", raw={})])
+    monkeypatch.setattr("app.agent.harness.context.conversation_service", service)
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+
+    await ContextBuilder(
+        history_max_turns=1,
+        history_token_window_enabled=False,
+        history_message_max_chars=0,
+        rolling_summary_enabled=True,
+        rolling_summary_input_token_budget=120,
+    ).abuild(
+        message="current question",
+        owner_key="owner-1",
+        session_id="session-1",
+        tools=[],
+        llm_client=fake_llm,
+    )
+
+    summary_prompt = fake_llm.calls[0]["messages"][1].content
+    assert "原始长度 1000 字符" in summary_prompt
+    assert "x" * 300 not in summary_prompt
+    assert "y" * 300 not in summary_prompt
+    summary_state = service.get_rolling_summary("owner-1", "session-1")
+    assert summary_state["turn_index"] == 0
+
+
+@pytest.mark.asyncio
+async def test_context_builder_reuses_existing_rolling_summary_without_llm(
+    tmp_path, monkeypatch
+):
+    service = ConversationService(tmp_path / "conversation.db")
+    for index in range(4):
+        service.append_turn(
+            owner_key="owner-1",
+            session_id="session-1",
+            user_message=f"user {index}",
+            assistant_answer=f"answer {index}",
+            route="metric",
+        )
+    service.update_rolling_summary(
+        owner_key="owner-1",
+        session_id="session-1",
+        summary="既有摘要：早期确认 region=cn-hangzhou。",
+        turn_index=1,
+    )
+    fake_llm = FakeLLM([])
+    monkeypatch.setattr("app.agent.harness.context.conversation_service", service)
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+
+    context = await ContextBuilder(
+        history_max_turns=2,
+        history_token_window_enabled=False,
+        rolling_summary_enabled=True,
+    ).abuild(
+        message="current question",
+        owner_key="owner-1",
+        session_id="session-1",
+        tools=[],
+        llm_client=fake_llm,
+    )
+
+    assert "region=cn-hangzhou" in context.system_prompt
+    assert [message.content for message in context.history_messages] == [
+        "user 2",
+        "answer 2",
+        "user 3",
+        "answer 3",
+    ]
+    assert fake_llm.calls == []
 
 
 def test_context_builder_reads_real_sqlite_history_by_raw_session_id(tmp_path, monkeypatch):
@@ -801,6 +1585,66 @@ async def test_guarded_tool_executor_truncates_large_output():
 
 
 @pytest.mark.asyncio
+async def test_guarded_tool_executor_times_out_blocking_sync_tool():
+    def blocking_tool(arguments):
+        time.sleep(0.3)
+        return "late"
+
+    tool = RuntimeTool(
+        name="blocking_tool",
+        description="Blocks the event loop if not offloaded.",
+        handler=blocking_tool,
+    )
+    executor = GuardedToolExecutor(
+        timeout_seconds=0.05,
+        max_output_chars=0,
+        max_retries=0,
+    )
+
+    started = time.perf_counter()
+    results = await executor.execute(
+        [ToolCall(id="call-blocking", name="blocking_tool", arguments={})],
+        [tool],
+    )
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.2
+    assert results[0].success is False
+    assert "timed out" in results[0].content
+
+
+@pytest.mark.asyncio
+async def test_guarded_tool_executor_does_not_retry_timeout():
+    calls = {"n": 0}
+
+    def blocking_tool(arguments):
+        calls["n"] += 1
+        time.sleep(0.2)
+        return "late"
+
+    tool = RuntimeTool(
+        name="blocking_tool",
+        description="Blocks longer than timeout.",
+        handler=blocking_tool,
+    )
+    executor = GuardedToolExecutor(
+        timeout_seconds=0.05,
+        max_output_chars=0,
+        max_retries=2,
+        retry_backoff_seconds=0,
+    )
+
+    results = await executor.execute(
+        [ToolCall(id="call-blocking", name="blocking_tool", arguments={})],
+        [tool],
+    )
+
+    assert calls["n"] == 1
+    assert results[0].success is False
+    assert "timed out" in results[0].content
+
+
+@pytest.mark.asyncio
 async def test_delegate_tool_runs_selected_expert():
     tool = create_delegate_tool(
         session_id="session-1",
@@ -851,6 +1695,66 @@ async def test_harness_corrective_verify_prepends_gap_notice():
     assert events[-1]["answer"].startswith(">")
     assert "未产生成功工具证据" in events[-1]["answer"]
     assert streamed_answer in events[-1]["answer"]
+
+
+@pytest.mark.asyncio
+async def test_harness_stream_counts_history_and_current_message_for_budget(monkeypatch):
+    monkeypatch.setattr(
+        "app.agent.harness.context.conversation_service",
+        FakeConversationService(
+            [
+                {
+                    "turn_index": 0,
+                    "user_message": "previous short question",
+                    "assistant_answer": "历史答案 " + ("x" * 300),
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+    monkeypatch.setattr(
+        "app.agent.harness.loop.config.harness_corrective_verify_enabled", False
+    )
+    final_answer = "budget fallback answer"
+    fake_llm = FakeLLM(
+        [LLMResponse(content=final_answer, raw={}, usage={"total_tokens": 3})]
+    )
+    service = HarnessService(
+        context_builder=ContextBuilder(
+            history_max_turns=3,
+            history_token_window_enabled=False,
+            history_message_max_chars=0,
+            rolling_summary_enabled=False,
+        ),
+        router=FakeRouter(route="metric"),
+        llm_client=fake_llm,
+        tools=[],
+        limits=HarnessLimits(max_steps=3, token_budget=40, timeout_seconds=5),
+    )
+
+    events = [
+        event
+        async for event in service.stream(
+            "current question should count too",
+            session_id="trace-budget-history",
+            owner_key="user-1",
+        )
+    ]
+
+    budget_events = [
+        event
+        for event in events
+        if event.get("stage") == "budget" and event.get("status") == "degraded"
+    ]
+    assert budget_events
+    assert budget_events[0]["payload"]["token_budget"] == 40
+    complete_events = [
+        event
+        for event in events
+        if event.get("type") == "agent_event" and event.get("stage") == "complete"
+    ]
+    assert complete_events[-1]["payload"]["token_estimate"] >= 40
+    assert events[-1]["answer"] == final_answer
 
 
 @pytest.mark.asyncio
@@ -1152,4 +2056,379 @@ async def test_expert_run_streams_tool_then_answer_via_shared_kernel():
         message for message in fake_llm.calls[1]["messages"] if message.role == "tool"
     ]
     assert tool_messages[-1].content == "[T]echo:hi"
+
+
+def test_truncate_messages_compacts_oldest_evidence_keeps_pairing_and_budget():
+    service = HarnessService(router=FakeRouter(), tools=[])
+    service.message_token_budget = 1700
+    big = "x" * 4000  # ≈1600 tokens each
+    messages = [
+        ChatMessage(role="system", content="sys"),
+        ChatMessage(role="user", content="原始问题"),
+        ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=[{"id": "c1", "type": "function", "function": {"name": "t", "arguments": "{}"}}],
+        ),
+        ChatMessage(role="tool", content=big, tool_call_id="c1"),  # 旧证据，应被压缩
+        ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=[{"id": "c2", "type": "function", "function": {"name": "t", "arguments": "{}"}}],
+        ),
+        ChatMessage(role="tool", content=big, tool_call_id="c2"),  # 最近证据，应保留
+    ]
+
+    trimmed = service._truncate_messages_for_model(messages)
+
+    # 不删除任何消息，保留 tool_call 与 tool_call_id 配对
+    assert len(trimmed) == len(messages)
+    assert trimmed[2].tool_calls == messages[2].tool_calls
+    assert trimmed[3].tool_call_id == "c1"
+    # 系统提示与原始问题逐字保留
+    assert trimmed[0].content == "sys"
+    assert trimmed[1].content == "原始问题"
+    # 旧证据被压缩，最近一次 assistant 轮及其工具结果逐字保留
+    assert trimmed[3].content != big
+    assert trimmed[5].content == big
+    # 压缩后总量回落到预算内
+    assert sum(estimate_tokens(message.content) for message in trimmed) <= 1700
+
+
+def test_truncate_messages_noop_when_within_budget():
+    service = HarnessService(router=FakeRouter(), tools=[])
+    service.message_token_budget = 100000
+    messages = [
+        ChatMessage(role="system", content="sys"),
+        ChatMessage(role="user", content="问题"),
+    ]
+    assert service._truncate_messages_for_model(messages) is messages
+
+
+@pytest.mark.asyncio
+async def test_delegate_tool_degrades_on_timeout():
+    class SlowExpert:
+        async def run(self, *, message, session_id, trace_id, context=""):
+            yield {"type": "content", "data": "partial"}
+            await asyncio.sleep(1)
+            yield {"type": "content", "data": " more"}
+
+    tool = create_delegate_tool(
+        session_id="session-1",
+        trace_id="trace-1",
+        context_getter=lambda: "",
+        expert_getter=lambda route: SlowExpert(),
+        timeout_seconds=0.05,
+    )
+
+    result = await tool.run({"expert": "metric", "subtask": "check CPU"})
+
+    assert result["status"] == "degraded"
+    assert "partial" in result["answer"]
+    assert "timed out" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_context_builder_keeps_existing_summary_on_summary_timeout(tmp_path, monkeypatch):
+    service = ConversationService(tmp_path / "conversation.db")
+    for index in range(4):
+        service.append_turn(
+            owner_key="owner-1",
+            session_id="session-1",
+            user_message=f"user {index}",
+            assistant_answer=f"answer {index}",
+            route="metric",
+        )
+    service.update_rolling_summary(
+        owner_key="owner-1",
+        session_id="session-1",
+        summary="既有摘要：早期确认 db=primary。",
+        turn_index=-1,
+    )
+
+    class SlowLLM:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def complete(self, messages, **kwargs):
+            self.calls.append(list(messages))
+            await asyncio.sleep(1)
+            return LLMResponse(content="never used", raw={})
+
+    slow = SlowLLM()
+    monkeypatch.setattr("app.agent.harness.context.conversation_service", service)
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+    monkeypatch.setattr(
+        "app.agent.harness.context.config.harness_rolling_summary_timeout_seconds", 0.05
+    )
+
+    context = await ContextBuilder(
+        history_max_turns=2,
+        history_token_window_enabled=False,
+        rolling_summary_enabled=True,
+    ).abuild(
+        message="current question",
+        owner_key="owner-1",
+        session_id="session-1",
+        tools=[],
+        llm_client=slow,
+    )
+
+    # 摘要 LLM 超时不阻塞、不抛错：保留既有摘要，历史照常注入
+    assert slow.calls
+    assert "db=primary" in context.system_prompt
+    assert [message.content for message in context.history_messages] == [
+        "user 2",
+        "answer 2",
+        "user 3",
+        "answer 3",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_assistant_keyword_resolves_historical_attachment_without_new_upload(
+    tmp_path, monkeypatch
+):
+    conversation_service = ConversationService(tmp_path / "conversation.db")
+    conversation_service.append_turn(
+        owner_key="owner-1",
+        session_id="visible-session",
+        user_message="请先记住这个资料",
+        user_context=(
+            "[闄勪欢摘要 软件体系结构复习资料.pdf]\n"
+            "file_id: file_123\n"
+            "summary:\n软件体系结构资料，重点讲分层架构、模块化和高内聚低耦合\n"
+            "keywords: 软件体系结构, 分层架构, 模块化"
+        ),
+        attachment_refs=[
+            {
+                "file_id": "file_123",
+                "file_name": "软件体系结构复习资料.pdf",
+                "summary": "软件体系结构资料，重点讲分层架构、模块化和高内聚低耦合",
+                "keywords": ["软件体系结构", "分层架构", "模块化"],
+                "status": "indexed",
+            }
+        ],
+        assistant_answer="好，我记住了。",
+        route="knowledge",
+    )
+    fake_harness = FakeStreamService()
+    monkeypatch.setattr("app.api.assistant.harness_service", fake_harness)
+    monkeypatch.setattr("app.api.assistant.conversation_service", conversation_service)
+    monkeypatch.setattr(
+        "app.api.assistant.attachment_context_service.build_context",
+        AsyncMock(
+            return_value=(
+                "[闄勪欢 软件体系结构复习资料.pdf]\n"
+                "file_id: file_123\n"
+                "status: indexed\n"
+                "content:\n软件体系结构常见风格包括分层、事件驱动和微服务。"
+            )
+        ),
+    )
+
+    response = await assistant(
+        ChatRequest(
+            id="visible-session",
+            question="软件体系结构这个文件里详细讲了什么重点",
+        ),
+        owner_key="owner-1",
+    )
+    await _drain_event_source_response(response)
+
+    injected_message = fake_harness.calls[0]["message"]
+    assert "软件体系结构复习资料.pdf" in injected_message
+    assert "微服务" in injected_message
+    turns = conversation_service.get_turns("owner-1", "visible-session")
+    assert turns[-1]["attachment_refs"][0]["file_id"] == "file_123"
+
+
+def test_attachment_reference_service_build_active_index_dedupes_by_file_id():
+    service = AttachmentReferenceService.__new__(AttachmentReferenceService)
+    references = [
+        AttachmentReference(
+            file_id="file_a",
+            file_name="doc.md",
+            summary="早期摘要",
+            keywords=("早期",),
+            status="indexed",
+        ),
+        AttachmentReference(
+            file_id="file_b",
+            file_name="other.md",
+            summary="另一份",
+            keywords=("其他",),
+            status="indexed",
+        ),
+        AttachmentReference(
+            file_id="file_a",
+            file_name="doc.md",
+            summary="更新后的更长摘要，覆盖更细",
+            keywords=("早期", "细节"),
+            status="indexed",
+        ),
+    ]
+
+    index = service.build_active_index(references)
+
+    assert "file_id=file_a" in index
+    assert "file_id=file_b" in index
+    assert index.count("file_id=file_a") == 1
+    assert "更新后的更长摘要，覆盖更细" in index
+    assert "早期, 细节" in index
+
+
+@pytest.mark.asyncio
+async def test_context_builder_injects_attachment_refs_into_rolling_summary_prompt(
+    tmp_path, monkeypatch
+):
+    service = ConversationService(tmp_path / "conversation.db")
+    for index in range(4):
+        service.append_turn(
+            owner_key="owner-1",
+            session_id="session-1",
+            user_message=f"user fact {index}",
+            assistant_answer=f"assistant answer {index}",
+            route="metric",
+            attachment_refs=[
+                {
+                    "file_id": "file_doc",
+                    "file_name": "磁盘排查手册.md",
+                    "summary": "磁盘排查手册，重点讲 inode 满和 IO 高",
+                    "keywords": ["磁盘", "inode", "IO"],
+                    "status": "indexed",
+                }
+            ]
+            if index in {0, 1}
+            else None,
+        )
+    fake_llm = FakeLLM(
+        [
+            LLMResponse(
+                content="早期摘要：用户关注磁盘问题，文件 inode=磁盘排查手册.md。",
+                raw={},
+            )
+        ]
+    )
+    monkeypatch.setattr("app.agent.harness.context.conversation_service", service)
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+
+    await ContextBuilder(
+        history_max_turns=2,
+        history_token_window_enabled=False,
+        history_message_max_chars=0,
+        rolling_summary_enabled=True,
+        rolling_summary_max_chars=1000,
+    ).abuild(
+        message="current question",
+        owner_key="owner-1",
+        session_id="session-1",
+        tools=[],
+        llm_client=fake_llm,
+    )
+
+    summary_prompt = fake_llm.calls[0]["messages"][1].content
+    # attachment_refs 应作为"本轮附件"被喂给摘要 LLM（不只 attachment_refs 自己）
+    assert "磁盘排查手册.md" in summary_prompt
+    assert "file_doc" in summary_prompt
+    assert "inode" in summary_prompt
+
+
+@pytest.mark.asyncio
+async def test_context_builder_appends_active_attachment_index_to_system_prompt(
+    tmp_path, monkeypatch
+):
+    service = ConversationService(tmp_path / "conversation.db")
+    service.append_turn(
+        owner_key="owner-1",
+        session_id="session-1",
+        user_message="u0",
+        assistant_answer="a0",
+        attachment_refs=[
+            {
+                "file_id": "file_active",
+                "file_name": "活跃附件.pdf",
+                "summary": "活跃附件的摘要片段",
+                "keywords": ["活跃", "附件"],
+                "status": "indexed",
+            }
+        ],
+    )
+    monkeypatch.setattr("app.agent.harness.context.conversation_service", service)
+    monkeypatch.setattr("app.agent.harness.context.config.user_preferences_enabled", False)
+
+    context = await ContextBuilder(history_max_turns=2).abuild(
+        message="current question",
+        owner_key="owner-1",
+        session_id="session-1",
+        tools=[],
+        llm_client=FakeLLM([]),
+    )
+
+    assert "本会话已上传附件的索引" in context.system_prompt
+    assert "file_id=file_active" in context.system_prompt
+    assert "活跃附件.pdf" in context.system_prompt
+    assert "file_id" in context.active_attachment_index
+    assert any(
+        reference.file_id == "file_active" for reference in context.active_attachments
+    )
+
+
+@pytest.mark.asyncio
+async def test_assistant_history_resolves_attachment_by_keyword_and_reloads_full_content(
+    tmp_path, monkeypatch
+):
+    """历史会话里出现过 file_old，用户用关键词追问细节，应当触发全文重载。"""
+    conversation_service = ConversationService(tmp_path / "conversation.db")
+    conversation_service.append_turn(
+        owner_key="owner-1",
+        session_id="visible-session",
+        user_message="先记住这个资料",
+        user_context="",
+        attachment_refs=[
+            {
+                "file_id": "file_old",
+                "file_name": "磁盘排查手册.md",
+                "summary": "磁盘排查手册：inode 满、IO 高、文件系统只读",
+                "keywords": ["磁盘", "inode", "IO"],
+                "status": "indexed",
+            }
+        ],
+        assistant_answer="好，我记住了。",
+        route="knowledge",
+    )
+    fake_harness = FakeStreamService()
+    monkeypatch.setattr("app.api.assistant.harness_service", fake_harness)
+    monkeypatch.setattr("app.api.assistant.conversation_service", conversation_service)
+
+    build_calls: list[list[str]] = []
+
+    async def fake_build_context(owner_key: str, attachment_ids: list[str]) -> str:
+        build_calls.append(list(attachment_ids))
+        return (
+            "[附件 磁盘排查手册.md]\nfile_id: file_old\nstatus: indexed\n"
+            "content:\n磁盘 inode 使用率达到 100%，导致无法创建新文件。"
+        )
+
+    monkeypatch.setattr(
+        "app.api.assistant.attachment_context_service.build_context",
+        fake_build_context,
+    )
+
+    response = await assistant(
+        ChatRequest(
+            id="visible-session",
+            question="inode 那块在文件里详细怎么说的？",
+        ),
+        owner_key="owner-1",
+    )
+    await _drain_event_source_response(response)
+
+    assert build_calls == [["file_old"]]
+    injected_message = fake_harness.calls[0]["message"]
+    assert "磁盘 inode 使用率达到 100%" in injected_message
+    assert "磁盘排查手册.md" in injected_message
+    turns = conversation_service.get_turns("owner-1", "visible-session")
+    assert turns[-1]["attachment_refs"][0]["file_id"] == "file_old"
+
 

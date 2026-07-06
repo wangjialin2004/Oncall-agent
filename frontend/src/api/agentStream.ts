@@ -1,11 +1,23 @@
-import type { AgentMode, AgentRoute, AgentStreamEvent, TimelineEvent } from "../types/events";
+import type {
+  AgentMode,
+  AgentRoute,
+  AgentStreamEvent,
+  TimelineEvent,
+} from "../types/events";
 
 export type StreamAgentArgs = {
   sessionId: string;
   message: string;
   mode: AgentMode;
+  attachmentIds?: string[];
   signal?: AbortSignal;
   onEvent: (event: AgentStreamEvent) => void;
+  /**
+   * When ``true``, the backend replays non-whitelisted tool calls from the
+   * checkpoint; ``false`` forces conservative close even if the server default
+   * would have replayed. ``undefined`` lets the backend apply its own default.
+   */
+  checkpointReplay?: boolean;
 };
 
 const SESSION_OWNER_STORAGE_KEY = "sessionOwnerToken";
@@ -38,6 +50,7 @@ export function translateBackendEvent(
         timelineEvent: payload as unknown as TimelineEvent,
       };
     case "agent_event":
+      return translateAgentEvent(payload) ?? (payload as unknown as TimelineEvent);
     case "tool_event":
     case "decision_event":
       return payload as unknown as TimelineEvent;
@@ -68,6 +81,42 @@ export function translateBackendEvent(
     default:
       return null;
   }
+}
+
+/**
+ * Recognize the harness-loop "checkpoint banner" agent_events. We keep them off
+ * the timeline channel so they cannot collide with the deduplication logic and
+ * always surface in the panel even when the timeline is otherwise empty.
+ */
+function translateAgentEvent(
+  payload: Record<string, unknown>,
+): AgentStreamEvent | null {
+  const stage = String(payload.stage ?? "");
+  if (stage === "checkpoint_resume") {
+    const innerPayload = (payload.payload ?? {}) as Record<string, unknown>;
+    const replayOverrideRaw = innerPayload.replay_override;
+    return {
+      type: "checkpoint_resume",
+      resumedFromStep: Number(innerPayload.resumed_from_step ?? 0),
+      replayedSteps: Number(innerPayload.replayed_steps ?? 0),
+      startedAt: String(innerPayload.started_at ?? ""),
+      conservative: Boolean(innerPayload.conservative),
+      replayOverride:
+        replayOverrideRaw === true
+          ? true
+          : replayOverrideRaw === false
+            ? false
+            : null,
+    };
+  }
+  if (stage === "checkpoint_conservative_close") {
+    const innerPayload = (payload.payload ?? {}) as Record<string, unknown>;
+    return {
+      type: "checkpoint_conservative_close",
+      step: Number(innerPayload.step ?? 0),
+    };
+  }
+  return null;
 }
 
 function normalizeSseLineEndings(value: string, isFinal = false): string {
@@ -116,6 +165,8 @@ export async function streamAgent(args: StreamAgentArgs): Promise<void> {
     body: JSON.stringify({
       Id: args.sessionId,
       Question: args.message,
+      AttachmentIds: args.attachmentIds ?? [],
+      CheckpointReplay: args.checkpointReplay,
     }),
     signal: args.signal,
   });

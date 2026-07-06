@@ -149,9 +149,6 @@ class GuardedToolExecutor:
                 )
             except TimeoutError:
                 last_error = f"Tool execution timed out after {self.timeout_seconds:g}s"
-                if attempt < attempts - 1:
-                    await self._sleep_backoff(attempt, tool.name, last_error)
-                    continue
                 return _failed(tool_call, last_error)
             except Exception as exc:
                 last_error = f"Tool execution failed: {exc}"

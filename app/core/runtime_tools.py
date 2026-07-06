@@ -7,6 +7,7 @@ not depend on external tool wrappers.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -27,7 +28,10 @@ class RuntimeTool:
     async def run(self, arguments: dict[str, Any] | None = None) -> Any:
         if self.handler is None:
             raise RuntimeError(f"Tool {self.name!r} has no handler")
-        result = self.handler(arguments or {})
+        if inspect.iscoroutinefunction(self.handler):
+            result = self.handler(arguments or {})
+        else:
+            result = await asyncio.to_thread(self.handler, arguments or {})
         if inspect.isawaitable(result):
             return await result
         return result
@@ -47,7 +51,10 @@ def make_runtime_tool(
         parameters = args_schema.model_json_schema()
 
     async def handler(arguments: dict[str, Any]) -> Any:
-        result = func(**arguments)
+        if inspect.iscoroutinefunction(func):
+            result = func(**arguments)
+        else:
+            result = await asyncio.to_thread(func, **arguments)
         if inspect.isawaitable(result):
             return await result
         return result
