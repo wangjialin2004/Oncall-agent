@@ -26,10 +26,27 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 9900
 
-    # DashScope 配置
+    # DashScope 配置（LLM 遗留回退 + embedding=dashscope 时使用）
     dashscope_api_key: str = ""  # 默认空字符串，实际使用需从环境变量加载
     dashscope_model: str = ""
     dashscope_embedding_model: str = "text-embedding-v4"  # v4 支持多种维度（默认 1024）
+
+    # Embedding provider configuration.
+    # local_bge_m3: local BAAI/bge-m3 via FlagEmbedding (default; no API key).
+    # dashscope: OpenAI-compatible DashScope embeddings (requires DASHSCOPE_API_KEY).
+    embedding_provider: str = "local_bge_m3"
+    embedding_model: str = "BAAI/bge-m3"
+    embedding_dim: int = 1024
+    # Optional local path/HF cache id; empty → use embedding_model.
+    embedding_model_path: str = ""
+    embedding_device: str = ""  # empty = auto (cuda if available else cpu)
+    embedding_batch_size: int = 12
+    embedding_normalize: bool = True
+    embedding_use_fp16: bool = True
+    # DashScope-compatible endpoint overrides (only when embedding_provider=dashscope).
+    embedding_dashscope_base_url: str = (
+        "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    )
 
     # Generic LLM provider configuration. When unset, the custom LLM client
     # falls back to the legacy DashScope settings above.

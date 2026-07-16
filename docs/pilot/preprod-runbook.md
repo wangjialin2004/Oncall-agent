@@ -28,7 +28,7 @@ python scripts/check_env_secrets.py
 python scripts/check_env_secrets.py --strict
 ```
 
-必填：`LLM_API_KEY` 或 `DASHSCOPE_API_KEY`；`AUTH_TOKEN_SECRET`（勿默认）；建议改掉 `admin:admin`。
+必填：`LLM_API_KEY` 或 `DASHSCOPE_API_KEY`（对话）；向量默认本地 BGE-M3（`pip install -e ".[embedding]"`）。`AUTH_TOKEN_SECRET`（勿默认）；建议改掉 `admin:admin`。切换 embedding 后须 `rebuild_vector_collection.py --yes` + 经验记忆 reindex。
 
 ### 2.2 进程（Windows 主路径）
 

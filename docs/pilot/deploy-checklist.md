@@ -26,7 +26,10 @@ python scripts/check_env_secrets.py --strict
 
 必填 / 强烈建议：
 
-- `LLM_API_KEY` 或 `DASHSCOPE_API_KEY`
+- `LLM_API_KEY` 或 `DASHSCOPE_API_KEY`（对话模型）
+- 向量嵌入默认 **本地 BGE-M3**（`EMBEDDING_PROVIDER=local_bge_m3`）：`pip install -e ".[embedding]"`，首次会下载 `BAAI/bge-m3`
+- 若回退云 embedding：`EMBEDDING_PROVIDER=dashscope` + `DASHSCOPE_API_KEY`
+- 切换 embedding 模型后必须重建：`python scripts/rebuild_vector_collection.py --yes`，并重建经验记忆索引
 - `AUTH_TOKEN_SECRET`（勿用默认 `dev-auth-token-secret`）
 - `AUTH_USERS`（勿长期 `admin:admin`）
 - `PROMETHEUS_BASE_URL` + `MONITOR_TARGET_MODE=prometheus`

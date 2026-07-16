@@ -13,6 +13,14 @@ from app.services.vector_embedding_service import vector_embedding_service
 from app.utils.serialization import json_dumps
 from app.utils.text import normalize_text as _normalize, text_similarity as _text_similarity
 
+def _vector_dim() -> int:
+    try:
+        return int(config.embedding_dim or 1024)
+    except Exception:
+        return 1024
+
+
+# Kept for import compatibility; prefer _vector_dim() at use sites.
 VECTOR_DIM = 1024
 ID_MAX_LENGTH = 100
 TEXT_MAX_LENGTH = 8000
@@ -177,7 +185,7 @@ class ExperienceMemoryIndexService:
                 FieldSchema(
                     name=config.rag_dense_vector_field,
                     dtype=DataType.FLOAT_VECTOR,
-                    dim=VECTOR_DIM,
+                    dim=_vector_dim(),
                 ),
             ],
             description="Long-term diagnosis experience memory",

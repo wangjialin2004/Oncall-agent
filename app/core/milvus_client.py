@@ -22,7 +22,6 @@ class MilvusClientManager:
 
     # 常量定义
     COLLECTION_NAME: str = "biz"
-    VECTOR_DIM: int = 1024  # 统一使用 1024 维
     ID_MAX_LENGTH: int = 100
     CONTENT_MAX_LENGTH: int = 8000
     DEFAULT_SHARD_NUMBER: int = 2
@@ -31,6 +30,15 @@ class MilvusClientManager:
         """初始化 Milvus 客户端管理器"""
         self._client: MilvusClient | None = None
         self._collection: Collection | None = None
+
+    @property
+    def VECTOR_DIM(self) -> int:
+        """Dense vector dim — follows EMBEDDING_DIM (default 1024 for BGE-M3)."""
+
+        try:
+            return int(config.embedding_dim or 1024)
+        except Exception:
+            return 1024
 
     def connect(self, validate_schema: bool = True) -> MilvusClient:
         """

@@ -81,6 +81,7 @@
 | 后端 | FastAPI、Pydantic Settings、SSE (sse-starlette)、Loguru |
 | Agent | 自研 Harness、专家路由、本地工具调用、MCP 接入 |
 | 模型 | OpenAI-compatible LLM 接口，兼容 DashScope / Qwen |
+| 向量嵌入 | 默认本地 BGE-M3（`FlagEmbedding` 可选依赖）；可回退 DashScope embedding |
 | 向量库 | Milvus（pymilvus） |
 | 监控 | Prometheus（监控 MCP 的 PromQL 路径） |
 | 前端 | React 18、Vite、TypeScript、Vitest |
@@ -337,8 +338,11 @@ SSE `message` 数据包含不同类型事件：`route_selected`、`agent_event`�
 | `LLM_BASE_URL` | OpenAI-compatible API 地址 |
 | `LLM_API_KEY` | LLM API Key，只写入 `.env` |
 | `LLM_MODEL` | 对话与诊断模型 |
-| `DASHSCOPE_API_KEY` | DashScope API Key，用于兼容或 embedding |
-| `DASHSCOPE_EMBEDDING_MODEL` | 向量模型 |
+| `EMBEDDING_PROVIDER` | 向量嵌入：`local_bge_m3`（默认）或 `dashscope` |
+| `EMBEDDING_MODEL` | 本地模型 id，默认 `BAAI/bge-m3` |
+| `EMBEDDING_DIM` | 向量维度，默认 `1024`（与 BGE-M3 dense 对齐） |
+| `DASHSCOPE_API_KEY` | 可选；`EMBEDDING_PROVIDER=dashscope` 或 LLM 遗留回退时需要 |
+| `DASHSCOPE_EMBEDDING_MODEL` | DashScope 向量模型（仅 dashscope provider） |
 | `MILVUS_HOST` / `MILVUS_PORT` | Milvus 地址（默认 `localhost:19530`） |
 | `HARNESS_ENABLED` | 是否启用统一 Harness 主循环 |
 | `HARNESS_MCP_ENABLED` | 是否允许 Harness 调用 MCP 工具 |
