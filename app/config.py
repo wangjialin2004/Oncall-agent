@@ -146,7 +146,6 @@ class Settings(BaseSettings):
     harness_knowledge_early_close: bool = True
     # 按路由收紧步数/软超时（knowledge 更短；M1 W4）
     harness_route_timeout_profile: bool = True
-    harness_knowledge_soft_timeout_seconds: float = 90.0
     # M2 W5：仅在 route timeout profile 打开时，诊断路由最多走这些主循环步数。
     # 设为当前 HARNESS_MAX_STEPS 值或关闭 profile 即可回退旧预算。
     harness_diagnosis_max_steps: int = 3
@@ -197,7 +196,6 @@ class Settings(BaseSettings):
     long_term_memory_auto_distill_min_confidence: str = "medium"
     # M3 W10：失败/空证据反模式捕获与召回提示。
     harness_anti_pattern_capture_enabled: bool = True
-    harness_anti_pattern_tool_hint: bool = True
     # 规划/自检是否改用 LLM 驱动（默认关闭，回退到确定性规则版）
     harness_llm_planning_enabled: bool = False
     harness_llm_verify_enabled: bool = False
@@ -214,7 +212,6 @@ class Settings(BaseSettings):
     harness_context_db_snapshot_enabled: bool = True
     harness_context_patch_history_limit: int = 200
     harness_context_tools_enabled: bool = True
-    harness_context_llm_patch_enabled: bool = False
 
     # 日志分析管线（处理上万行日志）
     # 进入聚类前允许处理的最大原始行数（超出按时间倒序截断并提示）
@@ -236,7 +233,6 @@ class Settings(BaseSettings):
 
     # RAG 配置
     rag_top_k: int = 3
-    rag_model: str = "gpt-5.4"  # 使用快速响应模型，不带扩展思考
     rag_retrieval_mode: str = "dense"  # dense | bm25 | hybrid
     rag_dense_weight: float = 0.7
     rag_bm25_weight: float = 0.3
@@ -283,7 +279,6 @@ class Settings(BaseSettings):
     harness_checkpoint_enabled: bool = True
     harness_checkpoint_ttl_seconds: int = 1800
     harness_checkpoint_replay: bool = False
-    harness_checkpoint_max_idempotent_tools: int = 32
 
     # Long-term memory
     memory_db_path: str = "volumes/long_term_memory.db"
@@ -294,7 +289,6 @@ class Settings(BaseSettings):
     experience_memory_similarity_threshold: float = 0.78
     experience_memory_high_confidence: float = 0.8
     experience_memory_weak_confidence: float = 0.4
-    service_knowledge_enabled: bool = True
     user_preferences_enabled: bool = True
 
     # Auth / CORS (pilot baseline)

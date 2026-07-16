@@ -63,6 +63,7 @@ Model adapters must remain short references to this policy. They must not duplic
 
 ## Current Plan Index
 
+- [知识库 BGE 重建 + 死配置清理](plan/2026-07-16-kb-rebuild-dead-config-cleanup.md) - **已完成并验证**；`biz` 21 entities；删除 6 个零引用 Settings 字段
 - [本地 BGE-M3 Embedding 替换 DashScope](plan/2026-07-16-local-bge-m3-embedding.md) - **已实现并验证**；默认 `local_bge_m3`，DashScope 可回退；ci-smoke 56 passed（无 key）
 - [工作区差异分流与审查](plan/2026-07-16-working-tree-triage.md) - **已完成并验证**；隔离本地恢复/临时文件，格式检查通过，索引保持为空
 - [Git 元数据恢复](plan/2026-07-16-git-metadata-recovery.md) - **已完成并验证**；重建 Git 元数据并保留 252 项工作区差异，旧指针与备份可审计

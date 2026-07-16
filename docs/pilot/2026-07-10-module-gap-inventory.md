@@ -188,7 +188,7 @@
 | `HARNESS_CONTEXT_REBUILD_FROM_TURNS_ENABLED` | `True` | Redis+DB miss 才 rebuild |
 | `HARNESS_CONTEXT_DB_SNAPSHOT_ENABLED` | `True` | 冷备 |
 | `HARNESS_CONTEXT_TOOLS_ENABLED` | `True` | 暴露 read/note |
-| `HARNESS_CONTEXT_LLM_PATCH_ENABLED` | `False` | 禁止任意 patch（正确） |
+| ~~`HARNESS_CONTEXT_LLM_PATCH_ENABLED`~~ | 已删除（从未接线） | 历史占位，2026-07-16 清理 |
 | `HARNESS_CONTEXT_VIEW_TOKEN_BUDGET` | `4000` | 视图预算 |
 | `HARNESS_CONTEXT_REDIS_TTL_SECONDS` | `86400` | 热状态 TTL |
 
@@ -233,7 +233,7 @@
 | L1 cache | `memory_cache.py` | 已落地 | 与 ContextState 边界：不应缓存当前会话白板 | P1（静态约束） |
 | Memory API | `app/api/memory.py` | **部分落地/安全弱** | 部分写接口 owner 鉴权不完整（审查指出 experience/service 写路径风险） | **P0** |
 
-**开关**：`LONG_TERM_MEMORY_ENABLED=True`、`SERVICE_KNOWLEDGE_ENABLED=True`、`USER_PREFERENCES_ENABLED=True`、`MEMORY_CACHE_*`
+**开关**：`LONG_TERM_MEMORY_ENABLED=True`、`USER_PREFERENCES_ENABLED=True`、`MEMORY_CACHE_*`（`SERVICE_KNOWLEDGE_ENABLED` 已删除，工具始终注册）
 
 ### 8.2 RAG
 
