@@ -95,3 +95,7 @@ dmypy.json
 
 # Ruff
 .ruff_cache/
+
+# Eval run outputs (keep directory via .gitkeep; ignore scored CSVs)
+evals/results/*
+!evals/results/.gitkeep

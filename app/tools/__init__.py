@@ -5,6 +5,7 @@ from app.tools.knowledge_tool import retrieve_knowledge
 from app.tools.lookup_service_knowledge import lookup_service_knowledge
 from app.tools.query_metrics_alerts import query_prometheus_alerts
 from app.tools.recall_experience import recall_experience
+from app.tools.redis_health import check_redis_health
 from app.tools.time_tool import get_current_time
 
 DEFAULT_LOCAL_AGENT_TOOLS = (
@@ -12,6 +13,7 @@ DEFAULT_LOCAL_AGENT_TOOLS = (
     recall_experience,
     get_current_time,
     query_prometheus_alerts,
+    check_redis_health,
 )
 
 KNOWLEDGE_LOCAL_TOOLS = (
@@ -23,11 +25,13 @@ METRIC_LOCAL_TOOLS = (
     query_prometheus_alerts,
     recall_experience,
     lookup_service_knowledge,
+    check_redis_health,
     get_current_time,
 )
 LOG_LOCAL_TOOLS = (
     recall_experience,
     lookup_service_knowledge,
+    check_redis_health,
     get_current_time,
 )
 CHANGE_LOCAL_TOOLS = (
@@ -43,6 +47,7 @@ DIAGNOSIS_LOCAL_TOOLS = (
     get_current_time,
     query_prometheus_alerts,
     query_recent_changes,
+    check_redis_health,
 )
 
 __all__ = [
@@ -58,4 +63,5 @@ __all__ = [
     "get_current_time",
     "query_prometheus_alerts",
     "query_recent_changes",
+    "check_redis_health",
 ]

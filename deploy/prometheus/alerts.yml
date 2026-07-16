@@ -1,4 +1,6 @@
 # Alert rules readable through Prometheus GET /api/v1/alerts.
+# Resource thresholds remain for real host pressure; pilot always-on rules
+# seed at least one firing alert so OnCall tools have evidence in L1 demos.
 groups:
   - name: aiops-assistant-resources
     rules:
@@ -7,6 +9,7 @@ groups:
         for: 1m
         labels:
           severity: warning
+          service: aiops-assistant-api
         annotations:
           summary: "High CPU usage"
           description: '{{ $labels.service }} CPU usage {{ $value | printf "%.1f" }}% exceeds 80%'
@@ -16,6 +19,44 @@ groups:
         for: 1m
         labels:
           severity: warning
+          service: aiops-assistant-api
         annotations:
           summary: "High memory usage"
           description: '{{ $labels.service }} memory usage {{ $value | printf "%.1f" }}% exceeds 70%'
+
+  - name: aiops-pilot-seed
+    rules:
+      # Always-true vector so pilot environments have a firing alert even when
+      # host CPU/mem are healthy. Labels mimic production service names used by evals.
+      - alert: PilotCheckoutApiCpuHigh
+        expr: vector(1)
+        for: 0m
+        labels:
+          severity: critical
+          service: checkout-api
+          alertname_seed: "true"
+        annotations:
+          summary: "checkout-api CPU high (pilot seed)"
+          description: "Pilot seed alert: checkout-api reported sustained high CPU for evaluation/demo. Not a production signal."
+
+      - alert: PilotPaymentServiceMemoryHigh
+        expr: vector(1)
+        for: 0m
+        labels:
+          severity: warning
+          service: payment-service
+          alertname_seed: "true"
+        annotations:
+          summary: "payment-service memory high (pilot seed)"
+          description: "Pilot seed alert: payment-service memory pressure for evaluation/demo. Not a production signal."
+
+      - alert: PilotUserServiceSlowResponse
+        expr: vector(1)
+        for: 0m
+        labels:
+          severity: warning
+          service: user-service
+          alertname_seed: "true"
+        annotations:
+          summary: "user-service P99 latency high (pilot seed)"
+          description: "Pilot seed alert: user-service P99 latency > 3s for evaluation/demo. Not a production signal."

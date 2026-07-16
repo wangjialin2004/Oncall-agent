@@ -43,11 +43,13 @@ def build_redis_from_settings() -> Any:
     if _AsyncRedis is None:  # pragma: no cover - guarded by is_redis_available
         raise RuntimeError("redis package is not installed")
     timeout = float(getattr(config, "redis_socket_timeout", 5.0) or 5.0)
+    protocol = int(getattr(config, "redis_protocol", 2) or 2)
     return _AsyncRedis.from_url(
         str(getattr(config, "redis_url", "redis://localhost:6379/0")),
         socket_timeout=timeout,
         socket_connect_timeout=timeout,
         decode_responses=True,
+        protocol=protocol,
     )
 
 

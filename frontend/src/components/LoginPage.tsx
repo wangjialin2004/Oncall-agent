@@ -5,9 +5,11 @@ import { AuthError, login, saveAuth } from "../api/authApi";
 
 type LoginPageProps = {
   onLogin: (token: string, username: string) => void;
+  /** Optional banner, e.g. session-expired notice from the app shell. */
+  notice?: string | null;
 };
 
-export function LoginPage({ onLogin }: LoginPageProps) {
+export function LoginPage({ onLogin, notice = null }: LoginPageProps) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -49,6 +51,12 @@ export function LoginPage({ onLogin }: LoginPageProps) {
         </div>
 
         <form className="login-form" onSubmit={handleSubmit} noValidate>
+          {notice && !error && (
+            <div className="login-error" role="status">
+              <AlertCircle size={15} aria-hidden="true" style={{ flexShrink: 0, marginTop: 1 }} />
+              {notice}
+            </div>
+          )}
           <div className="login-field">
             <label className="login-label" htmlFor="login-username">
               用户名

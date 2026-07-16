@@ -20,7 +20,16 @@ vi.mock("../../api/agentStream", () => ({
 }));
 
 vi.mock("../../api/authApi", () => ({
+  AuthError: class AuthError extends Error {
+    code: number;
+    constructor(code: number, message: string) {
+      super(message);
+      this.name = "AuthError";
+      this.code = code;
+    }
+  },
   clearAuth: vi.fn(),
+  fetchMe: vi.fn(async () => ({ username: "tester", ownerKey: "owner1" })),
   loadAuth: vi.fn(() => ({ token: "test-token", username: "tester" })),
   logout: vi.fn(async () => {}),
 }));
@@ -48,6 +57,13 @@ describe("multi-turn conversation UI", () => {
     cleanup();
   });
 
+  async function waitForChatReady() {
+    await waitFor(() => {
+      expect(screen.queryByText("正在校验登录状态…")).not.toBeInTheDocument();
+    });
+    return screen.getByLabelText("消息");
+  }
+
   it("streams assistant content into the chat bubble as it arrives", async () => {
     // Emit content chunks but no `complete` — proving content reaches the bubble itself,
     // not only the final answer.
@@ -60,7 +76,7 @@ describe("multi-turn conversation UI", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.type(screen.getByLabelText("消息"), "看下指标");
+    await user.type(await waitForChatReady(), "看下指标");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     // The streamed text shows in the chat bubble (and also the side-panel report).

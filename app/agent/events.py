@@ -18,15 +18,28 @@ def _with_trace(
     span_id: str | None,
     duration_ms: float | None,
     usage: dict[str, Any] | None,
+    started_at: float | None = None,
 ) -> AgentEvent:
-    """Attach optional observability fields without breaking existing callers."""
+    """Attach optional observability fields without breaking existing callers.
+
+    ``duration_ms`` is mirrored into ``payload`` as well so timeline panels can
+    read it from a single source; the top-level field remains for backward
+    compatibility. ``started_at`` is a perf_counter timestamp for cross-event
+    ordering in the frontend timeline.
+    """
 
     if trace_id:
         event["trace_id"] = trace_id
     if span_id:
         event["span_id"] = span_id
     if duration_ms is not None:
-        event["duration_ms"] = round(float(duration_ms), 2)
+        rounded = round(float(duration_ms), 2)
+        event["duration_ms"] = rounded
+        payload = event.get("payload")
+        if isinstance(payload, dict):
+            payload.setdefault("duration_ms", rounded)
+    if started_at is not None:
+        event["started_at"] = round(float(started_at), 3)
     if usage:
         event["usage"] = usage
     return event

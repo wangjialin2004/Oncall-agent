@@ -15,8 +15,8 @@ describe("submitFeedback", () => {
     localStorage.clear();
   });
 
-  it("posts a strong adoption with the session owner header", async () => {
-    localStorage.setItem("sessionOwnerToken", "owner-a");
+  it("posts a strong adoption with the Authorization bearer token", async () => {
+    localStorage.setItem("authToken", "token-a");
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
       jsonResponse({ data: { experience_id: "exp-1" } }),
     );
@@ -34,7 +34,7 @@ describe("submitFeedback", () => {
     expect(id).toBe("exp-1");
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("/api/memory/feedback");
-    expect(init?.headers).toMatchObject({ "X-Session-Owner": "owner-a" });
+    expect(init?.headers).toMatchObject({ Authorization: "Bearer token-a" });
     const body = JSON.parse(init?.body as string);
     expect(body.acceptance_level).toBe("strong");
     expect(body.user_accepted).toBe(true);
@@ -43,7 +43,7 @@ describe("submitFeedback", () => {
   });
 
   it("posts a weak acceptance with user_accepted false", async () => {
-    localStorage.setItem("sessionOwnerToken", "owner-a");
+    localStorage.setItem("authToken", "token-a");
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
       jsonResponse({ data: { experience_id: "exp-weak" } }),
     );
@@ -63,7 +63,7 @@ describe("submitFeedback", () => {
   });
 
   it("throws on a non-ok response", async () => {
-    localStorage.setItem("sessionOwnerToken", "owner-a");
+    localStorage.setItem("authToken", "token-a");
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 500 })));
 
     await expect(

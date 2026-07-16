@@ -47,11 +47,18 @@ class Settings(BaseSettings):
     router_min_confidence: float = 0.55
     # 将关键词分为强/弱两层；弱词只作为语义路由提示，避免单个泛化词误导路由
     router_keyword_tiering_enabled: bool = True
+    # 语义分类器允许同时返回主路由 + 多个辅助路由；关闭后退化为单标签语义分类
+    router_multilabel_enabled: bool = True
+    # 语义误把“具体目标 + 事故信号”归为 knowledge 时，提升为 diagnosis；
+    # 关闭后保留原始语义路由，便于一键回滚。
+    router_concrete_incident_override_enabled: bool = True
     # 单个专家执行超时（秒），超时返回降级答案
-    expert_timeout_seconds: float = 60.0
+    expert_timeout_seconds: float = 120.0
 
-    # Harness 主循环配置（默认关闭，旧 RouterService 路径保留可回滚）
-    harness_enabled: bool = False
+    # Harness 主循环配置。
+    # 说明：HTTP 入口 /api/assistant 已固定走 harness_service；本开关主要用于
+    # checkpoint 激活等子能力门控，不再作为「新旧双路径」入口开关。
+    harness_enabled: bool = True
     harness_max_steps: int = 6
     harness_token_budget: int = 80000
     # 每次发往模型的 messages 体量安全网：超过则压缩最旧的历史/工具消息（保留 tool_call 配对），
@@ -75,15 +82,25 @@ class Settings(BaseSettings):
     harness_rolling_summary_model: str = ""
     # 滚动摘要在请求关键路径上同步调用 LLM，单独限时；超时则保留旧摘要不阻塞回答
     harness_rolling_summary_timeout_seconds: float = 20.0
-    harness_timeout_seconds: float = 90.0
+    # harness 主循环总闸门（外层兜底）：要大于 delegate_timeout + step_timeout + 收尾余量
+    harness_timeout_seconds: float = 240.0
+    # 单步 LLM “下一步判断”独立限时：超时即触发 step_timeout 事件并立即收尾，
+    # 避免某一次 stream_chat 慢独占整个总闸门
+    harness_step_timeout_seconds: float = 60.0
+    # 降级路径（knowledge_expert / raw_vector）独立限时，防止降级再卡死 SSE
+    harness_fallback_timeout_seconds: float = 30.0
     harness_mcp_enabled: bool = False
     harness_delegation_enabled: bool = True
     # 路由选中的专项专家是否在主循环开始时被“确定性委派执行”：开启后 harness 作为编排器，
     # 先把核心调查交给被选专家执行，再在其结论与证据上做核对/补充/收尾，而不是自己直接作答。
     # 关闭后退化为旧的软提示行为（是否委派由 harness LLM 自行决定）。
-    harness_force_expert_delegation: bool = True
+    harness_force_expert_delegation: bool = False
     # 委派子专家的独立超时，避免单个慢子专家吃光父级总超时；超时返回降级结果
-    harness_delegate_timeout_seconds: float = 45.0
+    # （略低于 step 预算，保证 close 余地）
+    harness_delegate_timeout_seconds: float = 90.0
+    # 模型分层：planner 用轻量模型做路由/单步判断，reasoner 用深度模型做最终收口/证据自检
+    llm_planner_model: str = ""
+    llm_reasoner_model: str = "gpt-5.4"
     harness_tool_timeout_seconds: float = 30.0
     harness_tool_collection_timeout_seconds: float = 5.0
     harness_tool_max_output_chars: int = 6000
@@ -96,13 +113,96 @@ class Settings(BaseSettings):
     harness_log_pipeline_enabled: bool = True
     # 证据自检为低置信度/有缺口时，在最终答案前显式插入缺口声明（纠正型自检）
     harness_corrective_verify_enabled: bool = True
+    # 低置信 / 有缺口时，在定稿前最多再跑 N 轮「补取证」tool loop（M1 Close the Loop）
+    harness_re_evidence_enabled: bool = True
+    harness_re_evidence_max_rounds: int = 1
+    # 计划 required_evidence 与成功工具名做类型细匹配（M1 W2）
+    harness_evidence_match_enabled: bool = True
+    # mid-loop / post re-evidence 规则 replan（M1 W3）
+    harness_replan_enabled: bool = True
+    harness_replan_max_times: int = 1
+    # knowledge/clarify 等简单路由动态降低 max_steps（M1 W3）
+    harness_dynamic_max_steps: bool = True
+    # 同一步多个只读 tool_call 并行执行（M1 W3）
+    harness_parallel_tool_calls: bool = True
+    # knowledge 路由在已有成功知识类工具后强制无工具收口（M1 W4 时延）
+    harness_knowledge_early_close: bool = True
+    # 按路由收紧步数/软超时（knowledge 更短；M1 W4）
+    harness_route_timeout_profile: bool = True
+    harness_knowledge_soft_timeout_seconds: float = 90.0
+    # M2 W5：仅在 route timeout profile 打开时，诊断路由最多走这些主循环步数。
+    # 设为当前 HARNESS_MAX_STEPS 值或关闭 profile 即可回退旧预算。
+    harness_diagnosis_max_steps: int = 3
+    # M2 W5: an investigation with read-only evidence closes to the final answer
+    # instead of paying for further planner turns. Gated by the route timeout
+    # profile; false restores the prior loop.
+    harness_investigation_evidence_early_close: bool = True
+    # M2 W5：delegate_to_expert 的独立工具决策轮数；2/3 可回滚到更宽预算。
+    # 该值按调用传入，不能修改 registry 单例专家的共享实例属性。
+    harness_delegate_max_tool_rounds: int = 1
+    # M2 W5：委派专家首批工具完成后只回传证据给父 Harness 统一总结。
+    # 关闭后恢复专家自己的无工具总结调用。
+    harness_delegate_evidence_only: bool = True
+    # M2 W6：跨域并行委派 fan-out（delegate_parallel）；false 不注册/拒绝该工具。
+    harness_parallel_delegation_enabled: bool = True
+    harness_parallel_max_experts: int = 3
+    # M2 W6：router aux_routes 自动 probe；off|serial|parallel（非法值回退 off）。
+    router_aux_execution_mode: str = "parallel"
+    router_aux_max_probes: int = 2
+    # M2 W6：complete 时 best-effort 导出轨迹（默认关，避免占盘/敏感信息）。
+    harness_trace_export_enabled: bool = False
+    harness_trace_export_dir: str = "volumes/traces"
+    # M3 W11：trace 采样率 0–1；仅在 export enabled 时生效。默认 0=全不写。
+    harness_trace_sample_rate: float = 0.0
+    # M3 W11：可选 OTLP endpoint；空字符串 = 关闭（零依赖）。
+    otel_exporter_otlp_endpoint: str = ""
+    # M2 W7：专家/委派共用 sub_harness 内核（事件 payload 标记；循环体始终 shared）。
+    harness_shared_kernel_delegation: bool = True
+    # M2 W7 WP-C4：变更源策略 unavailable|future（无真实源前禁止 pretend available）。
+    change_source_policy: str = "unavailable"
+    # M3 W9：跨域 diagnosis / prefer_parallel 时框架 seed delegate_parallel（可关）。
+    harness_force_parallel_on_cross_domain: bool = True
+    # M3 W9：主 focus 调查工具失败时即使已有弱成功证据也允许 replan 一次。
+    harness_replan_on_primary_fail: bool = True
+    # M3 W9：同名只读工具成功次数上限（>0 启用）；抑制 S5 类重复 search_app_logs。
+    harness_slow_path_tool_cap: int = 2
+    # M3 W9：外层超时前若已有证据，优先用已有证据收口，避免 degraded fallback 文案。
+    harness_timeout_soft_close_enabled: bool = True
+    # M3 W9：最终答案结构化 suggested_actions[]（只读建议，确认不执行）。
+    hitl_suggested_actions_enabled: bool = True
+    # M3 W9：升级联系人，空则输出标准「未配置」块。格式 name|channel;name2|channel2
+    oncall_escalation_contacts: str = ""
+    # M3 W10：成功 run 半自动蒸馏（默认 draft+confirm，禁止静默全量入库）。
+    long_term_memory_distill_enabled: bool = True
+    long_term_memory_auto_distill: bool = False
+    long_term_memory_distill_require_confirm: bool = True
+    # medium|high|low — 低于阈值不产生成功经验 draft。
+    long_term_memory_auto_distill_min_confidence: str = "medium"
+    # M3 W10：失败/空证据反模式捕获与召回提示。
+    harness_anti_pattern_capture_enabled: bool = True
+    harness_anti_pattern_tool_hint: bool = True
     # 规划/自检是否改用 LLM 驱动（默认关闭，回退到确定性规则版）
     harness_llm_planning_enabled: bool = False
     harness_llm_verify_enabled: bool = False
 
+    # Stateful Harness context whiteboard（默认开启，主路径用 Redis/DB 白板）。
+    # 主路径：True（ContextState 白板）。False = legacy ContextBuilder，
+    # 仅作 rebuild/fallback（见 docs/pilot/context-dual-path.md；H4 收敛，不删代码）。
+    # DEPRECATED 语义：legacy 路径不再接收新特性；新能力只加在 stateful 路径。
+    harness_stateful_context_enabled: bool = True
+    # rebuild-from-turns：从 recent_turns 重建白板（resume / 冷启动）。
+    harness_context_rebuild_from_turns_enabled: bool = True
+    harness_context_view_token_budget: int = 4000
+    harness_context_redis_ttl_seconds: int = 86400
+    harness_context_db_snapshot_enabled: bool = True
+    harness_context_patch_history_limit: int = 200
+    harness_context_tools_enabled: bool = True
+    harness_context_llm_patch_enabled: bool = False
+
     # 日志分析管线（处理上万行日志）
     # 进入聚类前允许处理的最大原始行数（超出按时间倒序截断并提示）
-    log_max_lines: int = 20000
+    # 注意：原 20000 会触发 5~10 个 Map-Reduce chunk（每个 10~30s）远超总闸门
+    log_max_lines: int = 8000
     # 送入 LLM 的字符预算（近似 token 控制），超出触发 Map-Reduce 摘要
     log_token_budget: int = 12000
     # Map-Reduce 分块的字符大小
@@ -150,14 +250,12 @@ class Settings(BaseSettings):
     monitor_target_mode: str = "self"
     log_provider: str = "local"
 
-    # Short-term conversation checkpoint storage path.
-    checkpoint_db_path: str = "volumes/checkpoints.db"
-
     # Redis client (used by the harness checkpoint subsystem).
-    redis_enabled: bool = False
-    redis_url: str = "redis://localhost:6379/0"
+    redis_enabled: bool = True
+    redis_url: str = "redis://:123456@localhost:6379/0"
     redis_namespace: str = "super_biz_agent"
     redis_socket_timeout: float = 5.0
+    redis_protocol: int = 2
 
     # Harness loop checkpoint (step-level, Redis-backed).
     # Only effective when all three of harness_enabled, harness_checkpoint_enabled,
@@ -165,7 +263,7 @@ class Settings(BaseSettings):
     # harness skips any step that contains a non-idempotent tool and goes straight
     # to a single closing LLM call. Set harness_checkpoint_replay=True to replay
     # remaining steps verbatim (best-effort; external side effects may double-fire).
-    harness_checkpoint_enabled: bool = False
+    harness_checkpoint_enabled: bool = True
     harness_checkpoint_ttl_seconds: int = 1800
     harness_checkpoint_replay: bool = False
     harness_checkpoint_max_idempotent_tools: int = 32
@@ -181,7 +279,16 @@ class Settings(BaseSettings):
     experience_memory_weak_confidence: float = 0.4
     service_knowledge_enabled: bool = True
     user_preferences_enabled: bool = True
+
+    # Auth / CORS (pilot baseline)
+    # HMAC signing secret for access tokens. MUST be overridden in any shared env.
     auth_token_secret: str = "dev-auth-token-secret"
+    # Access token TTL in seconds. 0 disables expiry checks (not recommended).
+    auth_token_ttl_seconds: int = 86400
+    # Fixed account table: "user1:pass1,user2:pass2". Empty rejects all logins.
+    auth_users: str = "admin:admin"
+    # Comma-separated browser origins. Use "*" only for pure local demos.
+    cors_allow_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     # Process-local L1 cache for the long-term memory subsystem
     # (plan/memory-cache-layer.md §3.4 / §3.7). Disable via env
@@ -237,6 +344,31 @@ class Settings(BaseSettings):
                 "url": self.mcp_monitor_url,
             }
         }
+
+    @property
+    def auth_user_map(self) -> dict[str, str]:
+        """Parse AUTH_USERS into username -> password."""
+        mapping: dict[str, str] = {}
+        for item in (self.auth_users or "").split(","):
+            entry = item.strip()
+            if not entry or ":" not in entry:
+                continue
+            username, password = entry.split(":", 1)
+            username = username.strip()
+            password = password.strip()
+            if username and password:
+                mapping[username] = password
+        return mapping
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """Parse CORS_ALLOW_ORIGINS into a list for CORSMiddleware."""
+        raw = (self.cors_allow_origins or "").strip()
+        if not raw:
+            return ["http://localhost:5173"]
+        if raw == "*":
+            return ["*"]
+        return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 # 全局配置实例

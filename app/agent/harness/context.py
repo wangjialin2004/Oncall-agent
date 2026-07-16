@@ -140,13 +140,28 @@ class ContextBuilder:
         except Exception:
             turns = []
         recent_turns = self._select_recent_turns(turns)
-        summary = await self._load_or_update_rolling_summary(
-            owner_key=owner_key,
-            session_id=session_id,
-            turns=turns,
-            recent_turns=recent_turns,
-            llm_client=llm_client,
-        )
+
+        # 滚动摘要去同步化:首问先用旧摘要(或空),后台异步触发一次 LLM 更新。
+        # 下次请求就能命中更新后的摘要,首问不再被最多 20s 的同步 LLM 阻塞。
+        if self.rolling_summary_enabled and llm_client is not None:
+            initial_summary = self._read_cached_summary(owner_key=owner_key, session_id=session_id)
+            self._schedule_summary_update(
+                owner_key=owner_key,
+                session_id=session_id,
+                turns=turns,
+                recent_turns=recent_turns,
+                llm_client=llm_client,
+            )
+            summary = initial_summary
+        else:
+            summary = await self._load_or_update_rolling_summary(
+                owner_key=owner_key,
+                session_id=session_id,
+                turns=turns,
+                recent_turns=recent_turns,
+                llm_client=llm_client,
+            )
+
         active_attachments = self._collect_active_attachments(turns)
         active_index = attachment_reference_service.build_active_index(active_attachments)
         return HarnessContext(
@@ -350,6 +365,53 @@ class ContextBuilder:
         if max_chars <= len(suffix):
             return "[已折叠]"
         return f"{text[: max_chars - len(suffix)]}{suffix}"
+
+    def _read_cached_summary(self, *, owner_key: str, session_id: str) -> str:
+        """Return the most recently persisted rolling summary without LLM calls.
+
+        Used by ``abuild`` to seed the first request with whatever the prior
+        background update wrote. Falls back to empty when no summary is stored.
+        """
+        state = self._get_summary_state(owner_key, session_id)
+        return self._compact_summary(str(state.get("summary") or ""))
+
+    def _schedule_summary_update(
+        self,
+        *,
+        owner_key: str,
+        session_id: str,
+        turns: Sequence[dict[str, Any]],
+        recent_turns: Sequence[dict[str, Any]],
+        llm_client: Any,
+    ) -> None:
+        """Run the rolling-summary update in the background.
+
+        The first request after a long silence returns immediately with the
+        previously cached (possibly stale) summary; the next request hits the
+        refreshed summary. This trades a one-question staleness window for a
+        ~0s TTFB on the slow LLM call that used to block the request path.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _runner() -> None:
+            try:
+                await self._load_or_update_rolling_summary(
+                    owner_key=owner_key,
+                    session_id=session_id,
+                    turns=turns,
+                    recent_turns=recent_turns,
+                    llm_client=llm_client,
+                )
+            except Exception as exc:
+                logger.debug(f"滚动摘要后台更新失败（下次请求再重试）：{exc}")
+
+        task = loop.create_task(_runner())
+        # Tests that monkey-patch the loop's task factory can await ``_pending_summary_task``
+        # to assert against the eventual LLM call without changing production behavior.
+        self._pending_summary_task = task  # type: ignore[attr-defined]
 
     def _get_summary_state(self, owner_key: str, session_id: str) -> dict[str, Any]:
         getter = getattr(conversation_service, "get_rolling_summary", None)

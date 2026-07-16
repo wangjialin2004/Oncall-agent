@@ -29,6 +29,51 @@ _VERIFIER_SYSTEM = (
 _STATUS_VALUES = {"completed", "degraded", "failed"}
 _CONFIDENCE_VALUES = {"low", "medium", "high"}
 
+# required_evidence phrase keywords → tools that can satisfy the class.
+# Matching is intentionally broad so unknown phrases do not over-punish.
+_EVIDENCE_CLASS_TOOLS: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
+    (
+        ("指标", "告警", "曲线", "prometheus", "metric", "cpu", "内存", "磁盘"),
+        frozenset(
+            {
+                "query_prometheus_alerts",
+                "check_redis_health",
+                "delegate_to_expert",
+            }
+        ),
+    ),
+    (
+        ("日志", "堆栈", "log", "trace", "聚类"),
+        frozenset(
+            {
+                "delegate_to_expert",
+                "search_app_logs",
+                "query_logs",
+                "analyze_logs",
+            }
+        ),
+    ),
+    (
+        ("变更", "发布", "回滚", "deploy", "change"),
+        frozenset({"query_recent_changes", "delegate_to_expert"}),
+    ),
+    (
+        ("知识", "runbook", "经验", "文档", "检索", "前提"),
+        frozenset(
+            {
+                "retrieve_knowledge",
+                "recall_experience",
+                "lookup_service_knowledge",
+                "delegate_to_expert",
+            }
+        ),
+    ),
+    (
+        ("缺口", "说明"),
+        frozenset(),  # meta requirement — satisfied by any successful tool or explicit gap text
+    ),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class VerificationResult:
@@ -38,6 +83,53 @@ class VerificationResult:
     evidence_count: int
     failed_evidence_count: int
     gaps: list[str] = field(default_factory=list)
+
+
+def _successful_tool_names(timeline_events: Sequence[dict[str, Any]]) -> set[str]:
+    names: set[str] = set()
+    for event in timeline_events:
+        if event.get("type") != "tool_event" or event.get("status") != "completed":
+            continue
+        name = str(event.get("tool") or event.get("tool_name") or "").strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def _tools_for_evidence_phrase(phrase: str) -> frozenset[str] | None:
+    """Return tool set for a required_evidence phrase, or None if unknown."""
+    text = (phrase or "").strip().lower()
+    if not text:
+        return None
+    for keywords, tools in _EVIDENCE_CLASS_TOOLS:
+        if any(key.lower() in text for key in keywords):
+            return tools
+    return None
+
+
+def missing_required_evidence_gaps(
+    *,
+    required_evidence: Sequence[str],
+    successful_tools: set[str],
+) -> list[str]:
+    """Return gap strings for required evidence classes not covered by tools."""
+    gaps: list[str] = []
+    for phrase in required_evidence:
+        label = str(phrase or "").strip()
+        if not label:
+            continue
+        tools = _tools_for_evidence_phrase(label)
+        if tools is None:
+            # Unknown class: only require *some* successful tool overall.
+            if not successful_tools:
+                gaps.append(f"缺少证据类型：{label}")
+            continue
+        if not tools:
+            # Meta "缺口说明" — no specific tool required.
+            continue
+        if successful_tools.isdisjoint(tools):
+            gaps.append(f"缺少证据类型：{label}")
+    return gaps
 
 
 class EvidenceVerifier:
@@ -60,6 +152,7 @@ class EvidenceVerifier:
             for event in timeline_events
             if event.get("type") == "tool_event" and event.get("status") != "completed"
         ]
+        successful_tools = _successful_tool_names(timeline_events)
         gaps: list[str] = []
         if not evidence_events:
             gaps.append("未产生成功工具证据")
@@ -67,13 +160,27 @@ class EvidenceVerifier:
             gaps.append(f"{len(failed_events)} 个工具调用失败或被降级")
         if not answer.strip():
             gaps.append("最终回答为空")
-        if plan and plan.required_evidence and not evidence_events:
-            gaps.append(f"计划要求的证据尚未满足：{'、'.join(plan.required_evidence)}")
+        if plan and plan.required_evidence:
+            if not evidence_events:
+                gaps.append(
+                    f"计划要求的证据尚未满足：{'、'.join(plan.required_evidence)}"
+                )
+            elif bool(getattr(config, "harness_evidence_match_enabled", True)):
+                gaps.extend(
+                    missing_required_evidence_gaps(
+                        required_evidence=plan.required_evidence,
+                        successful_tools=successful_tools,
+                    )
+                )
 
         if not answer.strip() or (failed_events and not evidence_events):
             status = "failed"
             confidence = "low"
             summary = "自检未通过：缺少可用证据或最终回答为空"
+        elif failed_events and evidence_events:
+            status = "degraded"
+            confidence = "medium"
+            summary = "自检通过主要证据，但存在部分工具失败或降级"
         elif gaps:
             status = "degraded"
             confidence = "low"
@@ -124,12 +231,16 @@ class EvidenceVerifier:
             f"gaps={base.gaps}\n"
             "请复核并返回 JSON 自检结论。"
         )
+        # 模型分层：自检是证据/置信度判断任务，调用 reasoner(深度模型) 保证质量。
+        # 空字符串表示退回 LLMClient 默认模型，兼容老配置。
+        reasoner_model = str(getattr(config, "llm_reasoner_model", "") or "") or None
         response = await llm_client.complete(
             [
                 ChatMessage(role="system", content=_VERIFIER_SYSTEM),
                 ChatMessage(role="user", content=user_prompt),
             ],
             temperature=0,
+            model=reasoner_model,
         )
         data = _extract_json(response.content)
         if not data:

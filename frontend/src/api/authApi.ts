@@ -7,7 +7,11 @@
  *   成功:    { code: 200, data: { token: string, username: string } }
  *   失败:    { code: 401, message: string }
  *
- *   POST /api/auth/logout   (可选)
+ *   GET  /api/auth/me
+ *   Headers: Authorization: Bearer <token>
+ *   成功:    { code: 200, data: { username: string, owner_key: string } }
+ *
+ *   POST /api/auth/logout
  *   Headers: Authorization: Bearer <token>
  *   成功:    { code: 200 }
  */
@@ -15,6 +19,11 @@
 export type LoginResult = {
   token: string;
   username: string;
+};
+
+export type MeResult = {
+  username: string;
+  ownerKey: string;
 };
 
 export class AuthError extends Error {
@@ -27,6 +36,35 @@ export class AuthError extends Error {
   }
 }
 
+function loginErrorMessage(payload: unknown, status: number): string {
+  if (!payload || typeof payload !== "object") {
+    return status === 401 ? "用户名或密码错误" : `登录失败（HTTP ${status}）`;
+  }
+  const body = payload as Record<string, unknown>;
+  const detail = body.detail;
+  const message = typeof body.message === "string" ? body.message : "";
+  const detailText =
+    typeof detail === "string"
+      ? detail
+      : detail && typeof detail === "object" && typeof (detail as { message?: unknown }).message === "string"
+        ? String((detail as { message: string }).message)
+        : "";
+  const raw = (detailText || message || "").toLowerCase();
+  if (raw.includes("invalid username or password") || raw.includes("unauthorized")) {
+    return "用户名或密码错误";
+  }
+  if (raw.includes("required")) {
+    return "请输入用户名和密码";
+  }
+  if (detailText) {
+    return detailText;
+  }
+  if (message) {
+    return message;
+  }
+  return status === 401 ? "用户名或密码错误" : `登录失败（HTTP ${status}）`;
+}
+
 export async function login(username: string, password: string): Promise<LoginResult> {
   const response = await fetch("/api/auth/login", {
     method: "POST",
@@ -37,16 +75,33 @@ export async function login(username: string, password: string): Promise<LoginRe
   const json = await response.json().catch(() => null);
 
   if (!response.ok || !json) {
-    const message = json?.message || `HTTP ${response.status}`;
-    throw new AuthError(response.status, message);
+    throw new AuthError(response.status, loginErrorMessage(json, response.status));
   }
 
   if (json.code !== 200) {
-    throw new AuthError(json.code, json.message || "登录失败");
+    throw new AuthError(json.code ?? response.status, loginErrorMessage(json, response.status));
   }
 
   const { token, username: returnedUsername } = json.data as LoginResult;
   return { token, username: returnedUsername ?? username };
+}
+
+/** Probe whether the stored access token is still accepted by the backend. */
+export async function fetchMe(): Promise<MeResult> {
+  // Lazy import to avoid a circular dependency at module load time.
+  const { apiFetch } = await import("./httpClient");
+  const response = await apiFetch("/api/auth/me", { method: "GET" }, {
+    errorMessage: "Session probe failed",
+  });
+  const json = (await response.json().catch(() => null)) as
+    | { data?: { username?: string; owner_key?: string } }
+    | null;
+  const username = String(json?.data?.username ?? "").trim();
+  const ownerKey = String(json?.data?.owner_key ?? "").trim();
+  if (!username) {
+    throw new AuthError(401, "token_invalid");
+  }
+  return { username, ownerKey };
 }
 
 export async function logout(token: string): Promise<void> {
@@ -64,8 +119,8 @@ export async function logout(token: string): Promise<void> {
   }
 }
 
-const AUTH_TOKEN_KEY = "authToken";
-const AUTH_USER_KEY = "authUser";
+export const AUTH_TOKEN_KEY = "authToken";
+export const AUTH_USER_KEY = "authUser";
 
 export function saveAuth(token: string, username: string): void {
   localStorage.setItem(AUTH_TOKEN_KEY, token);

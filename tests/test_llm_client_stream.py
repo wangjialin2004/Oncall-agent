@@ -47,6 +47,38 @@ def sse_raw(payload: dict) -> str:
 
 
 @pytest.mark.asyncio
+async def test_default_llm_client_recreated_when_cached_client_is_closed(monkeypatch):
+    from app.core import llm_client as llm_module
+
+    await llm_module.close_default_llm_client()
+
+    class FakeDefaultClient:
+        def __init__(self) -> None:
+            self.is_closed = False
+
+        async def aclose(self) -> None:
+            self.is_closed = True
+
+    created: list[FakeDefaultClient] = []
+
+    def fake_new_llm_client():
+        client = FakeDefaultClient()
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(llm_module, "new_llm_client", fake_new_llm_client)
+
+    first = await llm_module.get_default_llm_client()
+    await first.aclose()
+    second = await llm_module.get_default_llm_client()
+
+    assert second is not first
+    assert created == [first, second]
+
+    await llm_module.close_default_llm_client()
+
+
+@pytest.mark.asyncio
 async def test_llm_client_stream_complete_yields_delta_content_chunks():
     http_client = FakeAsyncClient(
         [

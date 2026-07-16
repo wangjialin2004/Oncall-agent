@@ -4,7 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.services.auth_service import auth_service
-from app.services.session_scope_service import require_session_owner
+from app.services.session_scope_service import (
+    AuthenticatedPrincipal,
+    require_authenticated_principal,
+    require_session_owner,
+)
 
 router = APIRouter()
 
@@ -18,7 +22,24 @@ class LoginRequest(BaseModel):
 async def login(request: LoginRequest):
     username = request.username.strip()
     if not username or not request.password:
-        raise HTTPException(status_code=401, detail="username and password are required")
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": 401,
+                "message": "username and password are required",
+                "detail": "credentials_required",
+            },
+        )
+
+    if not auth_service.authenticate(username, request.password):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": 401,
+                "message": "invalid username or password",
+                "detail": "bad_credentials",
+            },
+        )
 
     return {
         "code": 200,
@@ -26,6 +47,20 @@ async def login(request: LoginRequest):
         "data": {
             "token": auth_service.create_access_token(username),
             "username": username,
+        },
+    }
+
+
+@router.get("/auth/me")
+async def me(principal: AuthenticatedPrincipal = Depends(require_authenticated_principal)):
+    """Probe whether the caller's access token is still valid."""
+
+    return {
+        "code": 200,
+        "message": "success",
+        "data": {
+            "username": principal.username,
+            "owner_key": principal.owner_key,
         },
     }
 

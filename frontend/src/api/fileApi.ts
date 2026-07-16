@@ -1,4 +1,4 @@
-import { getSessionOwnerToken } from "./agentStream";
+import { apiFetch } from "./httpClient";
 
 type UploadedFileMetadata = {
   file_id: string;
@@ -21,27 +21,22 @@ export type UploadFileResult = {
 };
 
 export async function uploadFile(file: File): Promise<UploadFileResult> {
-  const authToken = localStorage.getItem("authToken");
-  const headers: Record<string, string> = {
-    "X-Session-Owner": getSessionOwnerToken(),
-  };
-  if (authToken) {
-    headers["Authorization"] = `Bearer ${authToken}`;
-  }
-
   const formData = new FormData();
   formData.append("file", file);
 
-  const response = await fetch("/api/files", {
-    method: "POST",
-    headers,
-    body: formData,
-  });
+  const response = await apiFetch(
+    "/api/files",
+    {
+      method: "POST",
+      body: formData,
+    },
+    { json: false, errorMessage: "文件上传失败" },
+  );
 
   const json = (await response.json().catch(() => null)) as UploadFileEnvelope | null;
 
-  if (!response.ok || !json) {
-    throw new Error(json?.message || `HTTP ${response.status}`);
+  if (!json) {
+    throw new Error("文件上传失败");
   }
 
   if (json.code !== 200 || !json.data?.file?.original_name) {

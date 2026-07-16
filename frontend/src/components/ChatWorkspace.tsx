@@ -11,6 +11,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import type { AgentMode, ChatMessage, RunStatus } from "../types/events";
+import { sanitizeAssistantContent } from "../utils/assistantContent";
 
 export type PendingAttachment = {
   fileId: string;
@@ -26,6 +27,8 @@ type ChatWorkspaceProps = {
   /** Whether the next send should request aggressive checkpoint replay. */
   checkpointReplay: boolean;
   onCheckpointReplayChange: (value: boolean) => void;
+  /** W10: structured missing params for quick-fill chips. */
+  clarifyChips?: string[];
   onModeChange: (mode: AgentMode) => void;
   onSend: (message: string) => void;
   onRemoveAttachment: (fileId: string) => void;
@@ -42,6 +45,7 @@ export function ChatWorkspace({
   selectedId,
   checkpointReplay,
   onCheckpointReplayChange,
+  clarifyChips = [],
   onModeChange,
   onSend,
   onRemoveAttachment,
@@ -200,7 +204,9 @@ export function ChatWorkspace({
                     : {})}
                 >
                   {item.role === "assistant" ? (
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {sanitizeAssistantContent(item.content)}
+                    </ReactMarkdown>
                   ) : (
                     item.content
                   )}
@@ -222,6 +228,23 @@ export function ChatWorkspace({
         <label className="sr-only" htmlFor="message-input">
           消息
         </label>
+        {clarifyChips.length > 0 && !isRunning ? (
+          <div className="clarify-chips" role="group" aria-label="澄清快捷填槽">
+            {clarifyChips.map((param) => (
+              <button
+                key={param}
+                type="button"
+                className="ghost clarify-chip"
+                onClick={() => {
+                  const snippet = `${param}=`;
+                  setMessage((current) => (current.includes(snippet) ? current : `${current}${current ? " " : ""}${snippet}`.trimStart()));
+                }}
+              >
+                {param}
+              </button>
+            ))}
+          </div>
+        ) : null}
         <button
           className="icon-button"
           type="button"

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -30,7 +31,8 @@ DEFAULT_EXPERT_TIMEOUT_SECONDS = 60.0
 
 SEMANTIC_ROUTER_SYSTEM_PROMPT = (
     "You are a routing classifier for an intelligent operations (OnCall) assistant. "
-    "Classify the user request into exactly one route:\n"
+    "Classify the user request into a primary route, and optionally list parallel secondary "
+    "routes when the request clearly spans multiple expert domains:\n"
     "- knowledge: documentation, concepts, generic how-to, runbooks, operating procedures, "
     "and knowledge-base Q&A. Use this for generic questions such as how to solve high CPU "
     "usage when no concrete target or time window is provided.\n"
@@ -38,7 +40,12 @@ SEMANTIC_ROUTER_SYSTEM_PROMPT = (
     "disk/latency/error-rate checks for a concrete host, service, pod, instance, or time window.\n"
     "- log: log inspection, error logs, exception stacks, log analysis\n"
     "- change: recent deploys/releases, config changes, rollbacks, change tickets\n"
-    "- diagnosis: complex or cross-domain incident root-cause analysis / troubleshooting\n"
+    "- diagnosis: complex or cross-domain incident root-cause analysis / troubleshooting. "
+    "When picked as primary, do not also list it in aux_routes.\n"
+    "aux_routes (optional) lists other expert routes that the user also clearly needs in "
+    "parallel, e.g. a request that simultaneously wants metric evidence and log evidence. "
+    "Leave it empty for single-intent requests. Never include the primary route itself, "
+    "never include 'diagnosis', and never invent a route outside the list above.\n"
     "Business priority rules:\n"
     "1. If the user asks for a generic solution, steps, explanation, or best practice "
     "without a specific observed target/time range, prefer knowledge even if resource words "
@@ -48,8 +55,10 @@ SEMANTIC_ROUTER_SYSTEM_PROMPT = (
     "3. Choose diagnosis when the request describes an ongoing incident, business impact, "
     "multiple symptoms, or asks for root-cause troubleshooting across domains.\n"
     "When unsure or the request spans multiple domains, prefer diagnosis. "
-    "Return only compact JSON with keys route, reason (short Chinese), and confidence "
-    '(0..1), e.g. {"route":"metric","reason":"询问告警","confidence":0.9}'
+    "Return only compact JSON with keys route, reason (short Chinese), confidence (0..1), "
+    'and optional aux_routes (string array), e.g. '
+    '{"route":"metric","reason":"询问告警","confidence":0.9} or '
+    '{"route":"diagnosis","reason":"多症状","confidence":0.8,"aux_routes":["metric","log"]}'
 )
 
 
@@ -59,6 +68,8 @@ class RouteDecision:
     reason: str
     confidence: float = 1.0
     hints: tuple[str, ...] = ()
+    aux_routes: tuple[str, ...] = ()
+    intent_relation: str = "primary"
 
 
 class SemanticRouteResult(BaseModel):
@@ -67,6 +78,14 @@ class SemanticRouteResult(BaseModel):
     )
     reason: str = Field(description="Short Chinese reason for the route decision.")
     confidence: float = Field(default=0.5, description="Confidence in [0, 1].")
+    aux_routes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional secondary expert routes observed in parallel with the primary. "
+            "Empty when the request is single-intent. Must not include the primary route "
+            "itself or the fallback 'diagnosis' expert."
+        ),
+    )
 
 
 SemanticRouter = Callable[..., RouteDecision | Awaitable[RouteDecision]]
@@ -74,6 +93,28 @@ SemanticRouter = Callable[..., RouteDecision | Awaitable[RouteDecision]]
 
 class RouterService:
     """Route user messages to one expert agent and stream its events."""
+
+    _CONCRETE_OPERATIONAL_TARGET = re.compile(
+        r"(?:\b[a-z0-9][a-z0-9._-]*(?:api|service|server|worker|pod)\b|[\u4e00-\u9fff]{2,}(?:服务|接口|实例|节点))",
+        re.IGNORECASE,
+    )
+    _INCIDENT_SIGNALS = (
+        "告警",
+        "不可用",
+        "故障",
+        "异常",
+        "错误率",
+        "健康检查失败",
+        "超时",
+        "宕机",
+        "崩溃",
+        "cpu",
+        "memory",
+        "内存",
+        "磁盘",
+        "延迟",
+        "响应时间",
+    )
 
     # Strong keywords keep the low-latency fast path. Weak keywords only hint
     # semantic routing so generic how-to questions are not hijacked by one word.
@@ -198,6 +239,7 @@ class RouterService:
     async def _semantic_route_message(
         self, message: str, hints: tuple[str, ...] = ()
     ) -> RouteDecision:
+        multilabel_enabled = getattr(config, "router_multilabel_enabled", True)
         if self.semantic_router:
             if self._semantic_router_accepts_hints():
                 result = self.semantic_router(message, hints=hints)
@@ -205,11 +247,18 @@ class RouterService:
                 result = self.semantic_router(message)
             if inspect.isawaitable(result):
                 result = await result
+            aux_routes, intent_relation = self._normalize_aux_routes(
+                getattr(result, "aux_routes", None),
+                primary=result.route,
+                enabled=multilabel_enabled,
+            )
             return RouteDecision(
                 route=result.route,
                 reason=result.reason,
                 confidence=getattr(result, "confidence", 1.0),
                 hints=getattr(result, "hints", hints),
+                aux_routes=aux_routes,
+                intent_relation=intent_relation,
             )
 
         if self.llm_client is None:
@@ -222,20 +271,59 @@ class RouterService:
                 "CPU/memory/disk/latency/error-rate words appear. For generic how-to or "
                 "runbook questions without a concrete target or time window, prefer knowledge."
             )
+        # 模型分层：路由是分类任务，用 planner(轻模型) 而不是默认 reasoner(深度模型)，
+        # 路由单次从 10~30s 降到 2~5s。空字符串表示退回 LLMClient 默认模型，兼容老配置。
+        planner_model = str(getattr(config, "llm_planner_model", "") or "") or None
         response = await self.llm_client.complete(
             [
                 ChatMessage(role="system", content=SEMANTIC_ROUTER_SYSTEM_PROMPT),
                 ChatMessage(role="user", content=user_content),
             ],
             temperature=0,
+            model=planner_model,
         )
         result = self._parse_semantic_route_response(response.content)
+        aux_routes, intent_relation = self._normalize_aux_routes(
+            result.aux_routes,
+            primary=result.route,
+            enabled=multilabel_enabled,
+        )
         return RouteDecision(
             route=result.route,
             reason=f"llm_semantic_{result.route}",
             confidence=result.confidence,
             hints=hints,
+            aux_routes=aux_routes,
+            intent_relation=intent_relation,
         )
+
+    @staticmethod
+    def _normalize_aux_routes(
+        aux_routes: Any,
+        primary: str,
+        enabled: bool,
+    ) -> tuple[tuple[str, ...], str]:
+        if not enabled:
+            return ((), "primary")
+        if not aux_routes:
+            return ((), "primary")
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in aux_routes:
+            if not isinstance(item, str):
+                continue
+            route = item.strip()
+            if not route or route == primary or route == "diagnosis":
+                continue
+            if route not in EXPERT_ROUTES:
+                continue
+            if route in seen:
+                continue
+            seen.add(route)
+            cleaned.append(route)
+        if not cleaned:
+            return ((), "primary")
+        return (tuple(cleaned), "parallel")
 
     def _semantic_router_accepts_hints(self) -> bool:
         if self.semantic_router is None:
@@ -264,6 +352,16 @@ class RouterService:
             if start == -1 or end == -1 or start > end:
                 raise
             payload = json.loads(text[start : end + 1])
+        if not isinstance(payload, dict):
+            return SemanticRouteResult.model_validate(payload)
+        aux = payload.get("aux_routes", [])
+        if aux is None:
+            aux = []
+        if isinstance(aux, str):
+            aux = [aux]
+        if not isinstance(aux, list):
+            aux = []
+        payload = {**payload, "aux_routes": aux}
         return SemanticRouteResult.model_validate(payload)
 
     async def _resolve_route(self, message: str) -> RouteDecision:
@@ -291,7 +389,32 @@ class RouterService:
                 reason=f"low_confidence_{semantic.route}_default_diagnosis",
                 confidence=semantic.confidence,
             )
+        if self._should_override_knowledge_for_incident(message, semantic):
+            return RouteDecision(
+                route=DEFAULT_ROUTE,
+                reason="concrete_incident_override_knowledge",
+                confidence=semantic.confidence,
+                hints=semantic.hints,
+                aux_routes=semantic.aux_routes,
+                intent_relation=semantic.intent_relation,
+            )
         return semantic
+
+    @classmethod
+    def _should_override_knowledge_for_incident(
+        cls, message: str, decision: RouteDecision
+    ) -> bool:
+        """Protect incident triage from a semantic knowledge-route false positive."""
+        if not bool(
+            getattr(config, "router_concrete_incident_override_enabled", True)
+        ):
+            return False
+        if decision.route != "knowledge":
+            return False
+        normalized = str(message or "").strip().lower()
+        return bool(cls._CONCRETE_OPERATIONAL_TARGET.search(normalized)) and any(
+            signal in normalized for signal in cls._INCIDENT_SIGNALS
+        )
 
     # ------------------------------------------------------------------ streaming
 

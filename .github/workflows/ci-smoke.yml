@@ -1,0 +1,32 @@
+name: ci-smoke
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package (dev)
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[dev]"
+      - name: Run ci-smoke tests
+        env:
+          DASHSCOPE_API_KEY: ci-smoke-dummy-key
+        run: |
+          python -m pytest \
+            tests/test_m1_close_the_loop.py \
+            tests/test_m1_w2_context_checkpoint.py \
+            tests/test_m1_w3_replan_latency.py \
+            tests/test_m1_w4_latency_exit.py \
+            tests/test_harness_verifier.py \
+            tests/test_harness_checkpoint.py \
+            tests/test_context_integration.py \
+            -q --tb=line --no-cov

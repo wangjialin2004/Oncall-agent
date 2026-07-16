@@ -13,6 +13,10 @@ class HarnessLimits:
     max_steps: int
     token_budget: int
     timeout_seconds: float
+    # 单步 LLM “下一步判断”独立限时；超时即触发 step_timeout 事件并立即收尾
+    step_timeout_seconds: float = 25.0
+    # 降级路径（knowledge_expert / raw_vector）独立限时，防止降级再卡死 SSE
+    fallback_timeout_seconds: float = 30.0
     # 连续“重复工具调用且无新增证据”达到该阈值则提前收尾（防空转）
     no_progress_limit: int = 2
 

@@ -4,6 +4,7 @@ import type {
   AgentStreamEvent,
   TimelineEvent,
 } from "../types/events";
+import { apiFetch } from "./httpClient";
 
 export type StreamAgentArgs = {
   sessionId: string;
@@ -19,19 +20,6 @@ export type StreamAgentArgs = {
    */
   checkpointReplay?: boolean;
 };
-
-const SESSION_OWNER_STORAGE_KEY = "sessionOwnerToken";
-
-export function getSessionOwnerToken(): string {
-  const existing = localStorage.getItem(SESSION_OWNER_STORAGE_KEY);
-  if (existing) {
-    return existing;
-  }
-
-  const token = `owner-${crypto.randomUUID()}`;
-  localStorage.setItem(SESSION_OWNER_STORAGE_KEY, token);
-  return token;
-}
 
 /** Translate one backend SSE payload into the frontend event union. */
 export function translateBackendEvent(
@@ -63,14 +51,36 @@ export function translateBackendEvent(
         case_id: String(payload.case_id ?? ""),
         report: String(payload.report ?? ""),
       };
-    case "complete":
+    case "complete": {
+      const distill = payload.distill_draft as Record<string, unknown> | null | undefined;
+      const clarification = payload.clarification as Record<string, unknown> | null | undefined;
+      const missing = payload.missing_params;
       return {
         type: "complete",
         route,
         answer: String(payload.answer ?? ""),
         case_id: String(payload.case_id ?? ""),
         events: (payload.events as TimelineEvent[]) ?? [],
+        distill_draft: distill
+          ? {
+              experience_id: String(distill.experience_id ?? ""),
+              status: String(distill.status ?? "pending"),
+              enabled: Boolean(distill.enabled),
+              requires_confirm: distill.requires_confirm !== false,
+            }
+          : null,
+        missing_params: Array.isArray(missing) ? missing.map((x) => String(x)) : undefined,
+        clarification: clarification
+          ? {
+              missing_params: Array.isArray(clarification.missing_params)
+                ? (clarification.missing_params as unknown[]).map((x) => String(x))
+                : [],
+              defaults: (clarification.defaults as Record<string, string>) ?? {},
+              question: clarification.question ? String(clarification.question) : "",
+            }
+          : null,
       };
+    }
     case "error":
       return {
         type: "error",
@@ -149,31 +159,21 @@ export function parseSseFrame(frame: string): Record<string, unknown> | null {
 }
 
 export async function streamAgent(args: StreamAgentArgs): Promise<void> {
-  const authToken = localStorage.getItem("authToken");
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept: "text/event-stream",
-    "X-Session-Owner": getSessionOwnerToken(),
-  };
-  if (authToken) {
-    headers["Authorization"] = `Bearer ${authToken}`;
-  }
-
-  const response = await fetch("/api/assistant", {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      Id: args.sessionId,
-      Question: args.message,
-      AttachmentIds: args.attachmentIds ?? [],
-      CheckpointReplay: args.checkpointReplay,
-    }),
-    signal: args.signal,
-  });
-
-  if (!response.ok) {
-    throw new Error(`Agent stream failed with HTTP ${response.status}`);
-  }
+  const response = await apiFetch(
+    "/api/assistant",
+    {
+      method: "POST",
+      headers: { Accept: "text/event-stream" },
+      body: JSON.stringify({
+        Id: args.sessionId,
+        Question: args.message,
+        AttachmentIds: args.attachmentIds ?? [],
+        CheckpointReplay: args.checkpointReplay,
+      }),
+      signal: args.signal,
+    },
+    { errorMessage: "Agent stream failed" },
+  );
 
   if (!response.body) {
     throw new Error("Agent stream returned an empty body");

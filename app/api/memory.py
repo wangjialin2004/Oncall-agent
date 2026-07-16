@@ -5,6 +5,8 @@ from loguru import logger
 
 from app.config import config
 from app.models.memory import (
+    DistillConfirmRequest,
+    DistillRejectRequest,
     ExperienceMemoryUpdateRequest,
     ManualExperienceCreateRequest,
     MemoryFeedbackRequest,
@@ -64,7 +66,10 @@ async def create_memory_from_feedback(
 
 
 @router.post("/memory/experiences")
-async def create_manual_experience(request: ManualExperienceCreateRequest):
+async def create_manual_experience(
+    request: ManualExperienceCreateRequest,
+    _owner_key: str = Depends(require_session_owner),
+):
     try:
         experience_id = experience_memory_service.create_manual(
             project_id=config.project_id,
@@ -96,6 +101,104 @@ async def list_experiences(
     return {"code": 200, "message": "success", "data": memories}
 
 
+@router.post("/memory/distill/confirm")
+async def confirm_distill_draft(
+    request: DistillConfirmRequest,
+    owner_key: str = Depends(require_session_owner),
+):
+    """Promote a pending auto-distill draft to active recallable experience."""
+    try:
+        memory = experience_memory_service.confirm_draft(
+            request.experience_id,
+            owner_key=owner_key,
+        )
+        if memory is None:
+            raise HTTPException(status_code=404, detail="draft experience not found")
+        logger.info(
+            "distill confirm owner={} experience_id={} note={}",
+            owner_key,
+            request.experience_id,
+            (request.note or "")[:200],
+        )
+        return {
+            "code": 200,
+            "message": "success",
+            "data": {
+                "experience_id": memory["experience_id"],
+                "status": memory.get("status"),
+                "enabled": memory.get("enabled"),
+                "executed": False,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"distill confirm failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/memory/distill/reject")
+async def reject_distill_draft(
+    request: DistillRejectRequest,
+    owner_key: str = Depends(require_session_owner),
+):
+    try:
+        memory = experience_memory_service.reject_draft(
+            request.experience_id,
+            owner_key=owner_key,
+        )
+        if memory is None:
+            raise HTTPException(status_code=404, detail="draft experience not found")
+        logger.info(
+            "distill reject owner={} experience_id={} note={}",
+            owner_key,
+            request.experience_id,
+            (request.note or "")[:200],
+        )
+        return {
+            "code": 200,
+            "message": "success",
+            "data": {
+                "experience_id": memory["experience_id"],
+                "status": memory.get("status"),
+                "enabled": memory.get("enabled"),
+                "executed": False,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"distill reject failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/memory/distill/pending")
+async def list_pending_distill(
+    limit: int = 50,
+    session_id: str = "",
+    owner_key: str = Depends(require_session_owner),
+):
+    """List pending auto-distill drafts for the current project (auth required)."""
+    try:
+        memories = experience_memory_service.list_pending(
+            project_id=config.project_id,
+            limit=max(1, min(limit, 200)),
+            session_id=session_id or "",
+        )
+        # Shallow owner filter: prefer drafts whose feedback id embeds owner_key.
+        if owner_key:
+            filtered = []
+            for item in memories:
+                fb = str(item.get("source_feedback_id") or "")
+                if not fb or owner_key in fb or fb.startswith("distill:"):
+                    filtered.append(item)
+            memories = filtered
+        return {"code": 200, "message": "success", "data": memories}
+    except Exception as exc:
+        logger.error(f"list pending distill failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/memory/experiences/{experience_id}")
 async def get_experience(experience_id: str):
     memory = experience_memory_service.get(experience_id)
@@ -105,7 +208,11 @@ async def get_experience(experience_id: str):
 
 
 @router.patch("/memory/experiences/{experience_id}")
-async def update_experience(experience_id: str, request: ExperienceMemoryUpdateRequest):
+async def update_experience(
+    experience_id: str,
+    request: ExperienceMemoryUpdateRequest,
+    _owner_key: str = Depends(require_session_owner),
+):
     updated = experience_memory_service.update(
         experience_id,
         enabled=request.enabled,
@@ -121,7 +228,10 @@ async def update_experience(experience_id: str, request: ExperienceMemoryUpdateR
 
 
 @router.post("/memory/experiences/rebuild-index")
-async def rebuild_index(project_id: str | None = None):
+async def rebuild_index(
+    project_id: str | None = None,
+    _owner_key: str = Depends(require_session_owner),
+):
     indexed = experience_memory_service.rebuild_index(project_id=project_id or config.project_id)
     return {"code": 200, "message": "success", "data": {"indexed": indexed}}
 
@@ -148,7 +258,11 @@ async def get_service_knowledge(service_name: str, environment: str = "prod"):
 
 
 @router.put("/memory/services/{service_name}")
-async def upsert_service(service_name: str, request: ServiceUpsertRequest):
+async def upsert_service(
+    service_name: str,
+    request: ServiceUpsertRequest,
+    _owner_key: str = Depends(require_session_owner),
+):
     service_knowledge_service.upsert_service(
         project_id=config.project_id,
         service_name=service_name,
@@ -162,7 +276,11 @@ async def upsert_service(service_name: str, request: ServiceUpsertRequest):
 
 
 @router.put("/memory/services/{service_name}/baselines")
-async def upsert_service_baseline(service_name: str, request: ServiceBaselineRequest):
+async def upsert_service_baseline(
+    service_name: str,
+    request: ServiceBaselineRequest,
+    _owner_key: str = Depends(require_session_owner),
+):
     service_knowledge_service.upsert_baseline(
         project_id=config.project_id,
         service_name=service_name,
@@ -181,6 +299,7 @@ async def delete_service_baseline(
     service_name: str,
     metric_name: str,
     environment: str = "prod",
+    _owner_key: str = Depends(require_session_owner),
 ):
     deleted = service_knowledge_service.delete_baseline(
         project_id=config.project_id,
@@ -194,7 +313,7 @@ async def delete_service_baseline(
 
 
 @router.post("/memory/services/import-seed")
-async def import_service_seed():
+async def import_service_seed(_owner_key: str = Depends(require_session_owner)):
     imported = await service_knowledge_service.import_from_monitor_mcp(project_id=config.project_id)
     return {"code": 200, "message": "success", "data": {"imported": imported}}
 

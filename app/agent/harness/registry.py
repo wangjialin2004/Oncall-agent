@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from loguru import logger
 
 from app.agent.experts.base import collect_tools
-from app.agent.harness.subagent import create_delegate_tool
+from app.agent.harness.subagent import (
+    create_delegate_parallel_tool,
+    create_delegate_tool,
+)
 from app.config import config
 from app.core.runtime_tools import RuntimeTool
 from app.tools import (
@@ -90,8 +93,34 @@ class HarnessToolRegistry:
                 source="subagent",
                 permission="read_delegate",
             )
+            if bool(getattr(config, "harness_parallel_delegation_enabled", True)):
+                parallel_tool = create_delegate_parallel_tool(
+                    session_id=session_id,
+                    trace_id=trace_id,
+                    context_getter=context_getter,
+                )
+                tools.append(parallel_tool)
+                metadata[parallel_tool.name] = ToolMetadata(
+                    name=parallel_tool.name,
+                    source="subagent",
+                    permission="read_delegate",
+                )
 
         return ToolCatalog(tools=tools, metadata=metadata)
+
+    def context_tools(self, state: object) -> list[RuntimeTool]:
+        """Return safe ContextState tools when the stateful context feature is on."""
+        if not bool(getattr(config, "harness_context_tools_enabled", True)):
+            return []
+        try:
+            from app.agent.context.state import AgentContextState
+            from app.agent.context.tools import build_runtime_tools
+        except Exception as exc:  # pragma: no cover - defensive import guard
+            logger.warning("Context tools unavailable: {}", exc)
+            return []
+        if not isinstance(state, AgentContextState):
+            return []
+        return build_runtime_tools(state)
 
 
 def _tools_for_route(route: str) -> tuple[tuple[RuntimeTool, ...], str | tuple[str, ...] | None]:

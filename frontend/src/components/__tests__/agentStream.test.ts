@@ -145,8 +145,8 @@ describe("streamAgent", () => {
     localStorage.clear();
   });
 
-  it("sends the session owner header required by the assistant API", async () => {
-    localStorage.setItem("sessionOwnerToken", "owner-a");
+  it("sends the Authorization bearer token required by the assistant API", async () => {
+    localStorage.setItem("authToken", "token-a");
     const fetchMock = vi.fn(async () =>
       sseResponse([frame({ type: "complete", route: "metric", answer: "ok", case_id: "", events: [] })]),
     );
@@ -157,13 +157,13 @@ describe("streamAgent", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/assistant",
       expect.objectContaining({
-        headers: expect.objectContaining({ "X-Session-Owner": "owner-a" }),
+        headers: expect.objectContaining({ Authorization: "Bearer token-a" }),
       }),
     );
   });
 
   it("includes attachment ids in the assistant request body", async () => {
-    localStorage.setItem("sessionOwnerToken", "owner-a");
+    localStorage.setItem("authToken", "token-a");
     const fetchMock = vi.fn(async () =>
       sseResponse([frame({ type: "complete", route: "metric", answer: "ok", case_id: "", events: [] })]),
     );
@@ -191,7 +191,7 @@ describe("streamAgent", () => {
   });
 
   it("forwards checkpointReplay=true to the assistant request body", async () => {
-    localStorage.setItem("sessionOwnerToken", "owner-a");
+    localStorage.setItem("authToken", "token-a");
     const fetchMock = vi.fn(async () =>
       sseResponse([frame({ type: "complete", route: "metric", answer: "ok", case_id: "", events: [] })]),
     );
@@ -219,7 +219,7 @@ describe("streamAgent", () => {
   });
 
   it("emits route and complete events from the SSE stream", async () => {
-    localStorage.setItem("sessionOwnerToken", "owner-a");
+    localStorage.setItem("authToken", "token-a");
     const onEvent = vi.fn();
     vi.stubGlobal(
       "fetch",
@@ -259,11 +259,14 @@ describe("streamAgent", () => {
       answer: "diagnosis report",
       case_id: "case-1",
       events: [],
+      distill_draft: null,
+      missing_params: undefined,
+      clarification: null,
     });
   });
 
   it("emits each event when multiple SSE frames arrive in one network chunk", async () => {
-    localStorage.setItem("sessionOwnerToken", "owner-a");
+    localStorage.setItem("authToken", "token-a");
     const onEvent = vi.fn();
     vi.stubGlobal(
       "fetch",
@@ -288,11 +291,14 @@ describe("streamAgent", () => {
       answer: "first second",
       case_id: "",
       events: [],
+      distill_draft: null,
+      missing_params: undefined,
+      clarification: null,
     });
   });
 
   it("keeps streaming when SSE frames and multibyte content are split across tiny chunks", async () => {
-    localStorage.setItem("sessionOwnerToken", "owner-a");
+    localStorage.setItem("authToken", "token-a");
     const onEvent = vi.fn();
     const encoder = new TextEncoder();
     const bytes = encoder.encode(
@@ -317,6 +323,9 @@ describe("streamAgent", () => {
       answer: "实时输出",
       case_id: "",
       events: [],
+      distill_draft: null,
+      missing_params: undefined,
+      clarification: null,
     });
   });
 });

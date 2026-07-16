@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -59,12 +59,14 @@ vi.mock("../../api/agentStream", () => ({
     onEvent({
       type: "tool_event",
       agent: "harness",
-      tool: "get_service_ports_status",
+      tool: "search_app_logs",
       stage: "complete",
       status: "completed",
       summary: "端口状态已确认",
       payload: {
-        arguments: { timezone: "Asia/Shanghai" },
+        arguments: { keyword: "redis", level: "WARN", limit: 50 },
+        result:
+          '{"status":"success","source":"local_logs","logs":[],"total":0,"query":{"keyword":"redis","level":"WARN","limit":50}}',
         tool_call_id: "call-port-status",
       },
       duration_ms: 246.66,
@@ -85,7 +87,16 @@ vi.mock("../../api/agentStream", () => ({
 }));
 
 vi.mock("../../api/authApi", () => ({
+  AuthError: class AuthError extends Error {
+    code: number;
+    constructor(code: number, message: string) {
+      super(message);
+      this.name = "AuthError";
+      this.code = code;
+    }
+  },
   clearAuth: vi.fn(),
+  fetchMe: vi.fn(async () => ({ username: "tester", ownerKey: "owner1" })),
   loadAuth: vi.fn(() => ({ token: "test-token", username: "tester" })),
   logout: vi.fn(async () => {}),
 }));
@@ -112,6 +123,13 @@ vi.mock("../../api/conversationApi", () => ({
   deleteConversation: vi.fn(async () => {}),
 }));
 
+async function waitForChatReady() {
+  await waitFor(() => {
+    expect(screen.queryByText("正在校验登录状态…")).not.toBeInTheDocument();
+  });
+  return screen.getByLabelText("消息");
+}
+
 describe("App", () => {
   afterEach(() => {
     cleanup();
@@ -122,31 +140,54 @@ describe("App", () => {
 
   it("sends a message and renders realtime agent events", async () => {
     const user = userEvent.setup();
+    const { getConversation } = await import("../../api/conversationApi");
     render(<App />);
+    // Wait for the mount-time session hydrate so it cannot wipe streamed events.
+    await waitFor(() => expect(vi.mocked(getConversation)).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByLabelText("消息")).toBeInTheDocument());
 
     await user.selectOptions(screen.getByLabelText("模式"), "auto");
     await user.type(screen.getByLabelText("消息"), "checkout-api slow");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByText("智能体过程")).toBeInTheDocument();
-    expect(await screen.findByText("路由分发")).toBeInTheDocument();
-    expect(await screen.findByText("综合诊断开始")).toBeInTheDocument();
-    expect(await screen.findByText("已生成调度计划")).toBeInTheDocument();
-    expect(await screen.findByText("进入专家：日志分析专家")).toBeInTheDocument();
-    expect(await screen.findByText("进入子专家执行")).toBeInTheDocument();
-    expect(await screen.findByText("工具执行")).toBeInTheDocument();
-    expect(screen.getByText("工具执行").closest("summary")).not.toHaveTextContent("get_service_ports_status");
-    for (const detailsToggle of screen.getAllByText("查看调度详情")) {
-      await user.click(detailsToggle);
-    }
-    await user.click(screen.getByText("工具执行"));
-    await user.click(screen.getAllByText("查看调度详情").at(-1)!);
-    expect(await screen.findByText("计划步骤")).toBeInTheDocument();
+    expect(await screen.findByTestId("process-chain")).toBeInTheDocument();
+    expect(await screen.findByText("执行链路")).toBeInTheDocument();
+    expect(await screen.findByLabelText("本轮过程摘要")).toBeInTheDocument();
+
+    await waitFor(() => {
+      const body = document.body.textContent || "";
+      expect(body.includes("识别请求") || body.includes("诊断路径")).toBe(true);
+      expect(body.includes("制定排查计划")).toBe(true);
+      expect(body.includes("查询应用日志") || body.includes("端口状态已确认")).toBe(true);
+      expect(body.includes("进入 log 专家")).toBe(false);
+      expect(body.includes("Created lightweight")).toBe(false);
+      expect(body.includes("search_app_logs")).toBe(false);
+    });
+
+    await user.click(await screen.findByRole("button", { name: "查看制定排查计划详情" }));
+    await user.click(await screen.findByRole("button", { name: "查看查询应用日志详情" }));
+
     expect(await screen.findByText("确认目标")).toBeInTheDocument();
+    expect(await screen.findByText("委派日志分析专家")).toBeInTheDocument();
     expect(await screen.findByText("服务名：指标查询需要目标")).toBeInTheDocument();
     expect(await screen.findByText("查询 checkout-api 同时间段 ERROR 日志")).toBeInTheDocument();
-    expect(await screen.findByText("工具名称")).toBeInTheDocument();
-    expect(await screen.findByText("get_service_ports_status")).toBeInTheDocument();
+    expect(await screen.findByText("端口状态已确认")).toBeInTheDocument();
+    expect(await screen.findByText("关键词")).toBeInTheDocument();
+    expect(await screen.findByText("redis")).toBeInTheDocument();
+    expect(await screen.findByText("关键结果")).toBeInTheDocument();
+
+    // Overview shows actual unique activity counters.
+    expect(await screen.findByTitle("工具调用次数")).toHaveTextContent("1 次工具");
+    expect(await screen.findByTitle("专家委派次数")).toHaveTextContent("1 次委派");
+    expect(await screen.findByTitle("有效证据数量")).toHaveTextContent("1 条证据");
+
+    // Technical IDs stay hidden.
+    expect(screen.queryByText("Trace")).not.toBeInTheDocument();
+    expect(screen.queryByText("Span")).not.toBeInTheDocument();
+    expect(screen.queryByText(/eval-M1-two-turn/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/session-1782204557962/)).not.toBeInTheDocument();
+
     expect((await screen.findAllByText("已完成")).length).toBeGreaterThan(0);
     expect((await screen.findAllByText("诊断结论已确认")).length).toBeGreaterThan(0);
   });
@@ -156,7 +197,7 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.type(screen.getByLabelText("消息"), "checkout-api slow");
+    await user.type(await waitForChatReady(), "checkout-api slow");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     const adopt = await screen.findByRole("button", { name: "采纳" });
@@ -184,7 +225,7 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.type(screen.getByRole("textbox"), "hello");
+    await user.type(await waitForChatReady(), "hello");
     await user.keyboard("{Enter}");
 
     expect((await screen.findAllByText("fallback answer")).length).toBeGreaterThan(0);
@@ -219,7 +260,7 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.type(screen.getByLabelText("消息"), "resume me");
+    await user.type(await waitForChatReady(), "resume me");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByTestId("checkpoint-resume-banner")).toBeInTheDocument();
@@ -252,7 +293,7 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.type(screen.getByLabelText("消息"), "resume conservatively");
+    await user.type(await waitForChatReady(), "resume conservatively");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByTestId("checkpoint-resume-banner")).toBeInTheDocument();

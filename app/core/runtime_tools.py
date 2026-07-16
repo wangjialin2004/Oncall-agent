@@ -24,6 +24,7 @@ class RuntimeTool:
         default_factory=lambda: {"type": "object", "properties": {}}
     )
     handler: ToolHandler | None = None
+    timeout_seconds: float | None = None
 
     async def run(self, arguments: dict[str, Any] | None = None) -> Any:
         if self.handler is None:
@@ -43,6 +44,7 @@ def make_runtime_tool(
     description: str,
     func: Callable[..., Any],
     args_schema: Any | None = None,
+    timeout_seconds: float | None = None,
 ) -> RuntimeTool:
     """Create a RuntimeTool from a normal Python function."""
 
@@ -64,6 +66,7 @@ def make_runtime_tool(
         description=description.strip(),
         parameters=parameters,
         handler=handler,
+        timeout_seconds=timeout_seconds,
     )
 
 
