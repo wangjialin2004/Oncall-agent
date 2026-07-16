@@ -18,6 +18,8 @@ jobs:
           python -m pip install -U pip
           pip install -e ".[dev]"
       - name: Run ci-smoke tests
+        env:
+          DASHSCOPE_API_KEY: ci-smoke-dummy-key
         run: |
           python -m pytest \
             tests/test_m1_close_the_loop.py \

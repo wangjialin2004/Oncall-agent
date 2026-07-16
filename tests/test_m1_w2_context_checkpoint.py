@@ -192,7 +192,7 @@ async def test_harness_stamps_recent_turns_on_complete(monkeypatch):
         llm_client=fake_llm,
         tools=[],
         limits=HarnessLimits(max_steps=2, token_budget=5000, timeout_seconds=10),
-        context_store=object(),
+        context_store=None,
     )
     events = [
         event
