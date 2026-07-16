@@ -435,7 +435,8 @@ def test_experience_memory_list_cached_and_evicted_on_create(tmp_db: Path) -> No
 
     first = service.list(project_id="proj", enabled=True, limit=10)
     assert len(first) == 1
-    list_key = f"memory:{db_tag}:exp:list:proj:1:10"
+    # W10: list key embeds enabled + status markers (status=None → "*").
+    list_key = f"memory:{db_tag}:exp:list:proj:1:*:10"
     assert cache.get(list_key) is not None, "list should be cached after first call"
 
     # Second call must come from cache — back-fill timestamp identical.

@@ -60,7 +60,11 @@ class LightweightPlanner:
         history_turns: int,
     ) -> HarnessPlan:
         route = str(getattr(route_decision, "route", "") or "diagnosis")
-        tool_names = [tool.name for tool in tools]
+        tool_names = [
+            tool.name
+            for tool in tools
+            if tool.name not in {"context_read", "context_note", "read_attachment"}
+        ]
         required_evidence = _required_evidence_for_route(route)
         required_params = _required_params_for_route(route)
 
@@ -109,6 +113,24 @@ class LightweightPlanner:
             logger.warning(f"harness LLM 规划失败，回退规则版：{exc}")
             return base
         return refined or base
+
+    def replan(
+        self,
+        plan: HarnessPlan,
+        *,
+        trigger: str,
+        gaps: Sequence[str] | None = None,
+        failed_tools: Sequence[str] | None = None,
+        aux_routes: Sequence[str] | None = None,
+    ) -> HarnessPlan:
+        """Rule-based mid-loop replan (no extra LLM by default)."""
+        return rule_replan(
+            plan,
+            trigger=trigger,
+            gaps=gaps,
+            failed_tools=failed_tools,
+            aux_routes=aux_routes,
+        )
 
     async def _llm_plan(
         self,
@@ -164,6 +186,81 @@ def _required_evidence_for_route(route: str) -> list[str]:
     if route == "knowledge":
         return ["知识库检索结果", "适用前提"]
     return ["指标/日志/变更至少一种证据", "证据缺口说明"]
+
+
+def rule_replan(
+    plan: HarnessPlan,
+    *,
+    trigger: str,
+    gaps: Sequence[str] | None = None,
+    failed_tools: Sequence[str] | None = None,
+    aux_routes: Sequence[str] | None = None,
+) -> HarnessPlan:
+    """Deterministically revise todos / required_evidence after investigation stalls.
+
+    LLM refinement is intentionally out of scope here; callers may optionally pass
+    the result through ``LightweightPlanner._llm_plan`` when LLM planning is on.
+    """
+    gaps = [str(g).strip() for g in (gaps or []) if str(g).strip()]
+    failed_tools = [str(t).strip() for t in (failed_tools or []) if str(t).strip()]
+    aux_routes = [str(r).strip() for r in (aux_routes or []) if str(r).strip()]
+
+    todos = list(plan.todos)
+    required = list(plan.required_evidence)
+    focus = plan.focus_route
+
+    # Promote still-missing evidence classes to the front of the todo list.
+    if gaps:
+        gap_todo = f"优先补齐证据缺口：{'、'.join(gaps[:4])}"
+        todos = [gap_todo, *[t for t in todos if t != gap_todo]]
+        # Keep original required classes; append explicit gap notice if absent.
+        if "证据缺口说明" not in required:
+            required = [*required, "证据缺口说明"]
+
+    if failed_tools:
+        fail_todo = (
+            f"先前工具失败（{', '.join(failed_tools[:4])}），"
+            "换时间窗/实例或改用同类只读工具再取证"
+        )
+        todos = [fail_todo, *[t for t in todos if t != fail_todo]]
+        if focus == "metric" and "指标曲线或告警" not in required:
+            required = ["指标曲线或告警", *required]
+        if focus == "log" and "错误日志样本" not in required:
+            required = ["错误日志样本", *required]
+
+    if aux_routes:
+        for aux in aux_routes:
+            for item in _required_evidence_for_route(aux):
+                if item not in required:
+                    required.append(item)
+            aux_todo = (
+                f"跨域补充：优先 delegate_parallel 或 delegate_to_expert({aux}) / {aux} 类只读工具"
+            )
+            if aux_todo not in todos:
+                todos.append(aux_todo)
+
+    if focus == "change":
+        # Never invent change facts; force explicit missing-source language.
+        change_todo = "变更源若不可用，必须声明 missing_change_datasource，禁止编造版本/操作人"
+        if change_todo not in todos:
+            todos.append(change_todo)
+
+    # Deduplicate while preserving order.
+    todos = list(dict.fromkeys(t for t in todos if t))
+    required = list(dict.fromkeys(r for r in required if r))
+
+    # Cap size so replan does not bloat the system message indefinitely.
+    todos = todos[:8]
+    required = required[:6]
+
+    return HarnessPlan(
+        todos=todos,
+        required_evidence=required,
+        focus_route=plan.focus_route,
+        required_params=list(plan.required_params),
+        available_tools=list(plan.available_tools),
+        history_turns=plan.history_turns,
+    )
 
 
 def _required_params_for_route(route: str) -> list[RequiredParam]:

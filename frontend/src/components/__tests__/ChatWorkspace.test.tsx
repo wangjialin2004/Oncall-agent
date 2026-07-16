@@ -42,6 +42,44 @@ describe("ChatWorkspace", () => {
     expect(screen.getByText("checkout-api")).toBeInTheDocument();
   });
 
+  it("hides leaked tool protocol from persisted assistant history", () => {
+    render(
+      <ChatWorkspace
+        mode="auto"
+        messages={[
+          {
+            id: "assistant-leaked",
+            role: "assistant",
+            content: [
+              "> 鈿狅笍 璇佹嵁鑷检锛氱疆淇″害 medium锛屾湰娆″洖绛斿瓨鍦ㄤ互涓嬭瘉鎹己鍙�",
+              "> - 4 个工具调用失败或被降级",
+              "",
+              "我先补一次日志证据。 to=multi_tool_use.parallel 乐彩广告",
+              '{"tool_uses":[{"recipient_name":"functions.search_app_logs","parameters":{"keyword":"OOM"}}]}## 现象',
+              "`payment-service` 内存使用率超过 85%。",
+            ].join("\n"),
+          },
+        ]}
+        runStatus="idle"
+        pendingAttachments={[]}
+        checkpointReplay={false}
+        onCheckpointReplayChange={vi.fn()}
+        onModeChange={vi.fn()}
+        onSend={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onUploadFile={vi.fn(async () => ({ fileId: "file_1", fileName: "runbook.md", deduplicated: false }))}
+        onStop={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("现象")).toBeInTheDocument();
+    expect(screen.getByText("payment-service")).toBeInTheDocument();
+    expect(screen.getByText(/证据自检：置信度 medium/)).toBeInTheDocument();
+    expect(screen.queryByText(/tool_uses/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/recipient_name/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/鈿/)).not.toBeInTheDocument();
+  });
+
   it("uploads a selected file and renders success feedback", async () => {
     const user = userEvent.setup();
     const onUploadFile = vi.fn(async () => ({

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -119,6 +120,7 @@ class LLMResponse:
     finish_reason: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: dict[str, Any] = field(default_factory=dict)
+    latency_ms: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +157,8 @@ class LLMClient:
         self.config = config
         self._owns_client = http_client is None
         self._client = http_client or httpx.AsyncClient(timeout=config.timeout)
+        self._closed = False
+        self._last_latency_ms: int = 0
 
     async def complete(
         self,
@@ -278,6 +282,7 @@ class LLMClient:
             finish_reason=finish_reason,
             tool_calls=self._parse_tool_calls(raw_tool_calls),
             usage=usage,
+            latency_ms=int(getattr(self, "_last_latency_ms", 0) or 0),
         )
         yield LLMStreamChunk(response=response)
 
@@ -291,11 +296,13 @@ class LLMClient:
         last_error: Exception | None = None
         for attempt in range(attempts):
             try:
+                started_at = time.perf_counter()
                 response = await self._client.post(
                     self._chat_completions_url(),
                     headers=self._headers(),
                     json=payload,
                 )
+                self._last_latency_ms = int((time.perf_counter() - started_at) * 1000)
             except httpx.HTTPError as exc:
                 last_error = LLMClientError(f"{self.config.provider} LLM request error: {exc}")
                 if attempt < attempts - 1:
@@ -400,10 +407,14 @@ class LLMClient:
         await asyncio.sleep(delay)
 
     async def aclose(self) -> None:
-        if self._owns_client:
-            await self._client.aclose()
-        else:
-            await self._client.aclose()
+        if self._closed:
+            return
+        self._closed = True
+        await self._client.aclose()
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed or bool(getattr(self._client, "is_closed", False))
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -495,6 +506,7 @@ class LLMClient:
             ),
             tool_calls=self._parse_tool_calls(message.get("tool_calls")),
             usage=usage,
+            latency_ms=int(getattr(self, "_last_latency_ms", 0) or 0),
         )
 
     @classmethod
@@ -611,3 +623,45 @@ def new_llm_client() -> LLMClient:
     from app.config import config
 
     return LLMClient(LLMClientConfig.from_settings(config))
+
+
+# ----------------------------------------------------------------- module singleton
+
+_default_client: LLMClient | None = None
+_default_client_lock = asyncio.Lock()
+
+
+async def get_default_llm_client() -> LLMClient:
+    """Return a process-wide shared :class:`LLMClient`.
+
+    Sharing the client means sharing its underlying ``httpx.AsyncClient`` (and
+    its connection pool). This avoids re-doing the TCP+TLS handshake on every
+    expert bootstrap and lets the harness/experts reuse warmed connections,
+    which is the single biggest TTFB win for steady-state traffic.
+
+    The client is created lazily on first call so importing this module stays
+    side-effect-free. ``aclose`` is intentionally idempotent and only releases
+    the underlying HTTP client when ``close_default_llm_client`` is invoked
+    (typically from the FastAPI lifespan).
+    """
+    global _default_client
+    if _default_client is not None and not _default_client.is_closed:
+        return _default_client
+    async with _default_client_lock:
+        if _default_client is None or _default_client.is_closed:
+            _default_client = new_llm_client()
+    return _default_client
+
+
+async def close_default_llm_client() -> None:
+    """Close the shared client (idempotent). Called from FastAPI lifespan."""
+    global _default_client
+    client = _default_client
+    if client is None:
+        return
+    _default_client = None
+    try:
+        await client.aclose()
+    except Exception:
+        # Shutdown is best-effort; nothing useful to do if the pool is already gone.
+        pass

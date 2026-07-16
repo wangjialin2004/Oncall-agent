@@ -17,7 +17,7 @@ from __future__ import annotations
 import time
 
 from fastapi import FastAPI
-from prometheus_client import Gauge, Histogram, make_asgi_app
+from prometheus_client import Counter, Gauge, Histogram, make_asgi_app
 
 try:
     import psutil
@@ -59,6 +59,186 @@ REQUEST_LATENCY_SECONDS = Histogram(
     "HTTP 请求处理耗时（秒）",
     labelnames=("method", "route", "status"),
 )
+
+# --- Agent harness quality metrics (M3 W9) ------------------------------------
+AGENT_RUNS_TOTAL = Counter(
+    "agent_runs_total",
+    "Harness runs by terminal status",
+    labelnames=("status",),
+)
+AGENT_LATENCY_SECONDS = Histogram(
+    "agent_latency_seconds",
+    "Harness end-to-end latency seconds",
+    buckets=(5, 15, 30, 60, 90, 120, 180, 240, 300),
+)
+AGENT_RE_EVIDENCE_TOTAL = Counter(
+    "agent_re_evidence_total",
+    "Re-evidence rounds triggered",
+)
+AGENT_REPLAN_TOTAL = Counter(
+    "agent_replan_total",
+    "Replan events triggered",
+)
+AGENT_DELEGATE_PARALLEL_TOTAL = Counter(
+    "agent_delegate_parallel_total",
+    "Parallel delegation fan-outs",
+)
+
+# --- Agent cost / tool metrics (M3 W11) ----------------------------------------
+# Low-cardinality only: role ∈ {prompt,completion,total}; tool via whitelist.
+AGENT_TOKENS_TOTAL = Counter(
+    "agent_tokens_total",
+    "LLM tokens consumed by harness runs",
+    labelnames=("role",),
+)
+AGENT_TOOL_CALLS_TOTAL = Counter(
+    "agent_tool_calls_total",
+    "Harness tool calls by tool name and status",
+    labelnames=("tool", "status"),
+)
+
+# Tool-name whitelist (unknown → "other") to avoid Prometheus cardinality blow-up.
+_TOOL_NAME_WHITELIST = frozenset(
+    {
+        "delegate_to_expert",
+        "delegate_parallel",
+        "search_knowledge",
+        "search_docs",
+        "vector_search",
+        "search_app_logs",
+        "query_prometheus",
+        "query_metrics",
+        "get_metric",
+        "list_metrics",
+        "query_range",
+        "get_change_events",
+        "search_changes",
+        "get_context",
+        "update_context",
+        "recall_experience",
+        "other",
+    }
+)
+_TOOL_STATUS_OK = frozenset({"completed", "success", "ok"})
+_TOOL_STATUS_ERROR = frozenset({"failed", "error"})
+_TOOL_STATUS_TIMEOUT = frozenset({"timeout", "cancelled", "canceled"})
+_TOKEN_ROLES = frozenset({"prompt", "completion", "total"})
+
+
+def _normalize_tool_name(tool: str) -> str:
+    name = (tool or "").strip().lower() or "other"
+    # Keep original casing only for known tools; map variants to lower for match.
+    for known in _TOOL_NAME_WHITELIST:
+        if name == known.lower():
+            return known
+    # Common aliases / substrings collapse into known buckets when exact miss.
+    if "prometheus" in name or name.endswith("_metric") or "metrics" in name:
+        return "query_prometheus" if "query_prometheus" in _TOOL_NAME_WHITELIST else "other"
+    if "log" in name:
+        return "search_app_logs"
+    if "knowledge" in name or "vector" in name or "doc" in name:
+        return "search_knowledge"
+    if "change" in name:
+        return "search_changes"
+    if name.startswith("delegate"):
+        return "delegate_to_expert"
+    return "other"
+
+
+def _normalize_tool_status(status: str) -> str:
+    label = (status or "").strip().lower() or "other"
+    if label in _TOOL_STATUS_OK:
+        return "ok"
+    if label in _TOOL_STATUS_ERROR:
+        return "error"
+    if label in _TOOL_STATUS_TIMEOUT:
+        return "timeout"
+    return "other"
+
+
+def observe_agent_run(
+    *,
+    status: str,
+    latency_seconds: float | None = None,
+    re_evidence_rounds: int = 0,
+    replan_times: int = 0,
+    parallel_delegations: int = 0,
+) -> None:
+    """Best-effort agent metrics; never raises into the harness path."""
+    try:
+        label = (status or "unknown").strip().lower() or "unknown"
+        if label not in {"completed", "degraded", "failed", "timeout", "fallback"}:
+            label = "other"
+        AGENT_RUNS_TOTAL.labels(status=label).inc()
+        if latency_seconds is not None and latency_seconds >= 0:
+            AGENT_LATENCY_SECONDS.observe(float(latency_seconds))
+        if re_evidence_rounds > 0:
+            AGENT_RE_EVIDENCE_TOTAL.inc(re_evidence_rounds)
+        if replan_times > 0:
+            AGENT_REPLAN_TOTAL.inc(replan_times)
+        if parallel_delegations > 0:
+            AGENT_DELEGATE_PARALLEL_TOTAL.inc(parallel_delegations)
+    except Exception:  # pragma: no cover - metrics must not break product path
+        return
+
+
+def observe_agent_tokens(usage: dict | None) -> None:
+    """Record prompt/completion/total tokens from harness ``usage_total``.
+
+    Missing or non-numeric fields are skipped. Never raises.
+    """
+    if not usage:
+        return
+    try:
+        mapping = (
+            ("prompt", usage.get("prompt_tokens")),
+            ("completion", usage.get("completion_tokens")),
+            ("total", usage.get("total_tokens")),
+        )
+        for role, raw in mapping:
+            if role not in _TOKEN_ROLES:
+                continue
+            if not isinstance(raw, (int, float)):
+                continue
+            value = int(raw)
+            if value <= 0:
+                continue
+            AGENT_TOKENS_TOTAL.labels(role=role).inc(value)
+    except Exception:  # pragma: no cover
+        return
+
+
+def observe_tool_call(*, tool: str, status: str, count: int = 1) -> None:
+    """Increment one tool-call counter with cardinality-safe labels."""
+    if count <= 0:
+        return
+    try:
+        AGENT_TOOL_CALLS_TOTAL.labels(
+            tool=_normalize_tool_name(tool),
+            status=_normalize_tool_status(status),
+        ).inc(int(count))
+    except Exception:  # pragma: no cover
+        return
+
+
+def observe_tool_calls_from_timeline(events: list | tuple | None) -> None:
+    """Scan harness timeline once and count tool_event rows.
+
+    Prefer calling this at complete (not per event) to keep the hot path light.
+    """
+    if not events:
+        return
+    try:
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") != "tool_event":
+                continue
+            tool = str(event.get("tool") or event.get("tool_name") or "")
+            status = str(event.get("status") or "")
+            observe_tool_call(tool=tool, status=status, count=1)
+    except Exception:  # pragma: no cover
+        return
 
 
 def _route_template(request) -> str:

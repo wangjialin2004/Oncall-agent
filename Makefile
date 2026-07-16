@@ -18,7 +18,7 @@ CYAN = \033[0;36m
 NC = \033[0m
 
 .PHONY: help init start stop restart check upload clean up down status wait \
-        install install-dev dev run test test-quick format lint fix type-check \
+        install install-dev dev run test test-quick ci-smoke format lint fix type-check \
         security pre-commit-install pre-commit check-all coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp
@@ -582,6 +582,29 @@ test:  ## 运行测试
 test-quick:  ## 快速测试
 	@echo "$(YELLOW)⚡ 快速测试...$(NC)"
 	python3 -m pytest tests/ -v
+
+ci-smoke:  ## M1 最小门禁：W1–W4 核心 + verifier/checkpoint/context
+	@echo "$(YELLOW)🚦 ci-smoke...$(NC)"
+	python -m pytest \
+		tests/test_m1_close_the_loop.py \
+		tests/test_m1_w2_context_checkpoint.py \
+		tests/test_m1_w3_replan_latency.py \
+		tests/test_m1_w4_latency_exit.py \
+		tests/test_harness_verifier.py \
+		tests/test_harness_checkpoint.py \
+		tests/test_context_integration.py \
+		-q --tb=line --no-cov
+	@echo "$(GREEN)✅ ci-smoke passed$(NC)"
+
+check-harness-size:  ## harness 单文件 ≤1000 行
+	@echo "$(YELLOW)📏 check-harness-size...$(NC)"
+	@python -c "from pathlib import Path; bad=[]; \
+[bad.append((p, sum(1 for _ in p.open(encoding='utf-8', errors='ignore')))) \
+ for p in Path('app/agent/harness').glob('*.py')]; \
+[print(f'{n:5d} {p}') for p,n in sorted(bad, key=lambda x: x[1])]; \
+over=[(p,n) for p,n in bad if n>1000]; \
+raise SystemExit(f'over limit: {over}') if over else print('OK all harness files <= 1000 lines')"
+	@echo "$(GREEN)✅ check-harness-size passed$(NC)"
 
 check-all:  ## 运行所有检查
 	@echo "$(YELLOW)🚀 运行所有检查...$(NC)"

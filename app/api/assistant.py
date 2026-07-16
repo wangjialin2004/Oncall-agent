@@ -154,6 +154,12 @@ async def assistant(
                 and "checkpoint_replay" in stream_params
             ):
                 stream_kwargs["checkpoint_replay"] = bool(request.checkpoint_replay)
+            if "attachment_refs" in stream_params:
+                stream_kwargs["attachment_refs"] = attachment_payload.attachment_refs
+            if request.simulate and "simulate" in stream_params:
+                stream_kwargs["simulate"] = str(request.simulate)
+            if request.prefer_parallel is not None and "prefer_parallel" in stream_params:
+                stream_kwargs["prefer_parallel"] = bool(request.prefer_parallel)
             async for event in stream_service.stream(composed_message, **stream_kwargs):
                 yield {"event": "message", "data": json.dumps(event, ensure_ascii=False, default=str)}
                 event_type = event.get("type")

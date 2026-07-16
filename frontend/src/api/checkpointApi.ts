@@ -1,4 +1,5 @@
-import { getSessionOwnerToken } from "./agentStream";
+import { AuthError } from "./authApi";
+import { apiFetch } from "./httpClient";
 
 export type CheckpointSummary = {
   sessionId: string;
@@ -12,18 +13,6 @@ export type CheckpointSummary = {
   lastStepAt?: string;
   completed?: boolean;
 };
-
-function authHeaders(): Record<string, string> {
-  const authToken = localStorage.getItem("authToken");
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "X-Session-Owner": getSessionOwnerToken(),
-  };
-  if (authToken) {
-    headers["Authorization"] = `Bearer ${authToken}`;
-  }
-  return headers;
-}
 
 type RawCheckpointPayload = {
   session_id?: string;
@@ -39,8 +28,8 @@ type RawCheckpointPayload = {
 /**
  * Ask the backend whether this session has a resumable checkpoint.
  *
- * Fails soft: any error returns a summary with ``enabled: false`` and
- * ``resumable: false`` so the UI can render without surfacing 5xx noise.
+ * Soft-fails on network/5xx so the UI stays quiet. Auth failures (401) still
+ * escalate so the session lifecycle can force re-login.
  */
 export async function getCheckpoint(sessionId: string): Promise<CheckpointSummary> {
   const fallback: CheckpointSummary = {
@@ -49,12 +38,11 @@ export async function getCheckpoint(sessionId: string): Promise<CheckpointSummar
     resumable: false,
   };
   try {
-    const response = await fetch(`/api/checkpoint/${encodeURIComponent(sessionId)}`, {
-      headers: authHeaders(),
-    });
-    if (!response.ok) {
-      return fallback;
-    }
+    const response = await apiFetch(
+      `/api/checkpoint/${encodeURIComponent(sessionId)}`,
+      undefined,
+      { errorMessage: "Get checkpoint failed" },
+    );
     const json = (await response.json().catch(() => null)) as
       | { data?: RawCheckpointPayload }
       | null;
@@ -69,29 +57,33 @@ export async function getCheckpoint(sessionId: string): Promise<CheckpointSummar
       lastStepAt: data.last_step_at || undefined,
       completed: typeof data.completed === "boolean" ? data.completed : undefined,
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof AuthError) {
+      throw error;
+    }
     return fallback;
   }
 }
 
 /**
  * Drop the checkpoint for this session so the next ``POST /api/assistant``
- * starts fresh instead of resuming. Best-effort; errors are swallowed.
+ * starts fresh instead of resuming. Best-effort for non-auth errors.
  */
 export async function deleteCheckpoint(sessionId: string): Promise<number> {
   try {
-    const response = await fetch(`/api/checkpoint/${encodeURIComponent(sessionId)}`, {
-      method: "DELETE",
-      headers: authHeaders(),
-    });
-    if (!response.ok) {
-      return 0;
-    }
+    const response = await apiFetch(
+      `/api/checkpoint/${encodeURIComponent(sessionId)}`,
+      { method: "DELETE" },
+      { errorMessage: "Delete checkpoint failed" },
+    );
     const json = (await response.json().catch(() => null)) as
       | { data?: { deleted?: number } }
       | null;
     return Number(json?.data?.deleted ?? 0);
-  } catch {
+  } catch (error) {
+    if (error instanceof AuthError) {
+      throw error;
+    }
     return 0;
   }
 }

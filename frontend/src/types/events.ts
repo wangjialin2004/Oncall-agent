@@ -31,6 +31,7 @@ export type TimelineEvent = {
   usage?: Record<string, number>;
   trace_id?: string;
   span_id?: string;
+  started_at?: number;
   payload?: Record<string, unknown>;
 };
 
@@ -46,12 +47,28 @@ export type ReportEvent = {
   report: string;
 };
 
+export type DistillDraftInfo = {
+  experience_id: string;
+  status: string;
+  enabled?: boolean;
+  requires_confirm?: boolean;
+};
+
+export type ClarificationInfo = {
+  missing_params: string[];
+  defaults?: Record<string, string>;
+  question?: string;
+};
+
 export type CompleteEvent = {
   type: "complete";
   route: AgentRoute;
   answer: string;
   case_id: string;
   events: TimelineEvent[];
+  distill_draft?: DistillDraftInfo | null;
+  missing_params?: string[];
+  clarification?: ClarificationInfo | null;
 };
 
 export type ErrorEvent = {
@@ -121,6 +138,13 @@ export type AgentRun = {
   userMessage: string;
   /** Long-term-memory feedback already given for this run, if any. */
   feedback: FeedbackState;
+  /** Auto-distill draft from harness complete (W10), if any. */
+  distillDraft?: DistillDraftInfo | null;
+  /** Whether the pending distill draft was confirmed/rejected from the panel. */
+  distillStatus?: "" | "confirmed" | "rejected";
+  /** Structured clarification slots for quick-fill chips (W10). */
+  missingParams?: string[];
+  clarification?: ClarificationInfo | null;
   /** Set when this run picked up a saved checkpoint from Redis. */
   checkpointResume?: CheckpointResumeEvent;
   /** Set when the resumed run closed without re-running non-whitelisted tools. */

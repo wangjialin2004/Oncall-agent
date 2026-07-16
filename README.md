@@ -320,7 +320,8 @@ SSE `message` 数据包含不同类型事件：`route_selected`、`agent_event`�
 ├── deploy/prometheus/       # Prometheus 配置
 ├── scripts/                 # 调试、评测与索引脚本
 ├── tests/                   # 后端测试
-├── docs/ · plan/            # 设计、评审与实施计划文档
+├── docs/                    # 文档（见 docs/README.md：pilot/reviews/superpowers）
+├── plan/ · prd/             # 历史计划与 PRD
 ├── .env.example             # 注释模板，不含真实密钥
 ├── vector-database.yml      # Milvus docker compose
 ├── monitoring.yml           # Prometheus docker compose

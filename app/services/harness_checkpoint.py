@@ -35,11 +35,46 @@ from app.utils.serialization import json_dumps, json_loads
 from app.utils.time import utc_now
 
 _DEFAULT_TOOLS: tuple[str, ...] = (
+    # Delegation + read-only investigation tools (safe to replay).
     "delegate_to_expert",
+    "query_prometheus_alerts",
+    "retrieve_knowledge",
+    "recall_experience",
+    "lookup_service_knowledge",
+    "check_redis_health",
+    "get_current_time",
+    "query_recent_changes",
+    "context_read",
+    "context_note",
+    "read_attachment",
 )
 _TIMELINE_TAIL_MAX = 20
 
-_CURRENT_VERSION = 1
+_CURRENT_VERSION = 2  # bumped: meta now carries context_version/context_snapshot_ref
+
+#: Schema version stored in ``CheckpointResume.context_snapshot_version`` to
+#: signal that the checkpoint intentionally does NOT carry the full context
+#: body. The harness should recover context via
+#: :class:`app.agent.context.store.ContextStateStore` instead.
+_CHECKPOINT_CONTEXT_BODY_DROPPED_VERSION = 2
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    """Return ``value`` as int, or None. Defends against None / odd types."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_optional_str(value: Any) -> str | None:
+    """Return ``value`` as str, or None when empty / not a string."""
+    if value is None:
+        return None
+    s = str(value)
+    return s or None
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +84,14 @@ _CURRENT_VERSION = 1
 
 @dataclass(slots=True)
 class CheckpointResume:
-    """What the harness needs to skip ahead to the next incomplete step."""
+    """What the harness needs to skip ahead to the next incomplete step.
+
+    Per plan ``plan/2026-07-08-stateful-agent-context.md`` §9, ``messages``
+    remains for the migration window — new code still writes them for replay,
+    but :class:`app.agent.context.store.ContextStateStore` is the canonical
+    source of context. ``context_version`` and ``context_snapshot_ref`` are
+    the only authoritative pointers the harness needs to resume correctly.
+    """
 
     next_step: int
     state_fields: dict[str, Any]
@@ -60,6 +102,12 @@ class CheckpointResume:
     idempotent_tools: list[str]
     started_at: str
     completed: bool = False
+    context_version: int | None = None
+    context_snapshot_ref: str | None = None
+    # Cached schema version that wrote this checkpoint. Used by the harness
+    # to detect "old checkpoint with full messages" vs "new checkpoint with
+    # context reference only" and route accordingly.
+    checkpoint_version: int = 1
 
 
 @dataclass(slots=True)
@@ -117,24 +165,40 @@ class HarnessCheckpointStore:
         messages: list[ChatMessage],
         step_index: int,
         step_payload: dict[str, Any],
+        context_version: int | None = None,
+        context_snapshot_ref: str | None = None,
+        persist_messages: bool = True,
     ) -> None:
-        """Persist the latest run snapshot. Fire-and-forget safe."""
+        """Persist the latest run snapshot. Fire-and-forget safe.
+
+        Per plan §9, ``messages`` is no longer required for the stateful
+        context path: callers should pass ``persist_messages=False`` once the
+        whiteboard is the canonical source. ``context_version`` /
+        ``context_snapshot_ref`` are recorded in the meta so resume can ask
+        :class:`ContextStateStore` to rehydrate instead of replaying messages.
+        """
         try:
             async with self._lock:
                 client = await self._client()
                 meta_key = self._meta_key(owner_key, session_id)
                 existing = await self._safe_get_meta(client, meta_key)
-                meta = self._compose_meta(state=state, existing=existing, step_index=step_index)
+                meta = self._compose_meta(
+                    state=state,
+                    existing=existing,
+                    step_index=step_index,
+                    context_version=context_version,
+                    context_snapshot_ref=context_snapshot_ref,
+                )
                 step_key = self._step_key(owner_key, session_id, step_index)
                 messages_key = self._messages_key(owner_key, session_id)
+                if persist_messages:
+                    msgs_payload = json_dumps([m.to_dict() for m in messages])
+                else:
+                    msgs_payload = json_dumps([])
                 async with client.pipeline(transaction=False) as pipe:
                     pipe.set(meta_key, json_dumps(meta), ex=self.ttl_seconds)
                     pipe.set(step_key, json_dumps(step_payload), ex=self.ttl_seconds)
-                    pipe.set(
-                        messages_key,
-                        json_dumps([m.to_dict() for m in messages]),
-                        ex=self.ttl_seconds,
-                    )
+                    pipe.set(messages_key, msgs_payload, ex=self.ttl_seconds)
                     await pipe.execute()
                 self.stats.saves += 1
         except Exception as exc:
@@ -184,6 +248,9 @@ class HarnessCheckpointStore:
                 idempotent_tools=list(meta_raw.get("idempotent_tools") or []),
                 started_at=str(meta_raw.get("started_at") or ""),
                 completed=False,
+                context_version=_coerce_optional_int(meta_raw.get("context_version")),
+                context_snapshot_ref=_coerce_optional_str(meta_raw.get("context_snapshot_ref")),
+                checkpoint_version=int(meta_raw.get("version") or 1),
             )
         except Exception as exc:
             self._record_error(exc, "try_resume")
@@ -290,6 +357,8 @@ class HarnessCheckpointStore:
         state: Any,
         existing: dict[str, Any] | None,
         step_index: int,
+        context_version: int | None = None,
+        context_snapshot_ref: str | None = None,
     ) -> dict[str, Any]:
         existing = dict(existing or {})
         timeline = getattr(state, "timeline_events", None) or []
@@ -307,6 +376,11 @@ class HarnessCheckpointStore:
                 "timeline_events_tail": tail,
                 "idempotent_tools": list(self.idempotent_tools),
                 "last_step_at": self._clock(),
+                # Plan §9: checkpoint only references the context, never holds it.
+                "context_version": _coerce_optional_int(context_version)
+                or _coerce_optional_int(existing.get("context_version")),
+                "context_snapshot_ref": _coerce_optional_str(context_snapshot_ref)
+                or _coerce_optional_str(existing.get("context_snapshot_ref")),
             }
         )
         if not existing.get("started_at"):

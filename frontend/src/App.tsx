@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { clearAuth, loadAuth, logout } from "./api/authApi";
+import { AuthError, clearAuth, fetchMe, loadAuth, logout } from "./api/authApi";
 import { streamAgent } from "./api/agentStream";
 import { type CheckpointSummary, getCheckpoint } from "./api/checkpointApi";
 import {
@@ -10,7 +10,8 @@ import {
   listConversations,
 } from "./api/conversationApi";
 import { uploadFile } from "./api/fileApi";
-import { submitFeedback } from "./api/memoryApi";
+import { subscribeAuthExpired } from "./api/httpClient";
+import { confirmDistillDraft, rejectDistillDraft, submitFeedback } from "./api/memoryApi";
 import { AgentProcessPanel } from "./components/AgentProcessPanel";
 import { AppShell } from "./components/AppShell";
 import { ChatWorkspace } from "./components/ChatWorkspace";
@@ -109,6 +110,8 @@ type AuthState = { token: string; username: string } | null;
 export default function App() {
   const saved = loadAuth();
   const [auth, setAuth] = useState<AuthState>(saved);
+  const [authBootstrapping, setAuthBootstrapping] = useState<boolean>(Boolean(saved));
+  const [loginNotice, setLoginNotice] = useState<string | null>(null);
 
   const [mode, setMode] = useState<AgentMode>("auto");
   const [view, setView] = useState<"chat" | "baseline">("chat");
@@ -129,6 +132,21 @@ export default function App() {
   // Assistant message id of the turn currently streaming, so events route correctly.
   const activeIdRef = useRef<string>("");
 
+  const forceLogout = useCallback((notice?: string) => {
+    abortRef.current?.abort();
+    activeIdRef.current = "";
+    clearAuth();
+    setAuth(null);
+    setAuthBootstrapping(false);
+    setMessages([]);
+    setRuns({});
+    setSelectedId("");
+    setSessions([]);
+    setPendingAttachments([]);
+    setCheckpointStatus({});
+    setLoginNotice(notice ?? "登录已过期，请重新登录");
+  }, []);
+
   function appendStreamedChunk(assistantId: string, chunk: string) {
     if (!chunk) {
       return;
@@ -145,23 +163,33 @@ export default function App() {
     try {
       summaries = await listConversations();
       setSessions(summaries);
-    } catch {
+    } catch (error) {
+      if (error instanceof AuthError) {
+        // 401 already invalidates the session via httpClient.
+        return;
+      }
       // best-effort: the chat still works without the history list
       return;
     }
     // Fan out one GET /api/checkpoint per session. Failures degrade to "no
     // checkpoint" silently — the feature is opt-in, so missing data should
-    // not break the sidebar.
-    const updates = await Promise.all(
-      summaries.map(async (summary) => [summary.session_id, await getCheckpoint(summary.session_id)] as const),
-    );
-    const next: Record<string, CheckpointSummary> = {};
-    for (const [sid, status] of updates) {
-      if (status.enabled) {
-        next[sid] = status;
+    // not break the sidebar. Auth failures still escalate.
+    try {
+      const updates = await Promise.all(
+        summaries.map(async (summary) => [summary.session_id, await getCheckpoint(summary.session_id)] as const),
+      );
+      const next: Record<string, CheckpointSummary> = {};
+      for (const [sid, status] of updates) {
+        if (status.enabled) {
+          next[sid] = status;
+        }
+      }
+      setCheckpointStatus(next);
+    } catch (error) {
+      if (error instanceof AuthError) {
+        return;
       }
     }
-    setCheckpointStatus(next);
   }, []);
 
   const loadSession = useCallback(async (sid: string) => {
@@ -170,8 +198,14 @@ export default function App() {
     localStorage.setItem(SESSION_STORAGE_KEY, sid);
     setSessionId(sid);
     setView("chat");
+    // Capture the generation token so a slower load cannot clobber a newer
+    // session switch or an in-flight send that already claimed activeIdRef.
+    const loadToken = sid;
     try {
       const turns = await getConversation(sid);
+      if (activeIdRef.current || localStorage.getItem(SESSION_STORAGE_KEY) !== loadToken) {
+        return;
+      }
       const restoredMessages: ChatMessage[] = [];
       const restoredRuns: Record<string, AgentRun> = {};
       let lastAssistantId = "";
@@ -202,27 +236,82 @@ export default function App() {
       // Refreshing the per-session checkpoint status here keeps the sidebar
       // badge and any "continue" affordances in sync right after switching.
       const status = await getCheckpoint(sid);
+      if (activeIdRef.current || localStorage.getItem(SESSION_STORAGE_KEY) !== loadToken) {
+        return;
+      }
       setCheckpointStatus((current) =>
         status.enabled ? { ...current, [sid]: status } : current,
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof AuthError) {
+        return;
+      }
+      if (activeIdRef.current || localStorage.getItem(SESSION_STORAGE_KEY) !== loadToken) {
+        return;
+      }
       setMessages([]);
       setRuns({});
       setSelectedId("");
     }
   }, []);
 
-  // On login (and initial mount with a saved session), hydrate history + the sidebar.
+  // Global 401 path: any authenticated request can force re-login.
+  useEffect(() => {
+    return subscribeAuthExpired(() => {
+      forceLogout("登录已过期，请重新登录");
+    });
+  }, [forceLogout]);
+
+  // On login (and initial mount with a saved session), probe the token then hydrate.
   useEffect(() => {
     if (!auth) {
+      setAuthBootstrapping(false);
       return;
     }
-    void refreshSessions();
-    void loadSession(sessionId);
+
+    let cancelled = false;
+    setAuthBootstrapping(true);
+    void (async () => {
+      try {
+        const me = await fetchMe();
+        if (cancelled) {
+          return;
+        }
+        setAuth((current) =>
+          current ? { token: current.token, username: me.username || current.username } : current,
+        );
+        setLoginNotice(null);
+        await refreshSessions();
+        if (!cancelled) {
+          await loadSession(sessionId);
+        }
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        if (error instanceof AuthError) {
+          // invalidateSession already cleared storage; forceLogout syncs React state.
+          forceLogout("登录已过期，请重新登录");
+          return;
+        }
+        // Network blip on probe: keep the saved session and still try to hydrate.
+        void refreshSessions();
+        void loadSession(sessionId);
+      } finally {
+        // Always clear the spinner for this effect generation, even if a
+        // React Strict Mode remount cancelled the previous async chain.
+        setAuthBootstrapping(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auth]);
+  }, [auth?.token]);
 
   function handleLogin(token: string, username: string) {
+    setLoginNotice(null);
     setAuth({ token, username });
   }
 
@@ -234,6 +323,8 @@ export default function App() {
     }
     clearAuth();
     setAuth(null);
+    setAuthBootstrapping(false);
+    setLoginNotice(null);
     setMessages([]);
     setRuns({});
     setSelectedId("");
@@ -297,7 +388,26 @@ export default function App() {
         event.type === "tool_event" ||
         event.type === "decision_event"
       ) {
-        next = { ...prev, events: normalizeTimelineEvents([...prev.events, event as TimelineEvent]) };
+        const timeline = event as TimelineEvent;
+        const payload = (timeline.payload ?? {}) as Record<string, unknown>;
+        const stage = String(timeline.stage || "");
+        const missingFromPayload = Array.isArray(payload.missing_params)
+          ? (payload.missing_params as unknown[]).map((x) => String(x))
+          : undefined;
+        next = {
+          ...prev,
+          events: normalizeTimelineEvents([...prev.events, timeline]),
+          ...(stage.includes("clarify") && missingFromPayload
+            ? {
+                missingParams: missingFromPayload,
+                clarification: {
+                  missing_params: missingFromPayload,
+                  defaults: (payload.defaults as Record<string, string>) ?? {},
+                  question: payload.question ? String(payload.question) : prev.clarification?.question,
+                },
+              }
+            : {}),
+        };
       } else if (event.type === "content") {
         next = { ...prev, answer: `${prev.answer}${event.data}` };
       } else if (event.type === "report") {
@@ -312,6 +422,9 @@ export default function App() {
           events: normalizeTimelineEvents(
             event.events.length > 0 ? [...prev.events, ...event.events] : prev.events,
           ),
+          distillDraft: event.distill_draft ?? null,
+          missingParams: event.missing_params ?? event.clarification?.missing_params ?? prev.missingParams,
+          clarification: event.clarification ?? prev.clarification ?? null,
         };
       } else if (event.type === "error") {
         next = {
@@ -388,13 +501,29 @@ export default function App() {
       // The turn is now persisted backend-side; refresh the sidebar so it appears.
       void refreshSessions();
     } catch (error) {
+      if (error instanceof AuthError) {
+        // Session expiry is handled by the global auth:expired subscriber.
+        return;
+      }
       if (!controller.signal.aborted) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        setMessages((items) =>
+          items.map((item) =>
+            item.id === assistantId
+              ? {
+                  ...item,
+                  status: "error",
+                  content: item.content ? item.content : "（执行失败）",
+                }
+              : item,
+          ),
+        );
         setRuns((current) => ({
           ...current,
           [assistantId]: {
             ...(current[assistantId] ?? makeRun({ runId: assistantId, sessionId })),
             status: "error",
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage,
           },
         }));
       }
@@ -408,6 +537,16 @@ export default function App() {
     }
     setRuns((c) => ({ ...c, [selectedId]: { ...c[selectedId], feedback: kind } }));
     try {
+      // Prefer confirming an existing auto-distill draft when present.
+      const draftId = current.distillDraft?.experience_id;
+      if (kind === "adopted" && draftId && current.distillDraft?.status === "pending") {
+        await confirmDistillDraft(draftId, "panel-adopt");
+        setRuns((c) => ({
+          ...c,
+          [selectedId]: { ...c[selectedId], distillStatus: "confirmed" },
+        }));
+        return;
+      }
       await submitFeedback({
         sessionId: current.sessionId || sessionId,
         userMessage: current.userMessage,
@@ -418,6 +557,31 @@ export default function App() {
       });
     } catch {
       // best-effort: keep the optimistic UI, the user can retry by re-running
+    }
+  }
+
+  async function handleDistill(action: "confirm" | "reject") {
+    const current = runs[selectedId];
+    const draftId = current?.distillDraft?.experience_id;
+    if (!current || !draftId || current.distillStatus) {
+      return;
+    }
+    setRuns((c) => ({
+      ...c,
+      [selectedId]: {
+        ...c[selectedId],
+        distillStatus: action === "confirm" ? "confirmed" : "rejected",
+        feedback: action === "confirm" ? "adopted" : c[selectedId].feedback,
+      },
+    }));
+    try {
+      if (action === "confirm") {
+        await confirmDistillDraft(draftId, "panel-confirm");
+      } else {
+        await rejectDistillDraft(draftId, "panel-reject");
+      }
+    } catch {
+      // optimistic UI retained
     }
   }
 
@@ -499,7 +663,17 @@ export default function App() {
   }
 
   if (!auth) {
-    return <LoginPage onLogin={handleLogin} />;
+    return <LoginPage onLogin={handleLogin} notice={loginNotice} />;
+  }
+
+  if (authBootstrapping) {
+    return (
+      <div className="login-root" role="status" aria-live="polite">
+        <div className="login-card">
+          <p style={{ margin: 0, textAlign: "center" }}>正在校验登录状态…</p>
+        </div>
+      </div>
+    );
   }
 
   const isStreaming = messages.some(
@@ -535,6 +709,7 @@ export default function App() {
             selectedId={selectedId}
             checkpointReplay={checkpointReplay}
             onCheckpointReplayChange={setCheckpointReplay}
+            clarifyChips={panelRun.missingParams ?? panelRun.clarification?.missing_params ?? []}
             onModeChange={setMode}
             onSend={handleSend}
             onRemoveAttachment={handleRemoveAttachment}
@@ -554,7 +729,7 @@ export default function App() {
             </p>
           </div>
         ) : (
-          <AgentProcessPanel run={panelRun} onFeedback={handleFeedback} />
+          <AgentProcessPanel run={panelRun} onFeedback={handleFeedback} onDistill={handleDistill} />
         )
       }
     />

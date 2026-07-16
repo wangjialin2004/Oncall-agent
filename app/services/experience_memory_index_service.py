@@ -10,6 +10,7 @@ from pymilvus import Collection, CollectionSchema, DataType, FieldSchema, utilit
 from app.config import config
 from app.core.milvus_client import milvus_manager
 from app.services.vector_embedding_service import vector_embedding_service
+from app.utils.serialization import json_dumps
 from app.utils.text import normalize_text as _normalize, text_similarity as _text_similarity
 
 VECTOR_DIM = 1024
@@ -119,21 +120,7 @@ class ExperienceMemoryIndexService:
 
     def _upsert_milvus(self, memory: dict[str, Any], vector: list[float]) -> None:
         collection = self._collection()
-        collection.upsert(
-            [
-                {
-                    "id": str(memory.get("experience_id") or ""),
-                    "experience_id": str(memory.get("experience_id") or ""),
-                    "project_id": str(memory.get("project_id") or ""),
-                    "environment": str(memory.get("environment") or ""),
-                    "service_name": str(memory.get("service_name") or ""),
-                    "symptoms": str(memory.get("symptoms") or "")[:TEXT_MAX_LENGTH],
-                    "confidence": float(memory.get("confidence") or 0),
-                    "enabled": bool(memory.get("enabled", True)),
-                    config.rag_dense_vector_field: vector,
-                }
-            ]
-        )
+        collection.upsert([_milvus_row(memory, vector)])
         collection.flush()
 
     def _collection(self) -> Collection:
@@ -180,9 +167,13 @@ class ExperienceMemoryIndexService:
                 FieldSchema(name="project_id", dtype=DataType.VARCHAR, max_length=ID_MAX_LENGTH),
                 FieldSchema(name="environment", dtype=DataType.VARCHAR, max_length=ID_MAX_LENGTH),
                 FieldSchema(name="service_name", dtype=DataType.VARCHAR, max_length=200),
+                FieldSchema(name="memory_type", dtype=DataType.VARCHAR, max_length=100),
                 FieldSchema(name="symptoms", dtype=DataType.VARCHAR, max_length=TEXT_MAX_LENGTH),
+                FieldSchema(name="root_cause", dtype=DataType.VARCHAR, max_length=TEXT_MAX_LENGTH),
+                FieldSchema(name="resolution", dtype=DataType.VARCHAR, max_length=TEXT_MAX_LENGTH),
                 FieldSchema(name="confidence", dtype=DataType.FLOAT),
                 FieldSchema(name="enabled", dtype=DataType.BOOL),
+                FieldSchema(name="source_case_ids_json", dtype=DataType.VARCHAR, max_length=TEXT_MAX_LENGTH),
                 FieldSchema(
                     name=config.rag_dense_vector_field,
                     dtype=DataType.FLOAT_VECTOR,
@@ -247,6 +238,28 @@ class ExperienceMemoryIndexService:
 
 
 experience_memory_index_service = ExperienceMemoryIndexService()
+
+
+def _milvus_row(memory: dict[str, Any], vector: list[float]) -> dict[str, Any]:
+    source_ids = memory.get("source_case_ids")
+    if source_ids is None:
+        source_ids = memory.get("source_event_ids") or []
+
+    return {
+        "id": str(memory.get("experience_id") or ""),
+        "experience_id": str(memory.get("experience_id") or ""),
+        "project_id": str(memory.get("project_id") or ""),
+        "environment": str(memory.get("environment") or ""),
+        "service_name": str(memory.get("service_name") or ""),
+        "memory_type": str(memory.get("memory_type") or memory.get("source_type") or "experience")[:100],
+        "symptoms": str(memory.get("symptoms") or "")[:TEXT_MAX_LENGTH],
+        "root_cause": str(memory.get("root_cause") or "")[:TEXT_MAX_LENGTH],
+        "resolution": str(memory.get("resolution") or "")[:TEXT_MAX_LENGTH],
+        "confidence": float(memory.get("confidence") or 0),
+        "enabled": bool(memory.get("enabled", True)),
+        "source_case_ids_json": json_dumps(source_ids)[:TEXT_MAX_LENGTH],
+        config.rag_dense_vector_field: vector,
+    }
 
 
 

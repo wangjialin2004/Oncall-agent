@@ -1,9 +1,9 @@
 # Plan：记忆子系统缓存层规划
 
-- 文档版本：v0.2（评审修订，待用户授权进入实现）
-- 日期：2026-06-26
-- 状态：待评审 / 未进入实现阶段（受 CLAUDE.md 约束）
-- 评审结论：**有条件批准**。进入实现前必须落地 §3.7 的 4 项放行条件（别名防护、key/测试隔离、`upsert_relation` 失效、recall 命中时 `hit_count` 决策）；连接池保持出范围。
+- 文档版本：v0.3（实现后状态回填）
+- 日期：2026-06-26（初稿）/ 2026-07-15（回归修复）
+- 状态：**主干已实现**（`app/services/memory_cache.py` + 三服务接入 + health 暴露 + 单测/bench）
+- 评审结论：**有条件批准** → 放行条件已落地；2026-07-15 修复 W10 `status` 维度导致的 list cache key 单测漂移
 - 关联模块：[app/services/experience_memory_service.py](../app/services/experience_memory_service.py)、[app/services/service_knowledge_service.py](../app/services/service_knowledge_service.py)、[app/services/user_preference_service.py](../app/services/user_preference_service.py)、[app/services/experience_memory_index_service.py](../app/services/experience_memory_index_service.py)、[app/api/memory.py](../app/api/memory.py)
 
 ## 1. 背景与目标
@@ -305,9 +305,26 @@ memory_cache_ttl_service_knowledge_seconds: float = 60.0
 - **R4**：`_find_merge_target` 的全表扫是**写路径**，缓存不能直接帮忙，但缓存 `_list(limit=1000)` 结果能减少重复扫表 → 写入路径也获益。
 - **R5**：未来引入 Redis 后，本设计的 key 命名约定要保持稳定（仅前缀 + 序列化协议变），否则会出现双层缓存不一致。
 
-## 8. 待用户授权方可进入实现
+## 8. 实现状态（2026-07-15 回填）
 
-按 CLAUDE.md，本 Plan 仅做规划与风险说明。需在用户明确授权后，才进入 P1 实施阶段。
+主干**已实现**，不再阻塞授权：
+
+| 项 | 路径 / 说明 |
+|---|---|
+| L1 缓存 | `app/services/memory_cache.py`（TTL LRU、deep copy、db_tag、stats） |
+| 配置 | `memory_cache_enabled` / TTL / max_entries |
+| 三服务接入 | experience / service_knowledge / user_preference |
+| recall | **方案 A**：不进 L1 |
+| 观测 | `/health` → `memory_cache` 字段 |
+| 单测 | `tests/test_memory_cache.py` + segregation |
+| bench | `scripts/bench_memory_cache.py` |
+
+### 2026-07-15 回归
+
+W10 为 `list()` 增加 `status` 过滤后，缓存 key 变为
+`memory:{db_tag}:exp:list:{project}:{enabled}:{status}:{limit}`（`status=None` → `*`）。
+旧单测仍断言 `...:list:proj:1:10`，导致 `test_experience_memory_list_cached_and_evicted_on_create` 失败。
+**已修测试 key**；`pytest tests/test_memory_cache*.py` → **全绿**。
 
 ## 9. 待确认项（P0 评审）与评审建议
 

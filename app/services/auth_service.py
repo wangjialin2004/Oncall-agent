@@ -12,12 +12,26 @@ from app.config import config
 class AuthService:
     token_version = "v1"
 
+    def authenticate(self, username: str, password: str) -> bool:
+        """Validate credentials against the fixed AUTH_USERS account table."""
+        subject = (username or "").strip()
+        if not subject or not password:
+            return False
+        expected = config.auth_user_map.get(subject)
+        if expected is None:
+            return False
+        return hmac.compare_digest(expected, password)
+
     def create_access_token(self, username: str) -> str:
         subject = username.strip()
         if not subject:
             raise ValueError("username is required")
 
-        payload = {"sub": subject, "iat": int(time.time())}
+        now = int(time.time())
+        payload: dict[str, object] = {"sub": subject, "iat": now}
+        ttl = int(getattr(config, "auth_token_ttl_seconds", 0) or 0)
+        if ttl > 0:
+            payload["exp"] = now + ttl
         payload_bytes = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
             "utf-8"
         )
@@ -46,6 +60,16 @@ class AuthService:
         subject = str(payload.get("sub") or "").strip()
         if not subject:
             raise ValueError("token subject is required")
+
+        exp = payload.get("exp")
+        if exp is not None:
+            try:
+                exp_ts = int(exp)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("invalid token expiry") from exc
+            if int(time.time()) >= exp_ts:
+                raise ValueError("token expired")
+
         return subject
 
     def owner_key_for_user(self, username: str) -> str:

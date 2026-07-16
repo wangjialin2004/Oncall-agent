@@ -1,5 +1,5 @@
 import type { TimelineEvent } from "../types/events";
-import { getSessionOwnerToken } from "./agentStream";
+import { apiFetch } from "./httpClient";
 
 export type ConversationSummary = {
   session_id: string;
@@ -19,24 +19,11 @@ export type ConversationTurn = {
   created_at: string;
 };
 
-function authHeaders(): Record<string, string> {
-  const authToken = localStorage.getItem("authToken");
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "X-Session-Owner": getSessionOwnerToken(),
-  };
-  if (authToken) {
-    headers["Authorization"] = `Bearer ${authToken}`;
-  }
-  return headers;
-}
-
 /** List the caller's past conversations, most-recently-updated first. */
 export async function listConversations(): Promise<ConversationSummary[]> {
-  const response = await fetch("/api/conversations", { headers: authHeaders() });
-  if (!response.ok) {
-    throw new Error(`List conversations failed with HTTP ${response.status}`);
-  }
+  const response = await apiFetch("/api/conversations", undefined, {
+    errorMessage: "List conversations failed",
+  });
   const json = (await response.json().catch(() => null)) as
     | { data?: ConversationSummary[] }
     | null;
@@ -45,12 +32,9 @@ export async function listConversations(): Promise<ConversationSummary[]> {
 
 /** Fetch all turns of one conversation so the UI can restore the full thread. */
 export async function getConversation(sessionId: string): Promise<ConversationTurn[]> {
-  const response = await fetch(`/api/conversations/${encodeURIComponent(sessionId)}`, {
-    headers: authHeaders(),
+  const response = await apiFetch(`/api/conversations/${encodeURIComponent(sessionId)}`, undefined, {
+    errorMessage: "Get conversation failed",
   });
-  if (!response.ok) {
-    throw new Error(`Get conversation failed with HTTP ${response.status}`);
-  }
   const json = (await response.json().catch(() => null)) as
     | { data?: { turns?: ConversationTurn[] } }
     | null;
@@ -58,11 +42,11 @@ export async function getConversation(sessionId: string): Promise<ConversationTu
 }
 
 export async function deleteConversation(sessionId: string): Promise<void> {
-  const response = await fetch(`/api/conversations/${encodeURIComponent(sessionId)}`, {
-    method: "DELETE",
-    headers: authHeaders(),
-  });
-  if (!response.ok) {
-    throw new Error(`Delete conversation failed with HTTP ${response.status}`);
-  }
+  const response = await apiFetch(
+    `/api/conversations/${encodeURIComponent(sessionId)}`,
+    { method: "DELETE" },
+    { errorMessage: "Delete conversation failed" },
+  );
+  // Success body is ignored; 401 already escalated via apiFetch.
+  void response;
 }

@@ -1,0 +1,50 @@
+# Pilot compose draft (M3 W10) — NOT a full production stack.
+# Windows primary path remains start-all-windows.bat.
+#
+# Usage (Docker Desktop / Linux):
+#   docker compose -f deploy/compose/docker-compose.pilot.yml up -d redis
+#   # backend still often runs on host with .venv for MCP + local volumes
+#
+# Full profile (experimental):
+#   docker compose -f deploy/compose/docker-compose.pilot.yml --profile full up -d
+#
+# Before start:
+#   python scripts/check_env_secrets.py
+#
+# After code changes: force-restart backend (healthy skip in bat will keep old harness).
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  # Optional: local Prometheus scrape target for pilot metrics.
+  prometheus:
+    profiles: ["full"]
+    image: prom/prometheus:v2.54.1
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+
+  # Backend container is a draft skeleton. Prefer host uvicorn for MCP tools.
+  backend:
+    profiles: ["full"]
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile.backend
+    ports:
+      - "9900:9900"
+    env_file:
+      - ../../.env
+    environment:
+      REDIS_ENABLED: "true"
+      REDIS_URL: redis://redis:6379/0
+      HOST: 0.0.0.0
+      PORT: "9900"
+    depends_on:
+      - redis
+    restart: unless-stopped

@@ -16,6 +16,7 @@ The output is a compact, structured digest handed back to the answering LLM.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections import OrderedDict
@@ -296,12 +297,38 @@ async def analyze_logs(
 
     # Only pay for an LLM pass when the deterministic digest is still too large.
     if estimate_tokens(rendered) > config.log_token_budget:
-        summary = await _mapreduce_summarize(
-            rendered,
-            llm_client=llm_client,
-            chunk_size=config.log_chunk_size,
-            model=config.log_summary_model or None,
-        )
+        try:
+            # 给 Map-Reduce 整体加限时,避免一次巨大的日志触发 5~10 个 chunk
+            # (每个 10~30s) 拖垮外层 harness 总闸门
+            timeout_seconds = float(
+                getattr(config, "expert_timeout_seconds", 60.0) or 60.0
+            ) / 2
+            async with asyncio.timeout(timeout_seconds):
+                summary = await _mapreduce_summarize(
+                    rendered,
+                    llm_client=llm_client,
+                    chunk_size=config.log_chunk_size,
+                    model=config.log_summary_model or None,
+                )
+        except TimeoutError:
+            logger.warning(
+                f"日志 Map-Reduce 摘要超过 {timeout_seconds:g}s,使用聚类头部兜底"
+            )
+            fallback = render_digest(digest)
+            events_sink.append(
+                make_agent_event(
+                    agent="log_expert",
+                    stage="log_mapreduce_timeout",
+                    status="degraded",
+                    summary=f"日志 Map-Reduce 摘要超过 {timeout_seconds:g}s，已使用聚类头部兜底。",
+                    payload={"timeout_seconds": timeout_seconds},
+                    trace_id=trace_id,
+                    span_id=f"log_mapreduce_timeout:{trace_id}",
+                )
+            )
+            return (
+                f"{fallback}\n\n（Map-Reduce 摘要超时，已仅保留聚类头部）"
+            )
         events_sink.append(
             make_agent_event(
                 agent="log_expert",

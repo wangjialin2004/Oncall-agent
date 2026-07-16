@@ -17,6 +17,7 @@ class ToolExecutionResult:
     content: str
     success: bool
     raw: Any = None
+    latency_ms: int = 0
 
 
 def tool_to_definition(tool: RuntimeTool) -> ToolDefinition:

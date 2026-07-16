@@ -5,11 +5,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ServiceBaselineManager } from "../ServiceBaselineManager";
 
-// Avoid crypto.randomUUID in jsdom; we only need a stable owner token.
-vi.mock("../../api/agentStream", () => ({
-  getSessionOwnerToken: () => "owner-test",
-}));
-
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify({ code: status, message: "ok", data }), {
     status,

@@ -1,0 +1,12 @@
+# Draft Dockerfile for pilot backend (W10). Prefer host .venv for day-to-day.
+FROM python:3.12-slim
+
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY app ./app
+COPY scripts ./scripts
+COPY evals ./evals
+RUN pip install --no-cache-dir -e . || pip install --no-cache-dir fastapi uvicorn loguru pydantic pydantic-settings httpx redis
+
+EXPOSE 9900
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9900"]

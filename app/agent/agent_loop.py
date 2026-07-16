@@ -79,6 +79,7 @@ _NON_RETRYABLE_TOKENS = (
     "permission denied",
     "authentication",
 )
+_STRUCTURED_FAILURE_STATUSES = frozenset({"error", "failed", "timeout", "timed_out"})
 
 
 class GuardedToolExecutor:
@@ -126,29 +127,46 @@ class GuardedToolExecutor:
         tools: list[RuntimeTool],
     ) -> list[ToolExecutionResult]:
         tool_by_name = {tool.name: tool for tool in tools}
-        results: list[ToolExecutionResult] = []
-        for tool_call in tool_calls:
+        if not tool_calls:
+            return []
+
+        parallel = bool(getattr(config, "harness_parallel_tool_calls", True)) and len(tool_calls) > 1
+
+        async def _one(tool_call: ToolCall) -> ToolExecutionResult:
             tool = tool_by_name.get(tool_call.name)
             if tool is None:
-                results.append(_failed(tool_call, f"Tool not found: {tool_call.name}"))
-                continue
+                return _failed(tool_call, f"Tool not found: {tool_call.name}")
             if self.allowlist is not None and tool.name not in self.allowlist:
-                results.append(_failed(tool_call, f"Tool not allowed: {tool.name}"))
-                continue
-            results.append(await self._run_one(tool, tool_call))
+                return _failed(tool_call, f"Tool not allowed: {tool.name}")
+            return await self._run_one(tool, tool_call)
+
+        if parallel:
+            # Read-only tool surface: run concurrent calls; preserve input order.
+            return list(await asyncio.gather(*[_one(tc) for tc in tool_calls]))
+
+        results: list[ToolExecutionResult] = []
+        for tool_call in tool_calls:
+            results.append(await _one(tool_call))
         return results
 
     async def _run_one(self, tool: RuntimeTool, tool_call: ToolCall) -> ToolExecutionResult:
         attempts = max(0, self.max_retries) + 1
         last_error = ""
+        timeout_seconds = (
+            float(tool.timeout_seconds)
+            if tool.timeout_seconds is not None
+            else self.timeout_seconds
+        )
         for attempt in range(attempts):
             try:
+                started_at = time.perf_counter()
                 raw = await asyncio.wait_for(
                     run_tool(tool, tool_call.arguments),
-                    timeout=self.timeout_seconds,
+                    timeout=timeout_seconds,
                 )
+                latency_ms = int((time.perf_counter() - started_at) * 1000)
             except TimeoutError:
-                last_error = f"Tool execution timed out after {self.timeout_seconds:g}s"
+                last_error = f"Tool execution timed out after {timeout_seconds:g}s"
                 return _failed(tool_call, last_error)
             except Exception as exc:
                 last_error = f"Tool execution failed: {exc}"
@@ -158,12 +176,27 @@ class GuardedToolExecutor:
                 return _failed(tool_call, last_error)
 
             content = self._postprocess_output(_stringify_tool_result(raw))
+            structured_failure = _structured_failure_reason(raw)
+            if structured_failure:
+                last_error = f"Tool reported structured failure: {structured_failure}"
+                if _is_retryable(RuntimeError(last_error)) and attempt < attempts - 1:
+                    await self._sleep_backoff(attempt, tool.name, last_error)
+                    continue
+                return ToolExecutionResult(
+                    call_id=tool_call.id,
+                    tool_name=tool_call.name,
+                    content=content,
+                    success=False,
+                    raw=raw,
+                    latency_ms=latency_ms,
+                )
             return ToolExecutionResult(
                 call_id=tool_call.id,
                 tool_name=tool_call.name,
                 content=content,
                 success=True,
                 raw=raw,
+                latency_ms=latency_ms,
             )
         return _failed(tool_call, last_error)
 
@@ -189,6 +222,35 @@ class GuardedToolExecutor:
 def _is_retryable(exc: Exception) -> bool:
     text = str(exc).lower()
     return not any(token in text for token in _NON_RETRYABLE_TOKENS)
+
+
+def _structured_failure_reason(raw: Any) -> str | None:
+    """Return a provider-declared error without confusing it for tool success.
+
+    Runtime tools frequently return structured payloads instead of raising: local
+    Prometheus returns a JSON string with ``success=false`` and MCP tools return
+    a mapping with ``status=error``. Both are investigation failures even though
+    the Python handler itself completed normally.
+    """
+
+    payload = raw[0] if isinstance(raw, tuple) and raw else raw
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(payload, dict):
+        return None
+
+    status = str(payload.get("status") or "").strip().lower()
+    failed = payload.get("success") is False or status in _STRUCTURED_FAILURE_STATUSES
+    if not failed:
+        return None
+    for key in ("error", "message", "detail", "note"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return status or "success=false"
 
 
 def _failed(tool_call: ToolCall, content: str) -> ToolExecutionResult:
@@ -240,13 +302,19 @@ async def stream_tool_results(
                 on_event(event)
             yield event
         duration_ms = (time.perf_counter() - started) * 1000 if started is not None else None
+        tool_latency_ms = int(getattr(result, "latency_ms", 0) or 0)
+        payload = {
+            "arguments": args_by_id.get(result.call_id, {}),
+            "result": content,
+            "tool_latency_ms": tool_latency_ms,
+        }
         tool_event = make_tool_event(
             agent=agent_label,
             tool=result.tool_name,
             status="completed" if result.success else "failed",
             evidence_id=result.call_id,
             summary=summarize(content),
-            payload={"arguments": args_by_id.get(result.call_id, {})},
+            payload=payload,
             trace_id=trace_id,
             span_id=f"tool:{result.call_id}",
             duration_ms=duration_ms,

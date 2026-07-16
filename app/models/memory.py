@@ -36,6 +36,20 @@ class ExperienceMemoryUpdateRequest(BaseModel):
     confidence: float | None = None
 
 
+class DistillConfirmRequest(BaseModel):
+    experience_id: str = Field(..., alias="ExperienceId")
+    note: str = Field(default="", alias="Note")
+
+    model_config = {"populate_by_name": True}
+
+
+class DistillRejectRequest(BaseModel):
+    experience_id: str = Field(..., alias="ExperienceId")
+    note: str = Field(default="", alias="Note")
+
+    model_config = {"populate_by_name": True}
+
+
 class ServiceUpsertRequest(BaseModel):
     environment: str = "prod"
     owner_team: str = ""
