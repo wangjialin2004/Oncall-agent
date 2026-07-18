@@ -31,12 +31,51 @@ def _port_reachable(url: str, timeout: float = 0.2) -> bool:
 
 
 def _llm_config_status() -> dict[str, str]:
-    configured = bool(config.dashscope_api_key and config.dashscope_api_key != "your-api-key-here")
+    llm_key = str(config.llm_api_key or "").strip()
+    dash_key = str(config.dashscope_api_key or "").strip()
+    llm_configured = bool(
+        (
+            llm_key
+            and llm_key not in {"your-api-key-here", "get.env('LLM_API_KEY')"}
+        )
+        or (
+            dash_key
+            and dash_key
+            not in {"your-api-key-here", "your-dashscope-api-key-here"}
+        )
+    )
+    provider = str(config.embedding_provider or "local_bge_m3").strip().lower()
+    if provider in {"local_bge_m3", "bge", "bge3", "local", "bge_m3"}:
+        embedding_status = "local_bge_m3"
+        embedding_model = str(config.embedding_model or "BAAI/bge-m3")
+        embedding_message = "本地 BGE-M3 embedding（无需 DASHSCOPE_API_KEY）"
+    elif provider == "dashscope":
+        dash_ok = bool(
+            dash_key and dash_key not in {"your-api-key-here", "your-dashscope-api-key-here"}
+        )
+        embedding_status = "configured" if dash_ok else "missing"
+        embedding_model = str(
+            config.dashscope_embedding_model or config.embedding_model or "text-embedding-v4"
+        )
+        embedding_message = (
+            "DashScope embedding 已配置" if dash_ok else "EMBEDDING_PROVIDER=dashscope 但 DASHSCOPE_API_KEY 未配置"
+        )
+    else:
+        embedding_status = "unknown"
+        embedding_model = str(config.embedding_model or "")
+        embedding_message = f"未知 EMBEDDING_PROVIDER={provider}"
+
     return {
-        "status": "configured" if configured else "missing",
-        "model": config.dashscope_model,
-        "embedding_model": config.dashscope_embedding_model,
-        "message": "LLM 配置已存在" if configured else "DASHSCOPE_API_KEY 未配置",
+        "status": "configured" if llm_configured else "missing",
+        "model": str(config.llm_model or config.dashscope_model or ""),
+        "embedding_provider": provider or "local_bge_m3",
+        "embedding_model": embedding_model,
+        "embedding_dim": str(int(config.embedding_dim or 1024)),
+        "embedding_status": embedding_status,
+        "message": (
+            "LLM 配置已存在" if llm_configured else "LLM_API_KEY / DASHSCOPE_API_KEY 未配置"
+        )
+        + f"；{embedding_message}",
     }
 
 

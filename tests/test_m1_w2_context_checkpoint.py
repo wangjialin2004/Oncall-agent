@@ -184,6 +184,21 @@ async def test_harness_stamps_recent_turns_on_complete(monkeypatch):
         lambda self, state: [],
     )
 
+    class _FakeContextStore:
+        """Minimal store so harness never hits real Redis/DB on this path."""
+
+        async def get_or_rebuild(self, owner_key, session_id, rebuild=None):
+            from app.agent.context.store import StoreResult
+
+            return StoreResult(
+                state=AgentContextState(owner_key=owner_key, session_id=session_id),
+                source="fresh",
+                warnings=[],
+            )
+
+        async def save(self, owner_key, session_id, state, *, persist_snapshot=True):
+            return []
+
     fake_llm = FakeLLM(
         [LLMResponse(content="final answer text", raw={}, usage={"total_tokens": 3})]
     )
@@ -192,7 +207,7 @@ async def test_harness_stamps_recent_turns_on_complete(monkeypatch):
         llm_client=fake_llm,
         tools=[],
         limits=HarnessLimits(max_steps=2, token_budget=5000, timeout_seconds=10),
-        context_store=None,
+        context_store=_FakeContextStore(),
     )
     events = [
         event

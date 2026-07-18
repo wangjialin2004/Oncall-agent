@@ -29,6 +29,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Local BGE-M3 dense embeddings (not installed by default — keeps CI/slim images light).
+embedding = [
+    "FlagEmbedding>=1.2.0",
+    "torch",
+]
 dev = [
     "pytest>=7.4.3",
     "pytest-asyncio>=0.23.0",
