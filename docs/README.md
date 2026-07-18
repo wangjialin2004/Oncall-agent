@@ -60,6 +60,7 @@ docs/
 
 | 文档 | 说明 |
 |---|---|
+| [completion-review-2026-07-18-security-tenant-reliability.md](./reviews/completion-review-2026-07-18-security-tenant-reliability.md) | **系统安全/租户隔离/可靠性收尾审查；代码条件通过，live migration、readiness/metrics、WP-8 仍阻塞** |
 | [completion-review-2026-07-13-project-score.md](./reviews/completion-review-2026-07-13-project-score.md) | **07-13 全项目审查与综合打分（7.9/10）** |
 | [completion-review-2026-07-13-formal-l1-go.md](./reviews/completion-review-2026-07-13-formal-l1-go.md) | **07-13 正式 L1 Go 决策落档** |
 | [completion-review-2026-07-12-evening.md](./reviews/completion-review-2026-07-12-evening.md) | 07-12 晚间连续评测 + checkpoint |

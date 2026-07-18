@@ -31,6 +31,20 @@ except Exception:  # pragma: no cover - environment without redis installed
 
 _DEFAULT_CLIENT: _AsyncRedis | None = None
 _DEFAULT_CLIENT_LOCK = asyncio.Lock()
+_REDIS_STATUS: dict[str, str] = {"status": "unknown"}
+
+
+def redis_health_snapshot() -> dict[str, str]:
+    """Return the last lifecycle ping state without performing network I/O."""
+
+    return dict(_REDIS_STATUS)
+
+
+def _set_redis_status(status: str, reason: str = "") -> None:
+    global _REDIS_STATUS
+    _REDIS_STATUS = {"status": status}
+    if reason:
+        _REDIS_STATUS["reason"] = reason
 
 
 def is_redis_available() -> bool:
@@ -91,17 +105,21 @@ async def redis_lifespan() -> AsyncIterator[None]:
     directly.
     """
     if not bool(getattr(config, "redis_enabled", False)):
+        _set_redis_status("disabled")
         yield
         return
     if _AsyncRedis is None:  # pragma: no cover - dependency missing
+        _set_redis_status("degraded", "redis_package_missing")
         logger.warning("redis_enabled=true 但 redis 包不可用，跳过客户端初始化")
         yield
         return
     try:
         client = await get_redis_client()
         await client.ping()
+        _set_redis_status("ready")
         logger.info("redis 客户端已就绪")
     except Exception as exc:
+        _set_redis_status("degraded", type(exc).__name__)
         logger.warning(f"redis ping 失败（不影响主链路）: {exc}")
     try:
         yield

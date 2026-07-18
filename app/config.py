@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 9900
     static_serve_enabled: bool = False
+    # Runtime observability access. Production defaults to internal-only;
+    # bearer is for a protected Prometheus scrape path.
+    metrics_access_mode: str = "internal"  # internal | bearer | public
+    metrics_bearer_token: str = ""
+    metrics_public_debug_enabled: bool = False
+    health_details_enabled: bool = False
 
     # DashScope 配置（LLM 遗留回退 + embedding=dashscope 时使用）
     dashscope_api_key: str = ""  # 默认空字符串，实际使用需从环境变量加载
@@ -239,11 +245,11 @@ class Settings(BaseSettings):
     rag_rrf_k: int = 60  # RRF constant, only used when rag_hybrid_ranker == "rrf"
     rag_dense_vector_field: str = "vector"
     rag_sparse_vector_field: str = "sparse_vector"
-    # Tenant scope is fail-closed by default. Keep the legacy collection name
-    # until the explicit biz_v2 migration and operator-approved switch.
+    # Tenant scope is fail-closed by default. biz_v2 is the scoped collection;
+    # set RAG_COLLECTION_NAME=biz only for an isolated rollback/observation run.
     rag_tenant_scope_enabled: bool = True
     rag_allow_legacy_unscoped: bool = False
-    rag_collection_name: str = "biz"
+    rag_collection_name: str = "biz_v2"
 
     # 文档分块配置
     chunk_max_size: int = 800

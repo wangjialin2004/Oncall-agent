@@ -1,7 +1,7 @@
 # 系统安全、租户隔离与可靠性修复进度
 
 > 主计划：[`2026-07-18-system-security-tenant-reliability-remediation.md`](./2026-07-18-system-security-tenant-reliability-remediation.md)
-> 状态：实施中（WP-1/2/4 已实现，WP-3 scope、WP-6 Phase 2、WP-7 Phase 1 已实现，WP-5 部分实现；live migration/CI 待验证）
+> 状态：代码与本地 live migration 收口（WP-1/2/3/4/5/6 已实现并验证；WP-7 远端 CI、WP-8/full eval、知识库重建待后续）
 > 开始日期：2026-07-18
 
 ## 1. 已批准决策
@@ -57,10 +57,10 @@
 | WP-0 | 已完成（部分外部依赖待复核） | 三个 SQLite 均 `quick_check=ok`，备份可读；Python 3.13、前端 76 tests/build、secret check、compileall 通过；Milvus/Docker 运行态可见但应用侧连接受当前沙箱网络限制，Redis ping 超时 |
 | WP-1 | 已实现并验证 | immutable RequestContext；稳定 owner + legacy storage key 兼容；业务 API async 认证矩阵 6/6；输入 extra forbid/长度上限；eval hooks 与 aggressive replay request override 默认拒绝；角色门禁具备分阶段开关 |
 | WP-2 | 已实现并验证（旧库迁移待单独 dry-run） | experience owner/visibility/approval 字段与兼容 schema；user draft 隔离、原子 confirm/reject；memory 项目固定；HITL 会话 action owner 校验；27 项定向回归通过 |
-| WP-3 | scope 实现完成；live dry-run 待健康环境 | RequestContext task binding；system/project/user 标量过滤；stable + legacy owner 迁移兼容；上传 user scope、系统文档 system scope；只读默认 migration CLI；未创建/切换/drop collection |
+| WP-3 | live schema/apply 完成；知识库重建待后续 | `biz` 旧 schema/0 entities；显式 apply 创建 `biz_v2` scope schema/0 entities；默认 collection 已切换，旧 `biz` 保留 |
 | WP-4 | 已实现并验证（stateful 全套进程退出待环境复核） | Redis scope hash、无 SCAN 删除、单调 step、调度快照深拷贝；checkpoint/Redis 定向断言通过；stateful 测试断言通过但当前 Python 3.13/anyio 测试进程在后台线程退出阶段超时 |
-| WP-5 | 部分实现并验证 | Redis lifespan 接入；`/health/live` 与 `/health/readiness` 分离；默认 secret/admin、LLM/Milvus readiness 门禁；assistant/memory/file 错误响应脱敏 |
-| WP-6 | Phase 2 runner/enforcement 完成；live up/文件治理待后续 | migration v1/v2 + checksum、legacy columns、transactional `status/verify/up`；`DB_SCHEMA_ENFORCEMENT_ENABLED=false` 默认关闭，未执行 live up |
+| WP-5 | 代码收口并验证 | metrics 访问策略；Redis/MCP capability readiness；`/health/live`/readiness；公开 health 脱敏与 admin details |
+| WP-6 | 长期记忆真实库迁移完成；文件治理待后续 | live `0 -> 2`、backup refresh/quick_check、checksum/verify、幂等重跑通过；enforcement rollout 待部署 |
 | WP-7 | Phase 1 完成；CI/生产编排扩展待后续 | Makefile `/api/files` + bearer fail-fast；check-all 改为只读；Dockerfile fail-closed install/healthcheck；Compose data volume、Redis healthcheck、backend readiness |
 | WP-8 | 未开始 | N4/S1 与全量回归 |
 
@@ -100,9 +100,9 @@
 
 - 新增 `app/services/database_migration_service.py` 与 `scripts/migrate_database.py`，覆盖长期记忆 SQLite 的 8 张业务表、索引和 `schema_migrations` 版本记录；v2 负责已知旧列补齐与 checksum 校验。
 - `tests/test_database_migrations.py`：空库只读、backup 门禁/幂等 up、事务失败回滚、legacy fixture、service enforcement **6 passed**。
-- 现有 `volumes/long_term_memory.db` 只读 `status`：`current_version=0`、`pending=[1,2]`、`missing=[]`；`verify` 返回未验证并以退出码 1 结束，未修改数据库。
+- 审批前历史记录：现有 `volumes/long_term_memory.db` 只读 `status` 为 `current_version=0`、`pending=[1,2]`、`missing=[]`；`verify` 返回未验证并以退出码 1 结束，未修改数据库。
 - 新增 `DB_SCHEMA_ENFORCEMENT_ENABLED=false`；开启后 conversation/context/file/preference/experience/service services 只验证 migration version，不执行首次请求 DDL。
-- WP-6 偏差：未执行真实库 `up`；文件流式上传、并发索引和 checkpoint/diagnosis 独立库迁移留后续工作包。触及的旧服务已有 Ruff 风格问题，本次未扩大范围修复。
+- 审批前 WP-6 偏差：未执行真实库 `up`；文件流式上传、并发索引和 checkpoint/diagnosis 独立库迁移留后续工作包。触及的旧服务已有 Ruff 风格问题，本次未扩大范围修复。
 - 使用 `/tmp` 副本和对应备份副本完成一次接近真实数据的迁移演练：version `0 -> 2`，`schema_ok=true`、checksum 正确；第二次 `up` 幂等通过。副本元数据为 conversations=60、conversation_turns=52、experiences=440、uploaded_files=4、services=1、service_baselines=1、service_relations=0、user_preferences=0；真实库未写入。
 
 ### 2026-07-18 WP-7 deployment/CI contracts phase 1
@@ -120,4 +120,14 @@
 - 最终后端定向集合 **70 passed**；现有 ci-smoke **49 passed**；前端 **83 passed**，build 通过。
 - 修复两处 critical undefined-name 静态问题（harness context `logger`、stateful rebuild `AgentContextState`）。`ruff --select E9,F63,F7,F82`、compileall、secret contract、`git diff --check` 均通过。
 - 全仓 Ruff format-check 仍报告 84 个历史文件待格式化；本棒未执行大范围格式化，避免覆盖既有用户工作。
+
+### 2026-07-18 final hardening + live migration
+
+- Runtime hardening focused tests **19 passed**；安全/租户/checkpoint/migration 集合 **69 passed**；CI smoke 扩展集合 **88 passed**。
+- Milvus live endpoint reachable；`biz` fields=`id,vector,content,metadata`, entities=0；explicit apply created `biz_v2` fields including `scope_type/scope_id`, entities=0; source unchanged.
+- Application default `RAG_COLLECTION_NAME` switched to `biz_v2`; old `biz` remains rollback/observation source. No rebuild was run because both collections are empty.
+- Existing SQLite dated backup was preserved as `long_term_memory.db.prior-20260718`; refreshed backup matched live counts and both passed `quick_check=ok`.
+- Real `long_term_memory.db` migration completed `0 -> 2`; `status/verify` show `schema_ok=true`, second `up` idempotent; counts unchanged (conversations=60, turns=52, experiences=484, uploaded_files=4).
+- Remaining external work: knowledge data rebuild, `DB_SCHEMA_ENFORCEMENT_ENABLED=true` deployment rollout, remote CI, Redis live application ping/circuit evidence, WP-8 full eval.
+- Redis read-only probe reached the service but returned `AuthenticationError`; no credential is present in this workspace, so `REDIS_URL` must be supplied by deployment secret management before marking Redis live readiness complete.
 - `docker compose ... --profile full config` 和 backend image build 通过；远端 CI 尚未运行，真实 SQLite/Milvus migration 未执行。

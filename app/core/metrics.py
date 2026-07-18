@@ -14,10 +14,15 @@
 
 from __future__ import annotations
 
+import hmac
+import ipaddress
 import time
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from fastapi import FastAPI
 from prometheus_client import Counter, Gauge, Histogram, make_asgi_app
+from starlette.responses import PlainTextResponse
 
 try:
     import psutil
@@ -25,6 +30,57 @@ except ImportError:  # pragma: no cover - psutil 为可选依赖，缺失时降�
     psutil = None
 
 METRICS_PATH = "/metrics"
+
+
+def _request_headers(scope: dict[str, Any]) -> dict[bytes, bytes]:
+    return {key.lower(): value for key, value in scope.get("headers", [])}
+
+
+def metrics_access_allowed(scope: dict[str, Any]) -> bool:
+    """Apply the fail-closed metrics access policy to an ASGI request scope."""
+
+    mode = str(getattr(_get_config(), "metrics_access_mode", "internal") or "internal").strip().lower()
+    config = _get_config()
+    if mode == "public":
+        return bool(config.debug and config.metrics_public_debug_enabled)
+    if mode == "bearer":
+        expected = str(config.metrics_bearer_token or "").strip()
+        if not expected:
+            return False
+        actual = _request_headers(scope).get(b"authorization", b"").decode("latin-1")
+        scheme, _, token = actual.partition(" ")
+        return scheme.lower() == "bearer" and hmac.compare_digest(token.strip(), expected)
+    if mode != "internal":
+        return False
+    client = scope.get("client")
+    host = client[0] if isinstance(client, (tuple, list)) and client else None
+    try:
+        address = ipaddress.ip_address(str(host))
+    except ValueError:
+        return False
+    return bool(address.is_loopback or address.is_private)
+
+
+def _get_config() -> Any:
+    # Lazy import avoids making the metrics module's global Prometheus objects
+    # depend on settings construction during package import.
+    from app.config import config
+
+    return config
+
+
+class _ProtectedMetricsApp:
+    def __init__(self, app: Callable[..., Awaitable[None]]) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Callable[..., Awaitable[Any]], send: Callable[..., Awaitable[None]]) -> None:
+        if scope.get("type") != "http" or metrics_access_allowed(scope):
+            await self.app(scope, receive, send)
+            return
+        mode = str(getattr(_get_config(), "metrics_access_mode", "internal") or "internal").strip().lower()
+        status = 401 if mode == "bearer" else 403
+        response = PlainTextResponse("metrics access denied", status_code=status)
+        await response(scope, receive, send)
 
 # --- 资源使用率 Gauge（采集时惰性求值，避免后台线程）---------------------------
 CPU_USAGE_PERCENT = Gauge(
@@ -276,5 +332,7 @@ def setup_metrics(app: FastAPI) -> None:
                 request.method, _route_template(request), str(status_code)
             ).observe(elapsed)
 
-    # 默认 REGISTRY 已包含上面定义的指标；make_asgi_app 负责渲染文本格式
-    app.mount(METRICS_PATH, make_asgi_app())
+    # 默认 REGISTRY 已包含上面定义的指标；make_asgi_app 负责渲染文本格式。
+    # The wrapper is required because a mounted ASGI app bypasses FastAPI route
+    # dependencies, so a normal ``Depends(auth)`` cannot protect this endpoint.
+    app.mount(METRICS_PATH, _ProtectedMetricsApp(make_asgi_app()))

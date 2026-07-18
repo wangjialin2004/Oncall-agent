@@ -78,14 +78,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("LLMClient 预热失败（按需懒加载）：{}", e)
 
-    # 预热 MCP 客户端（避免首次 expert 启动时再冷启 5~8s）
-    try:
-        from app.agent.mcp_client import get_mcp_client_with_retry
+    # 只有启用 MCP 能力时才预热并将其视为 readiness 依赖。
+    if config.harness_mcp_enabled:
+        try:
+            from app.agent.mcp_client import get_mcp_client_with_retry
 
-        await get_mcp_client_with_retry()
-        logger.info("✅ MCP 客户端预热完成")
-    except Exception as e:
-        logger.warning("MCP 客户端预热失败（按需懒加载）：{}", e)
+            await get_mcp_client_with_retry()
+            logger.info("✅ MCP 客户端预热完成")
+        except Exception as e:
+            logger.warning("MCP 客户端预热失败（按需懒加载）：{}", e)
+    else:
+        logger.info("MCP disabled; skip client prewarm")
 
     logger.info("=" * 60)
 

@@ -4,13 +4,18 @@ import socket
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from loguru import logger
 
 from app.config import config
 from app.core.milvus_client import milvus_manager
 from app.services.memory_cache import get_default_cache
+from app.services.redis_client import redis_health_snapshot
+from app.services.session_scope_service import (
+    AuthenticatedPrincipal,
+    require_authenticated_principal,
+)
 
 router = APIRouter()
 _DEFAULT_AUTH_SECRET = "dev-auth-token-secret"
@@ -123,22 +128,30 @@ def build_health_data() -> dict[str, Any]:
             "message": f"Milvus 检查失败: {str(e)}",
         }
 
-    health_data["mcp"] = {
-        "cls": {
-            "url": config.mcp_cls_url,
-            "status": "reachable" if _port_reachable(config.mcp_cls_url) else "unreachable",
-            "transport": config.mcp_cls_transport,
-        },
-        "monitor": {
-            "url": config.mcp_monitor_url,
-            "status": "reachable" if _port_reachable(config.mcp_monitor_url) else "unreachable",
-            "transport": config.mcp_monitor_transport,
-        },
-    }
+    if config.harness_mcp_enabled:
+        health_data["mcp"] = {
+            "cls": {
+                "url": config.mcp_cls_url,
+                "status": "reachable" if _port_reachable(config.mcp_cls_url) else "unreachable",
+                "transport": config.mcp_cls_transport,
+            },
+            "monitor": {
+                "url": config.mcp_monitor_url,
+                "status": "reachable"
+                if _port_reachable(config.mcp_monitor_url)
+                else "unreachable",
+                "transport": config.mcp_monitor_transport,
+            },
+        }
+    else:
+        health_data["mcp"] = {
+            "cls": {"status": "disabled"},
+            "monitor": {"status": "disabled"},
+        }
 
     health_data["llm"] = _llm_config_status()
     health_data["rag"] = {
-        "collection_name": milvus_manager.COLLECTION_NAME,
+        "collection_name": milvus_manager.collection_name,
         "collection_status": "available"
         if health_data["milvus"]["status"] == "connected"
         else "unavailable",
@@ -154,12 +167,34 @@ def build_health_data() -> dict[str, Any]:
         "provider": config.log_provider,
     }
     health_data["memory_cache"] = _memory_cache_status()
+    health_data["redis"] = redis_health_snapshot()
 
     if health_data["milvus"]["status"] != "connected":
         health_data["status"] = "unhealthy"
         health_data["error"] = "数据库不可用"
 
     return health_data
+
+
+def _public_health_data(data: dict[str, Any], issues: list[str]) -> dict[str, Any]:
+    """Return a low-sensitivity health payload for unauthenticated probes."""
+
+    milvus = data.get("milvus", {})
+    llm = data.get("llm", {})
+    mcp = data.get("mcp", {})
+    return {
+        "service": data.get("service", config.app_name),
+        "version": data.get("version", config.app_version),
+        "status": "healthy" if not issues else "unhealthy",
+        "issues": list(issues),
+        "milvus": {"status": milvus.get("status", "unknown")},
+        "llm": {"status": llm.get("status", "unknown")},
+        "redis": {"status": data.get("redis", {}).get("status", "unknown")},
+        "mcp": {
+            "cls": {"status": mcp.get("cls", {}).get("status", "unknown")},
+            "monitor": {"status": mcp.get("monitor", {}).get("status", "unknown")},
+        },
+    }
 
 
 def readiness_issues(health_data: dict[str, Any] | None = None) -> list[str]:
@@ -169,6 +204,17 @@ def readiness_issues(health_data: dict[str, Any] | None = None) -> list[str]:
         issues.append("milvus_unavailable")
     if data.get("llm", {}).get("status") != "configured":
         issues.append("llm_not_configured")
+    if (
+        bool(getattr(config, "redis_enabled", False))
+        and bool(getattr(config, "harness_checkpoint_enabled", False))
+        and "redis" in data
+        and data.get("redis", {}).get("status") not in {"ready", "disabled"}
+    ):
+        issues.append("redis_degraded")
+    if bool(getattr(config, "harness_mcp_enabled", False)) and "mcp" in data:
+        mcp = data.get("mcp", {})
+        if any(mcp.get(name, {}).get("status") != "reachable" for name in ("cls", "monitor")):
+            issues.append("mcp_unavailable")
     if not config.debug:
         if str(config.auth_token_secret or "").strip() in {"", _DEFAULT_AUTH_SECRET}:
             issues.append("default_auth_secret")
@@ -182,8 +228,10 @@ def readiness_issues(health_data: dict[str, Any] | None = None) -> list[str]:
 async def health_check():
     """健康检查接口。"""
 
-    health_data = build_health_data()
-    status_code = 200 if health_data["status"] == "healthy" else 503
+    details = build_health_data()
+    issues = readiness_issues(details)
+    health_data = _public_health_data(details, issues)
+    status_code = 200 if not issues else 503
     return JSONResponse(
         status_code=status_code,
         content={
@@ -214,3 +262,16 @@ async def readiness_check():
             "data": {"status": "ready" if not issues else "not_ready", "issues": issues},
         },
     )
+
+
+@router.get("/health/details")
+async def health_details(
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+):
+    """Protected diagnostic payload for operators; disabled by default."""
+
+    if not config.health_details_enabled:
+        raise HTTPException(status_code=404, detail="not_found")
+    if principal.role != "admin":
+        raise HTTPException(status_code=403, detail="forbidden")
+    return {"code": 200, "message": "ok", "data": build_health_data()}

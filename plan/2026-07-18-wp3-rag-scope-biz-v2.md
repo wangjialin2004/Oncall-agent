@@ -1,6 +1,6 @@
 # WP-3 RAG tenant scope and `biz_v2`
 
-> Status: implementation complete; live Milvus dry-run blocked by current connectivity
+> Status: live schema/apply complete; source and target currently contain 0 entities; knowledge rebuild remains pending
 
 ## Problem
 
@@ -15,8 +15,9 @@ dimension-mismatch path that can drop the legacy collection.
   `project`, `user`).
 - Build filters only from the authenticated `RequestContext`; missing context
   fails closed when `RAG_TENANT_SCOPE_ENABLED=true`.
-- Keep `RAG_COLLECTION_NAME=biz` until an operator completes the explicit
-  `biz_v2` migration and switch. `RAG_TENANT_SCOPE_ENABLED` defaults to true;
+- Keep `biz` as rollback/observation source after the operator-approved
+  `biz_v2` migration and switch. `RAG_COLLECTION_NAME` now defaults to `biz_v2`;
+  `RAG_TENANT_SCOPE_ENABLED` defaults to true;
   `RAG_ALLOW_LEGACY_UNSCOPED` defaults to false.
 - `scripts/migrate_rag_scope.py` is read-only by default. `--dry-run` reports
   source/target schema and entity gaps. Apply mode requires `--apply` and never
@@ -32,7 +33,8 @@ dimension-mismatch path that can drop the legacy collection.
 
 ## Non-goals
 
-- No live migration, collection switch, rebuild, or deletion in this change.
+- No knowledge rebuild or deletion in this change; live schema/apply is explicit
+  and source `biz` remains preserved.
 - No change to SSE event types, read-only tool policy, or memory collection.
 
 ## Affected files
@@ -84,6 +86,17 @@ git diff --check
   reachable from this sandbox.
 - `tests/test_rag_tenant_scope.py` and the handoff regression set: **45 passed**.
 - Ruff, compileall, and `git diff --check`: passed.
+
+## Live verification (2026-07-18)
+
+- Milvus was reachable at the configured endpoint. Source `biz` was confirmed as
+  legacy schema (`id/vector/content/metadata`) with `0` entities.
+- Explicit `--apply --source biz --target biz_v2` created the scoped target with
+  `scope_type`/`scope_id`; target has `0` entities and source was not modified.
+- Default application collection is now `biz_v2`; set `RAG_COLLECTION_NAME=biz`
+  only for an isolated rollback/observation run.
+- Follow-up dry-run reports both collections and `mutated=false`; no rebuild was
+  performed because there were no source entities to classify.
 
 Deviation: the approved target model uses the new stable owner, but existing
 uploaded-file metadata still uses the legacy storage owner until WP-6. The

@@ -5,6 +5,7 @@ import pytest
 from app.config import config
 from app.core.request_context import RequestContext
 from app.services.rag_scope import RagScopeError, build_scope_filter, scope_fields
+from scripts.migrate_rag_scope import _row_scope
 
 
 def _context(owner: str = "owner-a", project: str = "project-a") -> RequestContext:
@@ -54,6 +55,14 @@ def test_scope_fields_reject_unknown_or_invalid_values() -> None:
         scope_fields(scope_type="project", scope_id="")
     with pytest.raises(RagScopeError):
         scope_fields(scope_type="unknown", scope_id="x")
+
+
+def test_legacy_scope_reads_json_metadata_without_guessing() -> None:
+    assert _row_scope({"id": "1", "metadata": '{"scope_type":"project","scope_id":"p1"}'}) == (
+        "project",
+        "p1",
+    )
+    assert _row_scope({"id": "2", "metadata": '{"owner":"user-a"}'}) is None
 
 
 def test_milvus_schema_declares_scope_fields(monkeypatch: pytest.MonkeyPatch) -> None:

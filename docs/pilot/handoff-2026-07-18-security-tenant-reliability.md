@@ -19,19 +19,19 @@
 |---|---|
 | WP-0 基线/备份门禁 | ✅ 完成；外部服务复核仍受当前执行环境限制 |
 | WP-1 RequestContext/API auth | ✅ 实现并验证 |
-| WP-2 memory/HITL tenant ownership | ✅ 实现并验证；正式旧库 migration 待 dry-run |
-| WP-3 Milvus `biz_v2` | 🟡 scope/schema/dry-run CLI 已实现；当前连接阻塞，未迁移/切换/drop |
+| WP-2 memory/HITL tenant ownership | ✅ 实现并验证；长期记忆库已完成 version 2 migration |
+| WP-3 Milvus `biz_v2` | ✅ live schema/apply 已完成；`biz_v2` 已创建并切换默认，`biz` 保留；当前两者 0 entities |
 | WP-4 checkpoint/Redis | ✅ 关键修复实现并验证；stateful pytest 进程退出需在 CI 环境复核 |
-| WP-5 readiness/error/lifecycle | 🟡 部分实现；Redis lifespan、live/readiness、错误脱敏已完成 |
-| WP-6 | 🟡 migration runner/enforcement Phase 2 已实现；真实库 `up`、文件治理未收口 |
+| WP-5 readiness/error/lifecycle | ✅ 代码收口；metrics 访问、Redis/MCP readiness、health 脱敏已完成 |
+| WP-6 | ✅ 长期记忆真实库已 `up` 到 version 2 并验证；文件治理/其他库未收口 |
 | WP-7 | 🟡 deployment/CI contracts Phase 1 已实现；远端 CI 尚未运行 |
 | WP-8 | ⬜ 未开始；N4/S1/full eval 待后续 |
-| 定向回归 | ✅ **70 passed**；ci-smoke **49 passed** |
+| 定向回归 | ✅ **69 passed**；CI smoke 扩展 **88 passed** |
 | 前端验证 | ✅ **83 tests passed**，build 通过 |
 | 自动处置/HITL | ❌ 无自动处置；`executed=false` 保持不变 |
 | `CHANGE_SOURCE_POLICY` / `AUTO_DISTILL` | `unavailable` / `false` 保持不变 |
 
-**接手人一句话**：实现提交 `e718f58` 已推送，安全/租户/SQLite runner/部署契约已落地；下一棒先在健康环境完成 `biz_v2` dry-run 和真实库迁移审批，再收口 WP-5/7/8，产品仍是 L3 Conditional。
+**接手人一句话**：安全/租户/runtime hardening 已落地；`biz_v2` 和长期记忆 SQLite 已完成本地健康环境收口，旧 `biz` 保留，下一棒收口远端 CI/WP-8 与知识库数据重建，产品仍是 L3 Conditional。
 
 ## 1. 必读文档
 
@@ -156,9 +156,9 @@ critical Ruff（E9/F63/F7/F82）、compileall、`git diff --check` 通过。
 
 ### 5.2 迁移与容器证据
 
-- 真实 `volumes/long_term_memory.db` 只读 `status`：`current_version=0`、`pending=[1,2]`、`missing=[]`；未执行真实 `up`。
+- 真实 `volumes/long_term_memory.db` 已执行 `up`：`current_version=2`、`pending=[]`、`schema_ok=true`；第二次 `up` 幂等通过，`quick_check=ok`。
 - `/tmp` 数据库副本执行 `up`：version `0 -> 2`、checksum/schema 正确；第二次 `up` 幂等通过；副本元数据 conversations=60、turns=52、experiences=440、uploaded_files=4、services=1、service_baselines=1。
-- `scripts/migrate_rag_scope.py --dry-run --target biz_v2` 返回 `status=blocked`、`mutated=false`；当前执行环境无法连接 Milvus `localhost:19530`。
+- Milvus live 复核可达：`biz` schema 为旧无 scope、entities=0；显式 apply 创建 `biz_v2`，字段含 `scope_type/scope_id`，entities=0，旧 `biz` 未修改；默认配置已切换为 `biz_v2`。
 - `docker compose -f deploy/compose/docker-compose.pilot.yml --profile full config` 通过；backend 镜像实际构建成功；未启动完整 Compose 栈。
 
 ### 5.3 提交与工作树
@@ -173,15 +173,15 @@ critical Ruff（E9/F63/F7/F82）、compileall、`git diff --check` 通过。
 - SQLite：长期记忆 8 tables/230 conversations/426 experiences/4 uploaded files；checkpoint 2 tables/15 checkpoints/48 writes；diagnosis 3 tables。
 - 备份：`volumes/backups/2026-07-18/`，三个 SQLite 均 `quick_check=ok`。
 - Docker 只读状态：Milvus standalone、etcd、minio、attu 显示 running/healthy。
-- 当前沙箱内 pymilvus 连接不可达，Redis ping 超时；未执行 Milvus migration、rebuild 或 collection switch。
+- 当前 live 复核：Milvus `biz_v2` 已创建；未执行知识库 rebuild（两 collection 当前均为 0 entities）；Redis live ping 仍需在应用 lifespan/Compose 中复核。
 
 ## 6. 未完成项与阻塞
 
 ### P0：下一棒必须完成
 
-1. **WP-3 `biz_v2` live 收口**：在可达环境复核 schema/entity/scope，执行 dry-run；无 owner 向量进入人工清单，旧 `biz` 不得 drop。
-2. **WP-6 真实库迁移审批**：确认 backup、窗口、表/行数快照后执行 `scripts/migrate_database.py up`；完成后再评估打开 enforcement。
-3. **WP-5 收口**：checkpoint coordinator bounded flush、Redis circuit-open、MCP capability readiness、metrics access policy。
+1. **知识库数据重建**：`biz`/`biz_v2` 当前均为 0 entities；需按既有 BGE 重建计划重新导入系统文档和已分类文件，完成 scope/A-B 验证。
+2. **DB enforcement rollout**：真实库已 version 2；在应用部署环境设置 `DB_SCHEMA_ENFORCEMENT_ENABLED=true` 并跑业务 smoke。
+3. **WP-5 剩余可靠性**：checkpoint coordinator bounded flush、Redis circuit-open、metrics 低基数指标仍待后续。
 
 ### P1：随后完成
 
@@ -259,11 +259,11 @@ uv run python scripts/migrate_rag_scope.py --dry-run --target biz_v2
 - [x] 已确认产品仍为 L3 Conditional、只读、H3 豁免。
 - [x] 已确认 `biz` 不会被自动 drop，且迁移前有 SQLite backup。
 - [x] 已跑 API authorization、memory tenant、checkpoint/Redis、readiness、RAG scope、SQLite migration 定向测试。
-- [ ] 已在健康环境复核 Milvus/Redis metadata，未把容器状态当作应用可达证据（当前仍阻塞）。
+- [x] 已在健康环境复核 Milvus metadata；`biz_v2` 已创建，未 drop `biz`。
 - [x] 已为 WP-3、WP-6、WP-7 建立/更新正式计划，再开始 schema/部署契约变更。
 - [x] 已按文件级差异审查提交工作树，保留用户 README/前端/`.agents/` 修改。
 - [x] 已记录实现 commit、验证命令、migration 副本 metadata 和剩余风险。
-- [ ] 已在健康环境完成 Milvus live dry-run 和真实 SQLite `up`。
+- [x] 已完成 Milvus live dry-run/apply 和真实 SQLite `up`；知识库重建仍未执行。
 
 ## 10. 变更记录
 
@@ -272,3 +272,4 @@ uv run python scripts/migrate_rag_scope.py --dry-run --target biz_v2
 | 2026-07-18 | 完成本棒交接：WP-1/2 完成，WP-4 完成，WP-5 部分完成；47 项定向回归通过；WP-3/6/7/8 留给下一棒 |
 | 2026-07-18 | 后续更新：WP-3 scope/schema/dry-run CLI、WP-6 SQLite runner/enforcement Phase 2、WP-7 deployment/CI contracts Phase 1 实现；59 项定向回归通过；SQLite `/tmp` 副本迁移 0→2 并幂等重跑通过；backend 镜像构建成功；live Milvus dry-run 连接阻塞且 `mutated=false` |
 | 2026-07-18 | 完成交付提交 `e718f58` 并推送；最终定向后端 70、ci-smoke 49、前端 83；build/secret/critical static/Compose 验证通过；本文档作为下一棒入口 |
+| 2026-07-18 | 用户批准后完成 runtime hardening；Milvus `biz_v2` 创建并切换默认（source/target 均 0 entities），长期记忆 SQLite 真实库 `0 -> 2`，backup 刷新并 quick_check/verify 通过；代码回归 69、CI smoke 扩展 88 |

@@ -63,11 +63,12 @@ Model adapters must remain short references to this policy. They must not duplic
 
 ## Current Plan Index
 
-- [WP-3 RAG tenant scope and `biz_v2`](plan/2026-07-18-wp3-rag-scope-biz-v2.md) - **scope 实现完成，live dry-run 待健康环境**；当前连接阻塞，`mutated=false`，未切换/drop collection
-- [WP-6 SQLite migration runner](plan/2026-07-18-wp6-sqlite-migration-runner.md) - **Phase 2 实施完成；live up 待操作授权**；`status/verify/up` runner + `DB_SCHEMA_ENFORCEMENT_ENABLED` 阶段开关
+- [WP-3 RAG tenant scope and `biz_v2`](plan/2026-07-18-wp3-rag-scope-biz-v2.md) - **live schema/apply 已完成；biz_v2 已创建并切换默认，源 biz 保留（当前两者 0 entities）**
+- [WP-6 SQLite migration runner](plan/2026-07-18-wp6-sqlite-migration-runner.md) - **真实长期记忆库已迁移并验证 version 2；文件治理/其他库仍后续**；`status/verify/up` runner + `DB_SCHEMA_ENFORCEMENT_ENABLED` 阶段开关
 - [WP-7 deployment and CI contracts](plan/2026-07-18-wp7-deploy-ci-contracts.md) - **Phase 1 实施完成；CI 远端执行待后续**；Makefile、Docker/Compose、Python matrix 与 frontend CI
+- [最终运行时加固](plan/2026-07-18-final-runtime-hardening.md) - **代码实现完成；live Milvus/SQLite 操作待健康环境与授权**；metrics 访问、readiness 依赖状态、health 脱敏、legacy RAG dry-run
 
-- [系统安全、租户隔离与可靠性修复](plan/2026-07-18-system-security-tenant-reliability-remediation.md) - **已批准，实施中（WP-1/2/4 已实现，WP-3 scope、WP-6 runner、WP-7 contracts Phase 1 已实现，live migration/CI/WP-5 收口待后续）**；采用 system/project/user scope、operator/curator/admin 分阶段角色、Milvus `biz_v2` 保留旧 `biz`、安全默认收紧；见 [进度](plan/2026-07-18-system-security-tenant-reliability-remediation-progress.md)
+- [系统安全、租户隔离与可靠性修复](plan/2026-07-18-system-security-tenant-reliability-remediation.md) - **代码与 live migration 已收口；远端 CI、知识库重建、enforcement rollout、WP-8 待后续**；采用 system/project/user scope、operator/curator/admin 分阶段角色、Milvus `biz_v2` 保留旧 `biz`、安全默认收紧；见 [进度](plan/2026-07-18-system-security-tenant-reliability-remediation-progress.md)
 - [知识库 BGE 重建 + 死配置清理](plan/2026-07-16-kb-rebuild-dead-config-cleanup.md) - **已完成并验证**；`biz` 21 entities；删除 6 个零引用 Settings 字段
 - [本地 BGE-M3 Embedding 替换 DashScope](plan/2026-07-16-local-bge-m3-embedding.md) - **已实现并验证**；默认 `local_bge_m3`，DashScope 可回退；ci-smoke 56 passed（无 key）
 - [工作区差异分流与审查](plan/2026-07-16-working-tree-triage.md) - **已完成并验证**；隔离本地恢复/临时文件，格式检查通过，索引保持为空

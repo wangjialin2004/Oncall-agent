@@ -30,6 +30,12 @@ def _schema_fields(collection: Any) -> list[str]:
 
 def _row_scope(row: dict[str, Any]) -> tuple[str, str] | None:
     metadata = row.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            parsed = json.loads(metadata)
+        except (TypeError, ValueError):
+            parsed = None
+        metadata = parsed if isinstance(parsed, dict) else {}
     if not isinstance(metadata, dict):
         metadata = {}
     scope_type = str(row.get("scope_type") or metadata.get("scope_type") or "").strip().lower()
@@ -39,6 +45,31 @@ def _row_scope(row: dict[str, Any]) -> tuple[str, str] | None:
     if scope_type == "system" and scope_id != "system":
         return None
     return scope_type, scope_id
+
+
+def _legacy_scope_plan(collection: Any, fields: set[str]) -> dict[str, Any]:
+    """Inspect legacy rows without mutating or inventing a tenant scope."""
+
+    output_fields = [field for field in ("id", "metadata", "scope_type", "scope_id") if field in fields]
+    if "id" not in output_fields:
+        return {
+            "status": "blocked",
+            "reason": "legacy_id_field_missing",
+            "rows": 0,
+            "scoped": 0,
+            "unresolved": 0,
+            "sample_unresolved_ids": [],
+        }
+    rows = collection.query(expr='id != ""', output_fields=output_fields)
+    unresolved = [str(row.get("id")) for row in rows if _row_scope(row) is None]
+    return {
+        "status": "manual_scope_required" if unresolved else "ready",
+        "reason": "rows_without_trustworthy_scope" if unresolved else "all_rows_scoped",
+        "rows": len(rows),
+        "scoped": len(rows) - len(unresolved),
+        "unresolved": len(unresolved),
+        "sample_unresolved_ids": unresolved[:20],
+    }
 
 
 def _connect_read_only() -> tuple[Any, str]:
@@ -75,6 +106,18 @@ def inspect_collections(source_name: str, target_name: str) -> dict[str, Any]:
             )
             fields = set(result["source"]["fields"])
             result["source"]["scope_ready"] = {"scope_type", "scope_id"}.issubset(fields)
+            if result["source"]["scope_ready"]:
+                result["source"]["scope_plan"] = _legacy_scope_plan(source, fields)
+            else:
+                result["source"]["scope_plan"] = {
+                    "status": "manual_scope_required",
+                    "reason": "source_schema_missing_scope_fields",
+                    "missing_fields": [field for field in ("scope_type", "scope_id") if field not in fields],
+                    "rows": int(source.num_entities),
+                    "scoped": 0,
+                    "unresolved": int(source.num_entities),
+                    "sample_unresolved_ids": [],
+                }
         if target_exists:
             target = Collection(target_name, using=alias)
             result["target"].update(
@@ -100,16 +143,25 @@ def apply_migration(source_name: str, target_name: str, batch_size: int) -> dict
         source_fields = set(_schema_fields(source))
         required = {"id", "content", "metadata", config.rag_dense_vector_field, "scope_type", "scope_id"}
         missing = sorted(required - source_fields)
-        if missing:
+        source_entities = int(source.num_entities)
+        if missing and source_entities > 0:
             raise RuntimeError(
                 "source collection is not scope-ready; classify/reindex rows before apply: "
                 + ", ".join(missing)
             )
-        output_fields = sorted(required)
-        rows = source.query(expr='id != ""', output_fields=output_fields)
-        unscoped = [str(row.get("id")) for row in rows if _row_scope(row) is None]
-        if unscoped:
-            raise RuntimeError(f"{len(unscoped)} rows have no trustworthy scope; first ids: {unscoped[:5]}")
+        if missing:
+            # An empty legacy collection has no rows to classify. It is safe to
+            # create the scoped target schema, while non-empty legacy data is
+            # deliberately blocked above.
+            rows: list[dict[str, Any]] = []
+        else:
+            output_fields = sorted(required)
+            rows = source.query(expr='id != ""', output_fields=output_fields)
+            unscoped = [str(row.get("id")) for row in rows if _row_scope(row) is None]
+            if unscoped:
+                raise RuntimeError(
+                    f"{len(unscoped)} rows have no trustworthy scope; first ids: {unscoped[:5]}"
+                )
 
         if utility.has_collection(target_name, using=alias):
             target = Collection(target_name, using=alias)
@@ -131,7 +183,12 @@ def apply_migration(source_name: str, target_name: str, batch_size: int) -> dict
             mutated = True
             target.insert(rows[start : start + batch_size])
         target.flush()
-        return {"source_entities": len(rows), "target_entities": int(target.num_entities), "mutated": True}
+        return {
+            "source_entities": source_entities,
+            "target_entities": int(target.num_entities),
+            "source_schema_missing": missing,
+            "mutated": mutated,
+        }
     except Exception as exc:
         raise RagMigrationError(str(exc), mutated=mutated) from exc
     finally:
