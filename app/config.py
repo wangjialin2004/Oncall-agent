@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     debug: bool = False
     host: str = "0.0.0.0"
     port: int = 9900
+    static_serve_enabled: bool = False
 
     # DashScope 配置（LLM 遗留回退 + embedding=dashscope 时使用）
     dashscope_api_key: str = ""  # 默认空字符串，实际使用需从环境变量加载
@@ -44,9 +45,7 @@ class Settings(BaseSettings):
     embedding_normalize: bool = True
     embedding_use_fp16: bool = True
     # DashScope-compatible endpoint overrides (only when embedding_provider=dashscope).
-    embedding_dashscope_base_url: str = (
-        "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    )
+    embedding_dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     # Generic LLM provider configuration. When unset, the custom LLM client
     # falls back to the legacy DashScope settings above.
@@ -240,6 +239,11 @@ class Settings(BaseSettings):
     rag_rrf_k: int = 60  # RRF constant, only used when rag_hybrid_ranker == "rrf"
     rag_dense_vector_field: str = "vector"
     rag_sparse_vector_field: str = "sparse_vector"
+    # Tenant scope is fail-closed by default. Keep the legacy collection name
+    # until the explicit biz_v2 migration and operator-approved switch.
+    rag_tenant_scope_enabled: bool = True
+    rag_allow_legacy_unscoped: bool = False
+    rag_collection_name: str = "biz"
 
     # 文档分块配置
     chunk_max_size: int = 800
@@ -265,7 +269,9 @@ class Settings(BaseSettings):
 
     # Redis client (used by the harness checkpoint subsystem).
     redis_enabled: bool = True
-    redis_url: str = "redis://:123456@localhost:6379/0"
+    # Credentials must come from REDIS_URL in the environment/secret manager;
+    # never ship a password in the code default.
+    redis_url: str = "redis://localhost:6379/0"
     redis_namespace: str = "super_biz_agent"
     redis_socket_timeout: float = 5.0
     redis_protocol: int = 2
@@ -279,9 +285,15 @@ class Settings(BaseSettings):
     harness_checkpoint_enabled: bool = True
     harness_checkpoint_ttl_seconds: int = 1800
     harness_checkpoint_replay: bool = False
+    # Request-level overrides are intentionally disabled for normal product traffic.
+    harness_checkpoint_request_override_enabled: bool = False
+    harness_eval_hooks_enabled: bool = False
 
     # Long-term memory
     memory_db_path: str = "volumes/long_term_memory.db"
+    # Phase-gated switch: when enabled, domain services verify the explicit
+    # migration version and never run their legacy first-request DDL path.
+    db_schema_enforcement_enabled: bool = False
     project_id: str = "super_biz_agent"
     long_term_memory_enabled: bool = True
     experience_memory_collection: str = "experience_memory"
@@ -298,6 +310,14 @@ class Settings(BaseSettings):
     auth_token_ttl_seconds: int = 86400
     # Fixed account table: "user1:pass1,user2:pass2". Empty rejects all logins.
     auth_users: str = "admin:admin"
+    # Optional per-user role/project maps: ``alice:curator,bob:admin`` and
+    # ``alice:project-a``. Unmapped authenticated users are operators in the
+    # configured default project.
+    auth_user_roles: str = ""
+    auth_user_projects: str = ""
+    # Phase 1 authenticates all business APIs; Phase 2 enables curator/admin
+    # gates after role mappings are deployed.
+    auth_role_enforcement_enabled: bool = False
     # Comma-separated browser origins. Use "*" only for pure local demos.
     cors_allow_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
@@ -353,7 +373,7 @@ class Settings(BaseSettings):
             "monitor": {
                 "transport": self.mcp_monitor_transport,
                 "url": self.mcp_monitor_url,
-            }
+            },
         }
 
     @property
@@ -370,6 +390,25 @@ class Settings(BaseSettings):
             if username and password:
                 mapping[username] = password
         return mapping
+
+    @staticmethod
+    def _parse_user_map(value: str, separator: str = ":") -> dict[str, str]:
+        result: dict[str, str] = {}
+        for item in (value or "").split(","):
+            if separator not in item:
+                continue
+            username, mapped = item.split(separator, 1)
+            username, mapped = username.strip(), mapped.strip()
+            if username and mapped:
+                result[username] = mapped
+        return result
+
+    def role_for_user(self, username: str) -> str:
+        role = self._parse_user_map(self.auth_user_roles).get(username.strip(), "operator")
+        return role if role in {"operator", "curator", "admin"} else "operator"
+
+    def project_for_user(self, username: str) -> str:
+        return self._parse_user_map(self.auth_user_projects).get(username.strip(), self.project_id)
 
     @property
     def cors_origins_list(self) -> list[str]:

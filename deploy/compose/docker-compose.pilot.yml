@@ -17,7 +17,12 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
 
   # Optional: local Prometheus scrape target for pilot metrics.
@@ -45,6 +50,22 @@ services:
       REDIS_URL: redis://redis:6379/0
       HOST: 0.0.0.0
       PORT: "9900"
+      STATIC_SERVE_ENABLED: "false"
+      MEMORY_DB_PATH: /app/volumes/long_term_memory.db
+      STORAGE_LOCAL_ROOT: /app/volumes/file_storage
+      STORAGE_CACHE_DIR: /app/volumes/file_storage/_cache
+    volumes:
+      - backend-data:/app/volumes
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9900/health/readiness', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
     restart: unless-stopped
+
+volumes:
+  backend-data:

@@ -6,29 +6,29 @@ from pydantic import BaseModel, Field
 
 
 class MemoryFeedbackRequest(BaseModel):
-    session_id: str = Field(default="")
-    user_message: str
-    assistant_answer: str = Field(default="")
+    session_id: str = Field(default="", max_length=128)
+    user_message: str = Field(..., min_length=1, max_length=20000)
+    assistant_answer: str = Field(default="", max_length=20000)
     user_accepted: bool = False
     # "strong": explicit adopt/correct (high confidence). "weak": passive acceptance
     # when the user moved on without correcting (low confidence, promoted by later hits).
     acceptance_level: Literal["strong", "weak"] = "strong"
-    actual_root_cause: str = Field(default="")
-    final_resolution: str = Field(default="")
-    comment: str = Field(default="")
-    environment: str = Field(default="")
-    service_name: str = Field(default="")
-    events: list[dict[str, Any]] = Field(default_factory=list)
+    actual_root_cause: str = Field(default="", max_length=10000)
+    final_resolution: str = Field(default="", max_length=10000)
+    comment: str = Field(default="", max_length=2000)
+    environment: str = Field(default="", max_length=128)
+    service_name: str = Field(default="", max_length=256)
+    events: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
 
 
 class ManualExperienceCreateRequest(BaseModel):
-    symptoms: str
-    root_cause: str
-    resolution: str
-    evidence_summary: str = Field(default="")
-    environment: str = Field(default="")
-    service_name: str = Field(default="")
-    confidence: float = 0.8
+    symptoms: str = Field(..., min_length=1, max_length=10000)
+    root_cause: str = Field(..., min_length=1, max_length=10000)
+    resolution: str = Field(..., min_length=1, max_length=10000)
+    evidence_summary: str = Field(default="", max_length=10000)
+    environment: str = Field(default="", max_length=128)
+    service_name: str = Field(default="", max_length=256)
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0)
 
 
 class ExperienceMemoryUpdateRequest(BaseModel):

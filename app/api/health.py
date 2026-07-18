@@ -13,6 +13,7 @@ from app.core.milvus_client import milvus_manager
 from app.services.memory_cache import get_default_cache
 
 router = APIRouter()
+_DEFAULT_AUTH_SECRET = "dev-auth-token-secret"
 
 
 def _port_reachable(url: str, timeout: float = 0.2) -> bool:
@@ -34,15 +35,8 @@ def _llm_config_status() -> dict[str, str]:
     llm_key = str(config.llm_api_key or "").strip()
     dash_key = str(config.dashscope_api_key or "").strip()
     llm_configured = bool(
-        (
-            llm_key
-            and llm_key not in {"your-api-key-here", "get.env('LLM_API_KEY')"}
-        )
-        or (
-            dash_key
-            and dash_key
-            not in {"your-api-key-here", "your-dashscope-api-key-here"}
-        )
+        (llm_key and llm_key not in {"your-api-key-here", "get.env('LLM_API_KEY')"})
+        or (dash_key and dash_key not in {"your-api-key-here", "your-dashscope-api-key-here"})
     )
     provider = str(config.embedding_provider or "local_bge_m3").strip().lower()
     if provider in {"local_bge_m3", "bge", "bge3", "local", "bge_m3"}:
@@ -58,7 +52,9 @@ def _llm_config_status() -> dict[str, str]:
             config.dashscope_embedding_model or config.embedding_model or "text-embedding-v4"
         )
         embedding_message = (
-            "DashScope embedding 已配置" if dash_ok else "EMBEDDING_PROVIDER=dashscope 但 DASHSCOPE_API_KEY 未配置"
+            "DashScope embedding 已配置"
+            if dash_ok
+            else "EMBEDDING_PROVIDER=dashscope 但 DASHSCOPE_API_KEY 未配置"
         )
     else:
         embedding_status = "unknown"
@@ -91,13 +87,9 @@ def _memory_cache_status() -> dict[str, Any]:
         "enabled": bool(config.memory_cache_enabled),
         "max_entries": int(config.memory_cache_max_entries),
         "ttls": {
-            "user_preference_seconds": float(
-                config.memory_cache_ttl_user_preference_seconds
-            ),
+            "user_preference_seconds": float(config.memory_cache_ttl_user_preference_seconds),
             "experience_seconds": float(config.memory_cache_ttl_experience_seconds),
-            "service_knowledge_seconds": float(
-                config.memory_cache_ttl_service_knowledge_seconds
-            ),
+            "service_knowledge_seconds": float(config.memory_cache_ttl_service_knowledge_seconds),
         },
     }
     try:
@@ -147,7 +139,9 @@ def build_health_data() -> dict[str, Any]:
     health_data["llm"] = _llm_config_status()
     health_data["rag"] = {
         "collection_name": milvus_manager.COLLECTION_NAME,
-        "collection_status": "available" if health_data["milvus"]["status"] == "connected" else "unavailable",
+        "collection_status": "available"
+        if health_data["milvus"]["status"] == "connected"
+        else "unavailable",
         "retrieval_mode": config.rag_retrieval_mode,
         "top_k": config.rag_top_k,
         "dense_weight": config.rag_dense_weight,
@@ -168,6 +162,22 @@ def build_health_data() -> dict[str, Any]:
     return health_data
 
 
+def readiness_issues(health_data: dict[str, Any] | None = None) -> list[str]:
+    data = health_data or build_health_data()
+    issues: list[str] = []
+    if data.get("milvus", {}).get("status") != "connected":
+        issues.append("milvus_unavailable")
+    if data.get("llm", {}).get("status") != "configured":
+        issues.append("llm_not_configured")
+    if not config.debug:
+        if str(config.auth_token_secret or "").strip() in {"", _DEFAULT_AUTH_SECRET}:
+            issues.append("default_auth_secret")
+        users = config.auth_user_map
+        if users.get("admin") == "admin":
+            issues.append("default_admin_credentials")
+    return issues
+
+
 @router.get("/health")
 async def health_check():
     """健康检查接口。"""
@@ -180,5 +190,27 @@ async def health_check():
             "code": status_code,
             "message": "服务运行正常" if status_code == 200 else "服务不可用",
             "data": health_data,
+        },
+    )
+
+
+@router.get("/health/live")
+async def liveness_check():
+    """Process liveness; external dependency failures do not fail this probe."""
+    return {"code": 200, "message": "alive", "data": {"status": "alive"}}
+
+
+@router.get("/health/readiness")
+async def readiness_check():
+    """Traffic readiness including dependencies and non-debug security defaults."""
+    data = build_health_data()
+    issues = readiness_issues(data)
+    status_code = 200 if not issues else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "code": status_code,
+            "message": "ready" if not issues else "not ready",
+            "data": {"status": "ready" if not issues else "not_ready", "issues": issues},
         },
     )

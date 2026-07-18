@@ -63,6 +63,11 @@ Model adapters must remain short references to this policy. They must not duplic
 
 ## Current Plan Index
 
+- [WP-3 RAG tenant scope and `biz_v2`](plan/2026-07-18-wp3-rag-scope-biz-v2.md) - **scope 实现完成，live dry-run 待健康环境**；当前连接阻塞，`mutated=false`，未切换/drop collection
+- [WP-6 SQLite migration runner](plan/2026-07-18-wp6-sqlite-migration-runner.md) - **Phase 2 实施完成；live up 待操作授权**；`status/verify/up` runner + `DB_SCHEMA_ENFORCEMENT_ENABLED` 阶段开关
+- [WP-7 deployment and CI contracts](plan/2026-07-18-wp7-deploy-ci-contracts.md) - **Phase 1 实施完成；CI 远端执行待后续**；Makefile、Docker/Compose、Python matrix 与 frontend CI
+
+- [系统安全、租户隔离与可靠性修复](plan/2026-07-18-system-security-tenant-reliability-remediation.md) - **已批准，实施中（WP-1/2/4 已实现，WP-3 scope、WP-6 runner、WP-7 contracts Phase 1 已实现，live migration/CI/WP-5 收口待后续）**；采用 system/project/user scope、operator/curator/admin 分阶段角色、Milvus `biz_v2` 保留旧 `biz`、安全默认收紧；见 [进度](plan/2026-07-18-system-security-tenant-reliability-remediation-progress.md)
 - [知识库 BGE 重建 + 死配置清理](plan/2026-07-16-kb-rebuild-dead-config-cleanup.md) - **已完成并验证**；`biz` 21 entities；删除 6 个零引用 Settings 字段
 - [本地 BGE-M3 Embedding 替换 DashScope](plan/2026-07-16-local-bge-m3-embedding.md) - **已实现并验证**；默认 `local_bge_m3`，DashScope 可回退；ci-smoke 56 passed（无 key）
 - [工作区差异分流与审查](plan/2026-07-16-working-tree-triage.md) - **已完成并验证**；隔离本地恢复/临时文件，格式检查通过，索引保持为空
@@ -70,6 +75,7 @@ Model adapters must remain short references to this policy. They must not duplic
 - [模型无关 Agent 治理文档](plan/2026-07-16-model-agent-governance.md) - **已完成并验证**；共享规则已收敛至本文件，`CLAUDE.md` / `CODEX.md` 仅保留模型适配
 
 - [交接：Harness loop 拆分 · 测试硬化](docs/pilot/handoff-2026-07-16-harness-loop-split.md) - **2026-07-16 工程债交接**；`loop.py` 门面化 + `test_harness_service` 67 passed；产品 L3 Conditional 仍以前序交接为准
+- [交接：系统安全 · 租户隔离 · 可靠性修复](docs/pilot/handoff-2026-07-18-security-tenant-reliability.md) - **当前工程交接**；WP-1/2/4、WP-3 scope、WP-6 Phase 2、WP-7 Phase 1 已实现；WP-5 收口、live migration/CI、WP-8 待下一棒
 - [过程栏关键结果乱码与符号噪声修复](plan/2026-07-16-process-key-result-mojibake.md) - **已实现并验证**；旧经验召回字段动态清洗，关键结果结构化显示摘要、置信度、相似度和症状；后端 76 passed、前端 76 tests + build 通过
 - [助手消息工具协议泄漏与中文乱码修复](plan/2026-07-16-assistant-tool-protocol-and-mojibake-guard.md) - **已实现**；隔离 planner/re-evidence/replan 工具决策文本，修复运行时乱码并兼容历史脏消息；见 [进度](plan/2026-07-16-assistant-tool-protocol-and-mojibake-guard-progress.md)
 - [智能体过程栏信息架构与步骤展示优化](plan/2026-07-15-agent-process-panel-information-architecture.md) - **已实现，待 Git 元数据恢复后提交**；原始 SSE 事件归并为业务步骤，修正状态/计数，详情分层并保留 V1 回退；前端 70 tests + build + 3 档浏览器 QA 通过

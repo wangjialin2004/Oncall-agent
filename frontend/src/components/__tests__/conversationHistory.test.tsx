@@ -122,6 +122,37 @@ describe("multi-turn conversation UI", () => {
   });
 
   it("deletes a conversation from the sidebar", async () => {
+    const sessions = [
+      {
+        session_id: "s-old",
+        title: "历史问题",
+        created_at: "2026-06-18T00:00:00Z",
+        updated_at: "2026-06-18T00:00:00Z",
+        turn_count: 1,
+      },
+    ];
+    mockListConversations
+      .mockResolvedValueOnce(sessions)
+      // Post-delete reconciliation may fail; the row must still disappear.
+      .mockRejectedValueOnce(new Error("refresh failed"));
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByTitle("历史问题");
+    await user.click(screen.getByRole("button", { name: "删除会话 历史问题" }));
+
+    // Exit animation plays first; the row is marked busy while collapsing.
+    const row = screen.getByTitle("历史问题").closest("li");
+    expect(row).toHaveClass("is-exiting");
+    expect(row).toHaveAttribute("aria-busy", "true");
+
+    // API fires only after the exit animation finishes.
+    await waitFor(() => expect(mockDeleteConversation).toHaveBeenCalledWith("s-old"));
+    await waitFor(() => expect(screen.queryByTitle("历史问题")).not.toBeInTheDocument());
+  });
+
+  it("restores the sidebar row when delete API fails", async () => {
     mockListConversations.mockResolvedValue([
       {
         session_id: "s-old",
@@ -131,6 +162,7 @@ describe("multi-turn conversation UI", () => {
         turn_count: 1,
       },
     ]);
+    mockDeleteConversation.mockRejectedValueOnce(new Error("Delete conversation failed (HTTP 500)"));
 
     const user = userEvent.setup();
     render(<App />);
@@ -138,6 +170,8 @@ describe("multi-turn conversation UI", () => {
     await screen.findByTitle("历史问题");
     await user.click(screen.getByRole("button", { name: "删除会话 历史问题" }));
 
-    expect(mockDeleteConversation).toHaveBeenCalledWith("s-old");
+    await waitFor(() => expect(mockDeleteConversation).toHaveBeenCalledWith("s-old"));
+    // Optimistic removal must roll back when the server rejects the delete.
+    expect(await screen.findByTitle("历史问题")).toBeInTheDocument();
   });
 });

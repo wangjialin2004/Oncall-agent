@@ -4,6 +4,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.config import config
+from app.core.request_context import get_request_context
 from app.core.runtime_tools import make_runtime_tool
 from app.models.document import RetrievedDocument
 from app.services.vector_search_service import SearchResult, vector_search_service
@@ -26,7 +27,11 @@ def _retrieve_knowledge(query: str) -> tuple[str, list[RetrievedDocument]]:
     try:
         logger.info(f"Knowledge retrieval tool called: query='{query}'")
 
-        results = vector_search_service.search(query, top_k=config.rag_top_k)
+        results = vector_search_service.search(
+            query,
+            top_k=config.rag_top_k,
+            context=get_request_context(),
+        )
 
         if not results:
             logger.warning("No relevant documents found.")

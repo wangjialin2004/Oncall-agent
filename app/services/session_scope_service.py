@@ -7,6 +7,7 @@ from typing import Annotated
 
 from fastapi import Header, HTTPException
 
+from app.config import config
 from app.services.auth_service import auth_service
 
 AUTHORIZATION_HEADER = "Authorization"
@@ -18,6 +19,9 @@ class AuthenticatedPrincipal:
 
     username: str
     owner_key: str
+    storage_owner_key: str
+    project_id: str
+    role: str
 
 
 def unauthorized(reason: str) -> HTTPException:
@@ -33,7 +37,7 @@ def unauthorized(reason: str) -> HTTPException:
     )
 
 
-def require_authenticated_principal(
+async def require_authenticated_principal(
     authorization: Annotated[str | None, Header(alias=AUTHORIZATION_HEADER)] = None,
 ) -> AuthenticatedPrincipal:
     """Validate the Bearer token and return username + stable owner key."""
@@ -49,16 +53,19 @@ def require_authenticated_principal(
         raise unauthorized(reason) from exc
     return AuthenticatedPrincipal(
         username=username,
-        owner_key=auth_service.owner_key_for_user(username),
+        owner_key=auth_service.stable_owner_key_for_user(username),
+        storage_owner_key=auth_service.owner_key_for_user(username),
+        project_id=config.project_for_user(username),
+        role=config.role_for_user(username),
     )
 
 
-def require_session_owner(
+async def require_session_owner(
     authorization: Annotated[str | None, Header(alias=AUTHORIZATION_HEADER)] = None,
 ) -> str:
     """Return a stable owner key derived from the authenticated backend user."""
 
-    return require_authenticated_principal(authorization).owner_key
+    return (await require_authenticated_principal(authorization)).storage_owner_key
 
 
 def scope_session_id(session_id: str, owner_key: str) -> str:

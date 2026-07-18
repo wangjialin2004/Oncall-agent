@@ -11,6 +11,7 @@ import {
 } from "./api/conversationApi";
 import { uploadFile } from "./api/fileApi";
 import { subscribeAuthExpired } from "./api/httpClient";
+import { confirmSuggestion } from "./api/hitlApi";
 import { confirmDistillDraft, rejectDistillDraft, submitFeedback } from "./api/memoryApi";
 import { AgentProcessPanel } from "./components/AgentProcessPanel";
 import { AppShell } from "./components/AppShell";
@@ -425,6 +426,8 @@ export default function App() {
           distillDraft: event.distill_draft ?? null,
           missingParams: event.missing_params ?? event.clarification?.missing_params ?? prev.missingParams,
           clarification: event.clarification ?? prev.clarification ?? null,
+          suggestedActions: event.suggested_actions ?? prev.suggestedActions ?? [],
+          escalation: event.escalation ?? prev.escalation ?? null,
         };
       } else if (event.type === "error") {
         next = {
@@ -585,6 +588,41 @@ export default function App() {
     }
   }
 
+  async function handleConfirmSuggestion(actionId: string) {
+    const current = runs[selectedId];
+    if (!current || !actionId) {
+      return;
+    }
+    const already = current.confirmedActionIds ?? [];
+    if (already.includes(actionId)) {
+      return;
+    }
+    // Optimistic mark — confirm is audit-only and should feel instant.
+    setRuns((c) => ({
+      ...c,
+      [selectedId]: {
+        ...c[selectedId],
+        confirmedActionIds: [...(c[selectedId].confirmedActionIds ?? []), actionId],
+      },
+    }));
+    try {
+      await confirmSuggestion({
+        sessionId: current.sessionId || sessionId,
+        actionId,
+        note: "panel-confirm",
+      });
+    } catch {
+      // Roll back only this action id so other confirms stay.
+      setRuns((c) => ({
+        ...c,
+        [selectedId]: {
+          ...c[selectedId],
+          confirmedActionIds: (c[selectedId].confirmedActionIds ?? []).filter((id) => id !== actionId),
+        },
+      }));
+    }
+  }
+
   function handleNewSession() {
     abortRef.current?.abort();
     weakAcceptIfNeeded(runs[activeIdRef.current]);
@@ -612,15 +650,33 @@ export default function App() {
   }
 
   async function handleDeleteSession(sid: string) {
+    // Optimistically drop the row first so a slow/failed post-delete
+    // list refresh cannot leave the sidebar looking like "delete did nothing".
+    // The active workspace is only reset after the API succeeds, so a failed
+    // delete does not wipe the open thread.
+    const previousSessions = sessions;
+    const previousCheckpoint = checkpointStatus[sid];
+    setSessions((items) => items.filter((session) => session.session_id !== sid));
+    setCheckpointStatus((current) => {
+      const { [sid]: _removed, ...remaining } = current;
+      return remaining;
+    });
+
     try {
       await deleteConversation(sid);
     } catch {
-      // best-effort
+      setSessions(previousSessions);
+      if (previousCheckpoint) {
+        setCheckpointStatus((current) => ({ ...current, [sid]: previousCheckpoint }));
+      }
+      return;
     }
-    await refreshSessions();
+
     if (sid === sessionId) {
       handleNewSession();
     }
+    // Reconcile with the server when possible, but never block the UI on it.
+    void refreshSessions();
   }
 
   function handleStop() {
@@ -729,7 +785,12 @@ export default function App() {
             </p>
           </div>
         ) : (
-          <AgentProcessPanel run={panelRun} onFeedback={handleFeedback} onDistill={handleDistill} />
+          <AgentProcessPanel
+            run={panelRun}
+            onFeedback={handleFeedback}
+            onDistill={handleDistill}
+            onConfirmSuggestion={handleConfirmSuggestion}
+          />
         )
       }
     />

@@ -1,12 +1,17 @@
-# Draft Dockerfile for pilot backend (W10). Prefer host .venv for day-to-day.
 FROM python:3.12-slim
 
 WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    STATIC_SERVE_ENABLED=false
 COPY pyproject.toml README.md ./
 COPY app ./app
 COPY scripts ./scripts
 COPY evals ./evals
-RUN pip install --no-cache-dir -e . || pip install --no-cache-dir fastapi uvicorn loguru pydantic pydantic-settings httpx redis
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir -e .
 
 EXPOSE 9900
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9900/health/live', timeout=3)" || exit 1
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9900"]

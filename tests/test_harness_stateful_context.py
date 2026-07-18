@@ -141,7 +141,7 @@ async def test_save_step_records_context_version_and_ref(
         context_version=42,
         context_snapshot_ref="owner-1:sess-1:v42",
     )
-    meta_raw = await fake_redis.get("t9:ckpt:owner-1:sess-1:meta")
+    meta_raw = await fake_redis.get(store._meta_key("owner-1", "sess-1"))
     meta = json.loads(meta_raw)
     assert meta["context_version"] == 42
     assert meta["context_snapshot_ref"] == "owner-1:sess-1:v42"
@@ -184,10 +184,12 @@ async def test_persist_messages_false_still_writes_run_metadata(
         persist_messages=False,
     )
     # Meta carries context reference…
-    meta = json.loads(await fake_redis.get("t9:ckpt:owner-1:sess-1:meta"))
+    meta = json.loads(await fake_redis.get(store._meta_key("owner-1", "sess-1")))
     assert meta["context_version"] == 5
     # …but messages payload is empty.
-    msgs = json.loads(await fake_redis.get("t9:ckpt:owner-1:sess-1:messages") or "[]")
+    msgs = json.loads(
+        await fake_redis.get(store._messages_key("owner-1", "sess-1")) or "[]"
+    )
     assert msgs == []
 
 
@@ -255,7 +257,7 @@ async def test_state_fields_no_longer_contains_timeline(
         step_index=1,
         step_payload={"step": 1},
     )
-    meta = json.loads(await fake_redis.get("t9:ckpt:owner-1:sess-1:meta"))
+    meta = json.loads(await fake_redis.get(store._meta_key("owner-1", "sess-1")))
     assert "timeline_events" not in (meta.get("state_fields") or {})
     # Tail still capped at 20.
     assert len(meta.get("timeline_events_tail") or []) <= 20
@@ -429,12 +431,12 @@ async def test_stateful_context_records_tool_evidence_and_checkpoint_ref(
     assert loaded.state.evidence.tool_summaries[0].raw_ref == "tool:call-redis"
 
     meta = json.loads(
-        await fake_redis.get("stateful-ckpt:ckpt:owner-1:sess-evidence:meta")
+        await fake_redis.get(checkpoint_store._meta_key("owner-1", "sess-evidence"))
     )
     assert meta["context_version"] is not None
     assert meta["context_snapshot_ref"].endswith(f"v{meta['context_version']}")
     messages = json.loads(
-        await fake_redis.get("stateful-ckpt:ckpt:owner-1:sess-evidence:messages")
+        await fake_redis.get(checkpoint_store._messages_key("owner-1", "sess-evidence"))
         or "[]"
     )
     assert messages == []

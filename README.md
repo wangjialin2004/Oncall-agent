@@ -199,6 +199,64 @@ python mcp_servers/monitor_server.py    # 监控数据，默认 http://localhost
 
 > 脚本会在本地生成 `.log` 和 `.pid` 文件，这些文件已被 `.gitignore` 忽略。
 
+### WSL 全栈启动
+
+在 Windows Terminal 中进入 Ubuntu（或其他已配置 Docker Desktop WSL integration 的发行版）。首次运行前，确保 Docker Desktop 正在运行，并已为该发行版开启 WSL integration。
+
+先在 **同一个 WSL 发行版** 中确认 Python、Node.js/npm、Docker 与 make 都可用。若 `node` 或 `npm` 缺失，先按发行版的 Node.js 安装方式安装 Node.js 18+，然后重新打开 WSL 终端；不要混用 Windows 的 npm 与 WSL 的 Python/容器环境。
+
+```bash
+python3 --version
+node --version
+npm --version
+docker --version
+make --version
+```
+
+```bash
+wsl -d Ubuntu
+cd /home/wangjialin/projects/super_biz_agent_py
+
+# 首次运行时创建并安装 Python 环境；之后可跳过这两行。
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
+
+# 首次运行时安装前端依赖；之后可跳过。
+npm --prefix frontend install
+
+# 启动 Milvus、FastAPI 和两个 MCP 服务。
+make up
+make start
+
+# 在后台启动 Vite 前端并保存 PID。
+nohup npm --prefix frontend run dev -- --host 0.0.0.0 > frontend-vite.log 2>&1 &
+echo $! > frontend.pid
+```
+
+启动后访问：
+
+- 应用：<http://localhost:5173>
+- API 健康检查：<http://localhost:9900/health>
+- API 文档：<http://localhost:9900/docs>
+
+确认服务状态：
+
+```bash
+curl -fsS http://127.0.0.1:9900/health
+docker compose -f vector-database.yml ps
+tail -n 80 frontend-vite.log
+```
+
+停止本项目启动的服务：
+
+```bash
+make stop
+test -f frontend.pid && kill "$(cat frontend.pid)" && rm -f frontend.pid
+docker compose -f vector-database.yml down
+```
+
+> `make start` 只管理 FastAPI 与 MCP 服务；Vite 是独立进程，因此需要按上面的 `frontend.pid` 单独停止。`make up` 和 `docker compose ... down` 会管理 Milvus 数据库容器。
+
 ### Make 管理命令（Linux/macOS 或已安装 make 的环境）
 
 ```bash

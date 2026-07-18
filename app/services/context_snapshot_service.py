@@ -161,6 +161,12 @@ class ContextSnapshotService:
     def _ensure_database(self) -> None:
         if self._initialized:
             return
+        if bool(getattr(config, "db_schema_enforcement_enabled", False)):
+            from app.services.database_migration_service import DatabaseMigrationService
+
+            DatabaseMigrationService(self.db_path).require_current()
+            self._initialized = True
+            return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(str(self.db_path)) as connection:
             connection.execute(

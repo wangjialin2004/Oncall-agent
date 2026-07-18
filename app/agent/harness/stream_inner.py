@@ -45,7 +45,7 @@ from loguru import logger
 
 from app.agent.agent_loop import tool_call_payload
 from app.agent.context.operations import framework_patch
-from app.agent.context.state import SECTION_OUTPUT
+from app.agent.context.state import SECTION_OUTPUT, AgentContextState
 from app.agent.events import make_agent_event, make_route_event
 from app.agent.experts.registry import DEFAULT_ROUTE, EXPERT_ROUTES
 from app.agent.harness.context import HarnessContext
@@ -114,9 +114,11 @@ class HarnessStreamInnerMixin:
                 restored_messages = messages_from_dict(resume.messages)
                 if restored_messages:
                     resume_messages = restored_messages
-                    state = self._restore_state_from_resume(resume, state)
-                    if runtime is not None:
-                        runtime["state"] = state
+                # Stateful checkpoints intentionally persist no messages. The
+                # state snapshot must still be restored before context rehydrate.
+                state = self._restore_state_from_resume(resume, state)
+                if runtime is not None:
+                    runtime["state"] = state
                 resume_context_version = getattr(resume, "context_version", None)
                 resume_context_ref = getattr(resume, "context_snapshot_ref", None)
                 if self._should_replay_resume(resume, replay_override=checkpoint_replay):

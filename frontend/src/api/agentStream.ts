@@ -55,6 +55,35 @@ export function translateBackendEvent(
       const distill = payload.distill_draft as Record<string, unknown> | null | undefined;
       const clarification = payload.clarification as Record<string, unknown> | null | undefined;
       const missing = payload.missing_params;
+      const suggestedRaw = payload.suggested_actions;
+      const escalationRaw = payload.escalation as Record<string, unknown> | null | undefined;
+      const suggested_actions = Array.isArray(suggestedRaw)
+        ? suggestedRaw
+            .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+            .map((item) => ({
+              id: String(item.id ?? ""),
+              title: String(item.title ?? ""),
+              risk: String(item.risk ?? "low"),
+              requires_confirm: item.requires_confirm !== false,
+            }))
+            .filter((item) => item.id)
+        : undefined;
+      const escalation =
+        escalationRaw && typeof escalationRaw === "object"
+          ? {
+              configured: Boolean(escalationRaw.configured),
+              text: String(escalationRaw.text ?? ""),
+              contacts: Array.isArray(escalationRaw.contacts)
+                ? (escalationRaw.contacts as unknown[])
+                    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+                    .map((item) => ({
+                      name: String(item.name ?? ""),
+                      channel: String(item.channel ?? ""),
+                    }))
+                    .filter((item) => item.name)
+                : [],
+            }
+          : null;
       return {
         type: "complete",
         route,
@@ -79,6 +108,8 @@ export function translateBackendEvent(
               question: clarification.question ? String(clarification.question) : "",
             }
           : null,
+        suggested_actions,
+        escalation,
       };
     }
     case "error":

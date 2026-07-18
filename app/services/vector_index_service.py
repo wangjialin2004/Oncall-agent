@@ -85,7 +85,13 @@ class VectorIndexService:
         self.upload_path = "./uploads"
         logger.info("向量索引服务初始化完成")
 
-    def index_directory(self, directory_path: str | None = None) -> IndexingResult:
+    def index_directory(
+        self,
+        directory_path: str | None = None,
+        *,
+        scope_type: str = "system",
+        scope_id: str = "system",
+    ) -> IndexingResult:
         """
         索引指定目录下的所有文件
 
@@ -128,7 +134,9 @@ class VectorIndexService:
             # 遍历并索引每个文件
             for file_path in files:
                 try:
-                    self.index_single_file(str(file_path))
+                    self.index_single_file(
+                        str(file_path), scope_type=scope_type, scope_id=scope_id
+                    )
                     result.increment_success_count()
                     logger.info(f"✓ 文件索引成功: {file_path.name}")
                 except Exception as e:
@@ -153,7 +161,13 @@ class VectorIndexService:
             result.end_time = datetime.now()
             return result
 
-    def index_single_file(self, file_path: str) -> SingleFileIndexingResult:
+    def index_single_file(
+        self,
+        file_path: str,
+        *,
+        scope_type: str = "system",
+        scope_id: str = "system",
+    ) -> SingleFileIndexingResult:
         """
         索引单个文件 (使用本地文档分割器)
 
@@ -191,6 +205,9 @@ class VectorIndexService:
                 normalized_path,
                 base_metadata=extracted.metadata,
             )
+            for document in documents:
+                document.metadata["scope_type"] = scope_type
+                document.metadata["scope_id"] = scope_id
             logger.info(f"文档分割完成: {file_path} -> {len(documents)} 个分片")
 
             # 4. 添加文档到向量存储
@@ -218,7 +235,7 @@ class VectorIndexService:
 
         milvus_manager.rebuild_collection(confirm=True)
         vector_store_manager.reinitialize()
-        return self.index_directory(directory_path)
+        return self.index_directory(directory_path, scope_type="system", scope_id="system")
 
 
 # 全局单例

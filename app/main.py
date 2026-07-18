@@ -17,6 +17,7 @@ from app.config import config
 from app.core.llm_client import close_default_llm_client, get_default_llm_client
 from app.core.metrics import setup_metrics
 from app.core.milvus_client import milvus_manager
+from app.services.redis_client import redis_lifespan
 
 _DEFAULT_AUTH_TOKEN_SECRET = "dev-auth-token-secret"
 
@@ -56,6 +57,8 @@ async def lifespan(app: FastAPI):
     logger.info(f"📚 API 文档: http://{config.host}:{config.port}/docs")
 
     _log_auth_startup_checks()
+    redis_context = redis_lifespan()
+    await redis_context.__aenter__()
 
     # 连接 Milvus
     logger.info("🔌 正在连接 Milvus...")
@@ -99,15 +102,13 @@ async def lifespan(app: FastAPI):
         milvus_manager.close()
     except Exception as e:
         logger.warning("Milvus close failed during shutdown: {}", e)
+    await redis_context.__aexit__(None, None, None)
     logger.info(f"👋 {config.app_name} 关闭")
 
 
 # 创建 FastAPI 应用
 app = FastAPI(
-    title=config.app_name,
-    version=config.app_version,
-    description="智能运维系统",
-    lifespan=lifespan
+    title=config.app_name, version=config.app_version, description="智能运维系统", lifespan=lifespan
 )
 
 # 配置 CORS
@@ -134,18 +135,22 @@ app.include_router(checkpoint.router, prefix="/api", tags=["harness-checkpoint"]
 
 # 挂载静态文件
 static_dir = "static"
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
+if config.static_serve_enabled:
+    if not os.path.isdir(static_dir):
+        raise RuntimeError("STATIC_SERVE_ENABLED=true but static directory is missing")
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
 
 @app.get("/")
 async def root():
     """返回首页"""
     index_path = os.path.join(static_dir, "index.html")
-    if os.path.exists(index_path):
+    if config.static_serve_enabled and os.path.exists(index_path):
         return FileResponse(index_path)
     return {
         "message": f"Welcome to {config.app_name} API",
         "version": config.app_version,
-        "docs": "/docs"
+        "docs": "/docs",
     }
 
 
@@ -153,9 +158,5 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
-        "app.main:app",
-        host=config.host,
-        port=config.port,
-        reload=config.debug,
-        log_level="info"
+        "app.main:app", host=config.host, port=config.port, reload=config.debug, log_level="info"
     )

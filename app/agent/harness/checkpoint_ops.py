@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.config import config
 
 import asyncio
+import copy
 from collections.abc import Sequence
 from typing import Any
 
@@ -14,6 +15,7 @@ from app.agent.stream_common import TIMELINE_EVENT_TYPES
 from app.core.llm_client import ChatMessage, LLMClient, get_default_llm_client
 from app.core.runtime_tools import RuntimeTool
 from app.services.harness_checkpoint import CheckpointResume
+
 
 class HarnessCheckpointOpsMixin:
     """Checkpoint resume/save and stateful context rebuild helpers."""
@@ -88,10 +90,7 @@ class HarnessCheckpointOpsMixin:
     def _context_snapshot_ref(context_state: AgentContextState | None) -> str | None:
         if context_state is None:
             return None
-        return (
-            f"{context_state.owner_key}:{context_state.session_id}:"
-            f"v{int(context_state.version)}"
-        )
+        return f"{context_state.owner_key}:{context_state.session_id}:v{int(context_state.version)}"
 
     @staticmethod
     def _stamp_current_turn(
@@ -213,8 +212,8 @@ class HarnessCheckpointOpsMixin:
             ],
             "completed": True,
         }
-        snapshot_messages = list(messages)
-        snapshot_state = state
+        snapshot_messages = copy.deepcopy(list(messages))
+        snapshot_state = copy.deepcopy(state)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -227,9 +226,7 @@ class HarnessCheckpointOpsMixin:
                 messages=snapshot_messages,
                 step_index=step_index,
                 step_payload=step_payload,
-                context_version=(
-                    int(context_state.version) if context_state is not None else None
-                ),
+                context_version=(int(context_state.version) if context_state is not None else None),
                 context_snapshot_ref=self._context_snapshot_ref(context_state),
                 persist_messages=context_state is None,
             )

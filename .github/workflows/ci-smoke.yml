@@ -8,11 +8,15 @@ on:
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: Install package (dev)
         run: |
           python -m pip install -U pip
@@ -29,4 +33,36 @@ jobs:
             tests/test_harness_verifier.py \
             tests/test_harness_checkpoint.py \
             tests/test_context_integration.py \
+            tests/test_api_authorization_matrix.py \
+            tests/test_rag_tenant_scope.py \
+            tests/test_database_migrations.py \
             -q --tb=line --no-cov
+      - name: Static checks
+        run: |
+          python -m ruff check --select E9,F63,F7,F82 app tests scripts
+          python -m compileall -q app scripts
+      - name: Secret contract
+        env:
+          LLM_API_KEY: ci-smoke-dummy-key
+          AUTH_TOKEN_SECRET: ci-smoke-random-secret
+          AUTH_USERS: ci-user:ci-password
+        run: python scripts/check_env_secrets.py --strict --env-file /dev/null
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Frontend tests
+        working-directory: frontend
+        run: npm test -- --run
+      - name: Frontend build
+        working-directory: frontend
+        run: npm run build

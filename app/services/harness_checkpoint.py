@@ -19,6 +19,8 @@ the streaming response.
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 import json
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -139,9 +141,13 @@ class HarnessCheckpointStore:
     ) -> None:
         self.namespace = str(namespace or getattr(config, "redis_namespace", "super_biz_agent"))
         self.ttl_seconds = int(
-            ttl_seconds if ttl_seconds is not None else getattr(config, "harness_checkpoint_ttl_seconds", 1800)
+            ttl_seconds
+            if ttl_seconds is not None
+            else getattr(config, "harness_checkpoint_ttl_seconds", 1800)
         )
-        self.idempotent_tools: tuple[str, ...] = idempotent_tools if idempotent_tools is not None else _DEFAULT_TOOLS
+        self.idempotent_tools: tuple[str, ...] = (
+            idempotent_tools if idempotent_tools is not None else _DEFAULT_TOOLS
+        )
         self._redis_factory = redis_factory
         self._clock = clock or utc_now
         self._lock = asyncio.Lock()
@@ -182,8 +188,13 @@ class HarnessCheckpointStore:
                 client = await self._client()
                 meta_key = self._meta_key(owner_key, session_id)
                 existing = await self._safe_get_meta(client, meta_key)
+                if existing and int(existing.get("step") or 0) > int(step_index):
+                    # Background writers can complete out of order. Never let
+                    # an older snapshot move a session backwards.
+                    return
+                state_snapshot = copy.deepcopy(state)
                 meta = self._compose_meta(
-                    state=state,
+                    state=state_snapshot,
                     existing=existing,
                     step_index=step_index,
                     context_version=context_version,
@@ -288,18 +299,19 @@ class HarnessCheckpointStore:
             return None
 
     async def delete(self, owner_key: str, session_id: str) -> int:
-        """Delete every key for this session. Returns the number removed."""
+        """Delete known keys for this session without a broad Redis scan."""
         try:
             client = await self._client()
-            prefix = self._prefix(owner_key, session_id)
-            cursor = 0
-            removed = 0
-            while True:
-                cursor, keys = await client.scan(cursor=cursor, match=f"{prefix}*", count=200)
-                if keys:
-                    removed += await client.delete(*keys)
-                if cursor == 0:
-                    break
+            meta = await self._safe_get_meta(client, self._meta_key(owner_key, session_id))
+            max_step = int((meta or {}).get("step") or 0)
+            keys = [
+                self._meta_key(owner_key, session_id),
+                self._messages_key(owner_key, session_id),
+            ]
+            keys.extend(
+                self._step_key(owner_key, session_id, index) for index in range(1, max_step + 1)
+            )
+            removed = int(await client.delete(*keys)) if keys else 0
             self.stats.deletes += 1
             return removed
         except Exception as exc:
@@ -316,7 +328,8 @@ class HarnessCheckpointStore:
     # ------------------------------------------------------------ internals
 
     def _prefix(self, owner_key: str, session_id: str) -> str:
-        return f"{self.namespace}:ckpt:{owner_key}:{session_id}:"
+        scope = hashlib.sha256(f"{owner_key}\x00{session_id}".encode()).hexdigest()[:32]
+        return f"{self.namespace}:ckpt:{scope}:"
 
     def _meta_key(self, owner_key: str, session_id: str) -> str:
         return f"{self._prefix(owner_key, session_id)}meta"

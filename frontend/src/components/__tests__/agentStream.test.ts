@@ -262,6 +262,8 @@ describe("streamAgent", () => {
       distill_draft: null,
       missing_params: undefined,
       clarification: null,
+      suggested_actions: undefined,
+      escalation: null,
     });
   });
 
@@ -294,6 +296,8 @@ describe("streamAgent", () => {
       distill_draft: null,
       missing_params: undefined,
       clarification: null,
+      suggested_actions: undefined,
+      escalation: null,
     });
   });
 
@@ -326,6 +330,61 @@ describe("streamAgent", () => {
       distill_draft: null,
       missing_params: undefined,
       clarification: null,
+      suggested_actions: undefined,
+      escalation: null,
     });
+  });
+
+  it("parses suggested_actions and escalation from complete payloads", async () => {
+    localStorage.setItem("authToken", "token-a");
+    const onEvent = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        sseResponse([
+          frame({
+            type: "complete",
+            route: "diagnosis",
+            answer: "done",
+            case_id: "",
+            events: [],
+            suggested_actions: [
+              {
+                id: "review_metrics",
+                title: "建议：复核相关指标/告警时间窗（只读）",
+                risk: "low",
+                requires_confirm: true,
+              },
+            ],
+            escalation: {
+              configured: true,
+              text: "升级联系人",
+              contacts: [{ name: "Alice", channel: "pager" }],
+            },
+          }),
+        ]),
+      ),
+    );
+
+    await streamAgent({ sessionId: "s1", message: "checkout-api slow", mode: "auto", onEvent });
+
+    expect(onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "complete",
+        suggested_actions: [
+          {
+            id: "review_metrics",
+            title: "建议：复核相关指标/告警时间窗（只读）",
+            risk: "low",
+            requires_confirm: true,
+          },
+        ],
+        escalation: {
+          configured: true,
+          text: "升级联系人",
+          contacts: [{ name: "Alice", channel: "pager" }],
+        },
+      }),
+    );
   });
 });

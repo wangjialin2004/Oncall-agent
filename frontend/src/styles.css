@@ -845,9 +845,12 @@ a {
   gap: 4px;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
+  overflow: hidden;
+  transform-origin: left center;
   transition:
     background-color var(--dur-base) var(--ease),
-    color var(--dur-base) var(--ease);
+    color var(--dur-base) var(--ease),
+    border-color var(--dur-base) var(--ease);
 }
 
 .session-item:hover {
@@ -862,6 +865,63 @@ a {
 
 .session-item:hover .session-title {
   color: var(--ink);
+}
+
+/* Exit animation: red flash + slide-collapse so deletes stay obvious in long lists. */
+.session-item.is-exiting {
+  pointer-events: none;
+  background: var(--risk-soft);
+  border-color: color-mix(in srgb, var(--risk) 40%, transparent);
+  box-shadow: inset 2px 0 0 0 var(--risk);
+  animation: session-exit 320ms var(--ease) forwards;
+}
+
+.session-item.is-exiting .session-title {
+  color: var(--risk);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.session-item.is-exiting .session-meta {
+  color: color-mix(in srgb, var(--risk) 70%, var(--muted));
+}
+
+.session-item.is-exiting .session-delete {
+  opacity: 1;
+  color: var(--risk);
+  background: color-mix(in srgb, var(--risk) 14%, transparent);
+}
+
+@keyframes session-exit {
+  0% {
+    opacity: 1;
+    transform: translateX(0) scaleY(1);
+    max-height: 64px;
+    margin-top: 0;
+    margin-bottom: 0;
+    filter: saturate(1);
+  }
+  28% {
+    opacity: 1;
+    transform: translateX(-4px) scaleY(1);
+    background: var(--risk-soft);
+    filter: saturate(1.15);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-18px) scaleY(0.72);
+    max-height: 0;
+    margin-top: 0;
+    margin-bottom: 0;
+    border-color: transparent;
+    filter: saturate(0.8);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-item.is-exiting {
+    animation-duration: 1ms;
+  }
 }
 
 .session-open,
@@ -2461,6 +2521,117 @@ a {
   border-color: var(--signal-line);
   background: var(--signal-soft);
   box-shadow: inset 2px 0 0 0 var(--accent);
+}
+
+.feedback-card .feedback-note {
+  margin: 6px 0 0;
+  color: var(--ink-soft);
+  font-size: var(--fs-12);
+  line-height: var(--lh-snug);
+}
+
+.hitl-card {
+  border-color: var(--line);
+  background: var(--surface);
+  box-shadow: inset 2px 0 0 0 var(--line-strong);
+}
+
+.hitl-card .hitl-hint,
+.hitl-card .hitl-footer,
+.hitl-card > p {
+  margin: 6px 0 0;
+  color: var(--ink-soft);
+  font-size: var(--fs-12);
+  line-height: var(--lh-snug);
+}
+
+.hitl-action-list,
+.hitl-contact-list {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.hitl-action-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
+}
+
+.hitl-action-item.is-confirmed {
+  border-color: color-mix(in srgb, var(--success) 35%, var(--line));
+  background: var(--success-soft);
+}
+
+.hitl-action-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.hitl-action-title {
+  color: var(--ink);
+  font-size: var(--fs-13);
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-snug);
+}
+
+.hitl-risk {
+  display: inline-flex;
+  width: fit-content;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--badge-bg);
+  color: var(--badge-color);
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semibold);
+}
+
+.hitl-risk-medium {
+  background: var(--running-soft);
+  color: var(--running);
+}
+
+.hitl-risk-high {
+  background: var(--risk-soft);
+  color: var(--risk);
+}
+
+.hitl-confirm-btn {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: #fff;
+  font-size: var(--fs-12);
+  font-weight: var(--fw-semibold);
+}
+
+.hitl-confirm-btn:hover {
+  background: var(--accent-hover);
+}
+
+.hitl-confirmed {
+  flex: 0 0 auto;
+  color: var(--success);
+  font-size: var(--fs-12);
+  font-weight: var(--fw-semibold);
+  white-space: nowrap;
+}
+
+.escalation-card.is-unconfigured {
+  border-color: color-mix(in srgb, var(--running) 30%, var(--line));
+  background: var(--running-soft);
+  box-shadow: inset 2px 0 0 0 var(--running);
 }
 
 .feedback-correct {

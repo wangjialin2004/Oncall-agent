@@ -5,8 +5,9 @@
 # 配置变量
 # ============================================================
 SERVER_URL = http://localhost:9900
-UPLOAD_API = $(SERVER_URL)/api/upload
-HEALTH_CHECK_API = $(SERVER_URL)/health
+UPLOAD_API = $(SERVER_URL)/api/files
+HEALTH_CHECK_API = $(SERVER_URL)/health/readiness
+AUTH_TOKEN ?=
 DOCS_DIR = aiops-docs
 MILVUS_CONTAINER = milvus-standalone
 
@@ -19,7 +20,7 @@ NC = \033[0m
 
 .PHONY: help init start stop restart check upload clean up down status wait \
         install install-dev dev run test test-quick ci-smoke format lint fix type-check \
-        security pre-commit-install pre-commit check-all coverage docs shell \
+        security pre-commit-install pre-commit check-all format-check frontend-test frontend-build coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp
 
@@ -454,6 +455,10 @@ run:
 # 上传所有文档
 upload:
 	@echo "$(YELLOW)📤 开始上传 $(DOCS_DIR) 目录下的文档...$(NC)"
+	@if [ -z "$(AUTH_TOKEN)" ]; then \
+		echo "$(RED)❌ AUTH_TOKEN 未设置，拒绝匿名上传$(NC)"; \
+		exit 1; \
+	fi
 	@if [ ! -d "$(DOCS_DIR)" ]; then \
 		echo "$(RED)❌ 目录 $(DOCS_DIR) 不存在！$(NC)"; \
 		exit 1; \
@@ -468,6 +473,7 @@ upload:
 			echo "$(YELLOW)  [$$count] 上传文件: $$filename$(NC)"; \
 			response=$$(curl -s -w "\n%{http_code}" -X POST $(UPLOAD_API) \
 				-F "file=@$$file" \
+				-H "Authorization: Bearer $(AUTH_TOKEN)" \
 				-H "Accept: application/json"); \
 			http_code=$$(echo "$$response" | tail -n1); \
 			body=$$(echo "$$response" | sed '$$d'); \
@@ -502,13 +508,18 @@ list-docs:
 # 测试上传单个文件
 test-upload:
 	@echo "$(YELLOW)🧪 测试上传单个文件...$(NC)"
+	@if [ -z "$(AUTH_TOKEN)" ]; then \
+		echo "$(RED)❌ AUTH_TOKEN 未设置，拒绝匿名上传$(NC)"; \
+		exit 1; \
+	fi
 	@first_file=$$(ls $(DOCS_DIR)/*.md 2>/dev/null | head -n1); \
 	if [ -n "$$first_file" ]; then \
 		echo "$(YELLOW)上传文件: $$first_file$(NC)"; \
 		curl -X POST $(UPLOAD_API) \
 			-F "file=@$$first_file" \
+			-H "Authorization: Bearer $(AUTH_TOKEN)" \
 			-H "Accept: application/json" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin), indent=2, ensure_ascii=False))" 2>/dev/null || \
-			curl -X POST $(UPLOAD_API) -F "file=@$$first_file"; \
+			curl -X POST $(UPLOAD_API) -F "file=@$$first_file" -H "Authorization: Bearer $(AUTH_TOKEN)"; \
 	else \
 		echo "$(RED)测试文件不存在$(NC)"; \
 	fi
@@ -554,6 +565,10 @@ format:  ## 格式化代码
 	python3 -m ruff format app/ 2>/dev/null || python3 -m black app/
 	@echo "$(GREEN)✅ 格式化完成$(NC)"
 
+format-check:  ## 只读格式检查
+	@echo "$(YELLOW)🎨 检查代码格式（不修改工作树）...$(NC)"
+	python3 -m ruff format --check app/ tests/ scripts/
+
 lint:  ## 代码检查
 	@echo "$(YELLOW)🔍 代码检查...$(NC)"
 	python3 -m ruff check app/ 2>/dev/null || python3 -m flake8 app/
@@ -583,6 +598,12 @@ test-quick:  ## 快速测试
 	@echo "$(YELLOW)⚡ 快速测试...$(NC)"
 	python3 -m pytest tests/ -v
 
+frontend-test:  ## 前端测试
+	cd frontend && npm test -- --run
+
+frontend-build:  ## 前端构建
+	cd frontend && npm run build
+
 ci-smoke:  ## M1 最小门禁：W1–W4 核心 + verifier/checkpoint/context
 	@echo "$(YELLOW)🚦 ci-smoke...$(NC)"
 	python -m pytest \
@@ -608,9 +629,12 @@ raise SystemExit(f'over limit: {over}') if over else print('OK all harness files
 
 check-all:  ## 运行所有检查
 	@echo "$(YELLOW)🚀 运行所有检查...$(NC)"
-	@$(MAKE) format
+	@$(MAKE) format-check
 	@$(MAKE) lint
+	@$(MAKE) type-check
 	@$(MAKE) test
+	@$(MAKE) frontend-test
+	@$(MAKE) frontend-build
 	@echo "$(GREEN)✅ 所有检查通过！$(NC)"
 
 pre-commit-install:  ## 安装 pre-commit hooks

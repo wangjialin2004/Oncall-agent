@@ -10,6 +10,7 @@ from pymilvus import Collection, FunctionType
 from app.config import config
 from app.core.milvus_client import milvus_manager
 from app.models.document import RetrievedDocument
+from app.services.rag_scope import scope_fields
 from app.services.vector_embedding_service import vector_embedding_service
 
 COLLECTION_NAME = "biz"
@@ -52,6 +53,18 @@ class VectorStoreManager:
                     config.rag_dense_vector_field: vector,
                     "content": content,
                     "metadata": doc.metadata,
+                    **scope_fields(
+                        scope_type=str(
+                            doc.metadata.get("scope_type")
+                            or doc.metadata.get("_scope_type")
+                            or "system"
+                        ),
+                        scope_id=str(
+                            doc.metadata.get("scope_id")
+                            or doc.metadata.get("_scope_id")
+                            or "system"
+                        ),
+                    ),
                 }
                 for doc_id, vector, content, doc in zip(
                     ids,

@@ -60,7 +60,12 @@ async def me(principal: AuthenticatedPrincipal = Depends(require_authenticated_p
         "message": "success",
         "data": {
             "username": principal.username,
-            "owner_key": principal.owner_key,
+            # Keep the old response key stable while exposing the v2 identity
+            # for clients that have opted into the migration.
+            "owner_key": principal.storage_owner_key,
+            "stable_owner_key": principal.owner_key,
+            "project_id": principal.project_id,
+            "role": principal.role,
         },
     }
 

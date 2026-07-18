@@ -60,6 +60,20 @@ export type ClarificationInfo = {
   question?: string;
 };
 
+/** Read-only HITL suggestion emitted on complete (M3 W9). Confirm = audit only. */
+export type SuggestedAction = {
+  id: string;
+  title: string;
+  risk: "low" | "medium" | "high" | string;
+  requires_confirm: boolean;
+};
+
+export type EscalationInfo = {
+  configured: boolean;
+  text: string;
+  contacts: Array<{ name: string; channel: string }>;
+};
+
 export type CompleteEvent = {
   type: "complete";
   route: AgentRoute;
@@ -69,6 +83,8 @@ export type CompleteEvent = {
   distill_draft?: DistillDraftInfo | null;
   missing_params?: string[];
   clarification?: ClarificationInfo | null;
+  suggested_actions?: SuggestedAction[];
+  escalation?: EscalationInfo | null;
 };
 
 export type ErrorEvent = {
@@ -145,6 +161,12 @@ export type AgentRun = {
   /** Structured clarification slots for quick-fill chips (W10). */
   missingParams?: string[];
   clarification?: ClarificationInfo | null;
+  /** Read-only follow-up suggestions from harness complete (W9). */
+  suggestedActions?: SuggestedAction[];
+  /** Escalation contacts / unconfigured notice from harness complete (W9). */
+  escalation?: EscalationInfo | null;
+  /** Action ids the operator has confirmed this session (audit-only). */
+  confirmedActionIds?: string[];
   /** Set when this run picked up a saved checkpoint from Redis. */
   checkpointResume?: CheckpointResumeEvent;
   /** Set when the resumed run closed without re-running non-whitelisted tools. */

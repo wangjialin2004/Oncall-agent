@@ -104,6 +104,17 @@ vi.mock("../../api/authApi", () => ({
 const mockSubmitFeedback = vi.fn(async (..._args: unknown[]) => "exp-1");
 vi.mock("../../api/memoryApi", () => ({
   submitFeedback: (...args: unknown[]) => mockSubmitFeedback(...args),
+  confirmDistillDraft: vi.fn(async () => "exp-1"),
+  rejectDistillDraft: vi.fn(async () => "exp-1"),
+}));
+
+const mockConfirmSuggestion = vi.fn(async (_args: unknown) => ({
+  accepted: true,
+  executed: false,
+  hint: "确认已记录；系统不会自动执行变更/重启/回滚。",
+}));
+vi.mock("../../api/hitlApi", () => ({
+  confirmSuggestion: (args: unknown) => mockConfirmSuggestion(args),
 }));
 
 const mockGetCheckpoint = vi.fn<(sessionId: string) => Promise<CheckpointSummary>>(async (sessionId) => ({
@@ -210,6 +221,51 @@ describe("App", () => {
       assistantAnswer: "诊断结论已确认",
     });
     expect(await screen.findByText("已采纳，将沉淀为长期经验。")).toBeInTheDocument();
+  });
+
+  it("confirms suggested actions via the HITL audit API without executing them", async () => {
+    mockConfirmSuggestion.mockClear();
+    vi.mocked(streamAgent).mockImplementationOnce(async ({ onEvent }) => {
+      onEvent({ type: "content", data: "诊断结论已确认" });
+      onEvent({
+        type: "complete",
+        route: "diagnosis",
+        answer: "诊断结论已确认",
+        case_id: "",
+        events: [],
+        suggested_actions: [
+          {
+            id: "review_metrics",
+            title: "建议：复核相关指标/告警时间窗（只读）",
+            risk: "low",
+            requires_confirm: true,
+          },
+        ],
+        escalation: {
+          configured: false,
+          text: "未配置值班联系人",
+          contacts: [],
+        },
+      });
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(await waitForChatReady(), "checkout-api slow");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByTestId("suggested-actions-card")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确认建议" }));
+
+    await waitFor(() => {
+      expect(mockConfirmSuggestion).toHaveBeenCalledWith({
+        sessionId: expect.any(String),
+        actionId: "review_metrics",
+        note: "panel-confirm",
+      });
+    });
+    expect(await screen.findByText("已确认（未执行）")).toBeInTheDocument();
   });
 
   it("renders a complete answer when no content chunks arrive", async () => {
