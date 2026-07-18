@@ -75,7 +75,7 @@ Model adapters must remain short references to this policy. They must not duplic
 - [模型无关 Agent 治理文档](plan/2026-07-16-model-agent-governance.md) - **已完成并验证**；共享规则已收敛至本文件，`CLAUDE.md` / `CODEX.md` 仅保留模型适配
 
 - [交接：Harness loop 拆分 · 测试硬化](docs/pilot/handoff-2026-07-16-harness-loop-split.md) - **2026-07-16 工程债交接**；`loop.py` 门面化 + `test_harness_service` 67 passed；产品 L3 Conditional 仍以前序交接为准
-- [交接：系统安全 · 租户隔离 · 可靠性修复](docs/pilot/handoff-2026-07-18-security-tenant-reliability.md) - **当前工程交接**；WP-1/2/4、WP-3 scope、WP-6 Phase 2、WP-7 Phase 1 已实现；WP-5 收口、live migration/CI、WP-8 待下一棒
+- [交接：系统安全 · 租户隔离 · 可靠性修复](docs/pilot/handoff-2026-07-18-security-tenant-reliability.md) - **当前工程交接**；实现提交 `e718f58` 已推送；WP-1/2/4、WP-3 scope、WP-6 Phase 2、WP-7 Phase 1 已实现；WP-5 收口、live migration/CI、WP-8 待下一棒
 - [过程栏关键结果乱码与符号噪声修复](plan/2026-07-16-process-key-result-mojibake.md) - **已实现并验证**；旧经验召回字段动态清洗，关键结果结构化显示摘要、置信度、相似度和症状；后端 76 passed、前端 76 tests + build 通过
 - [助手消息工具协议泄漏与中文乱码修复](plan/2026-07-16-assistant-tool-protocol-and-mojibake-guard.md) - **已实现**；隔离 planner/re-evidence/replan 工具决策文本，修复运行时乱码并兼容历史脏消息；见 [进度](plan/2026-07-16-assistant-tool-protocol-and-mojibake-guard-progress.md)
 - [智能体过程栏信息架构与步骤展示优化](plan/2026-07-15-agent-process-panel-information-architecture.md) - **已实现，待 Git 元数据恢复后提交**；原始 SSE 事件归并为业务步骤，修正状态/计数，详情分层并保留 V1 回退；前端 70 tests + build + 3 档浏览器 QA 通过

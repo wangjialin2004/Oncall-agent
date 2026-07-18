@@ -113,3 +113,11 @@
 - Dockerfile 依赖安装去掉 fallback，增加 backend liveness healthcheck；Compose 增加 backend volume、Redis loopback binding/healthcheck、backend readiness healthcheck 和持久化路径。
 - `docker compose ... config`（含 `--profile full`）通过；backend 镜像实际构建成功；无 token 的 `make upload` 在发起网络请求前失败。
 - CI 增加 Python 3.12/3.13、授权/RAG/migration smoke、静态 critical-error 检查、secret contract 和 frontend test/build job；未执行真实 provider/数据库调用。
+
+### 2026-07-18 release handoff verification
+
+- 实现提交 `e718f58` 已推送到 `origin/codex/publish-current-worktree`。
+- 最终后端定向集合 **70 passed**；现有 ci-smoke **49 passed**；前端 **83 passed**，build 通过。
+- 修复两处 critical undefined-name 静态问题（harness context `logger`、stateful rebuild `AgentContextState`）。`ruff --select E9,F63,F7,F82`、compileall、secret contract、`git diff --check` 均通过。
+- 全仓 Ruff format-check 仍报告 84 个历史文件待格式化；本棒未执行大范围格式化，避免覆盖既有用户工作。
+- `docker compose ... --profile full config` 和 backend image build 通过；远端 CI 尚未运行，真实 SQLite/Milvus migration 未执行。
