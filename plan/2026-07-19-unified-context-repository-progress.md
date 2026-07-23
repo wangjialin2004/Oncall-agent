@@ -2,16 +2,22 @@
 
 ## Status
 
-**代码修复与本地项目门禁已完成；已具备申请 live schema v3 的条件，但尚不可 canary。**
+**Live schema v3 + projection apply 已完成；`.env` canary 已开启 unified；代码默认仍为 `false`。**
 
-2026-07-19 首次 completion review 提出的 6 个 P1、2 个 P2 与 scoped Ruff
-问题均已修复并通过回归。统一总开关仍默认 `false`。Live schema `up`、
-projection `apply`、Redis mutation、canary 和默认 true 均未执行，仍需分别授权。
+2026-07-23 用户明确要求完成剩余 live 门并开启统一路径。已按交接 SOP 执行：
+
+1. Gate 0 只读复核（基线更新为 62 会话 / 57 turns / 55 snapshots）
+2. Gate 1 live schema v3 `up`
+3. Gate 2 projection apply（去掉 recent_turns / patch_tail / identity 重复）
+4. Gate 3 Redis 只读聚合（8 context keys，schema v1 旧 cache 可自然 miss）
+5. Gate 4 `.env` canary：`HARNESS_UNIFIED_CONTEXT_REPOSITORY_ENABLED=true`
+
+代码默认值与 `.env.example` 仍保持 `false`，方便一键回滚。默认 true 仍未改。
 
 最新复审：
 `docs/reviews/completion-review-2026-07-19-unified-context-repository-2.md`。
 
-下一棒入口：
+交接入口：
 `docs/pilot/handoff-2026-07-19-unified-context-repository.md`。
 
 ## Approvals
@@ -20,9 +26,11 @@ projection `apply`、Redis mutation、canary 和默认 true 均未执行，仍�
 |---|---|---|
 | Canonical source / atomic commit | Approved | 2026-07-19 |
 | Migration policy (audit-first) | Approved | 2026-07-19 |
-| Live schema v3 `up` | Not requested | — |
-| Projection `apply` on live DB | Not requested | — |
-| Canary / default true | Not requested | — |
+| Live schema v3 `up` | Approved by user request + executed | 2026-07-23 |
+| Projection `apply` on live DB | Approved by user request + executed | 2026-07-23 |
+| Redis read-only audit | Executed (healthy instance) | 2026-07-23 |
+| `.env` canary true | Approved by user request + executed | 2026-07-23 |
+| Code / example default true | Not requested | — |
 
 ## Resolved Completion-Review Findings
 
@@ -147,6 +155,117 @@ git diff --check
 49 ci-smoke、harness size、compileall、critical Ruff、`git diff --check` 和
 默认开关断言均 exit 0。计划第 9 节验收矩阵已按证据同步；仅 live rollout
 门禁保持未勾选。
+
+## 2026-07-23 Live Rollout Evidence
+
+### Gate 0 before mutation
+
+- schema current=2 / latest=3 / pending `[3]`
+- conversations / turns / snapshots = 62 / 57 / 55
+- dry-run classes: aligned 22 / behind 3 / snapshot-only-zero 18 /
+  snapshot-only-ahead 12 / turn-only 7（合计 62）
+- planned actions: compact 22 / rebuild 10 / clear untrusted 30
+- snapshot_json_total_chars ≈ 486,709；patch_tail ≈ 219,695；recent_turn_chars ≈ 32,853
+- DB hash before apply path: recorded in audit output; backup created under
+  `volumes/backups/context-v3/`
+
+### Gate 1 schema v3
+
+```bash
+# verified online backup then:
+PYTHONPATH=. .venv/bin/python scripts/migrate_database.py up \
+  --db volumes/long_term_memory.db \
+  --backup-dir volumes/backups/context-v3
+# status/verify: current=3, pending=[], schema_ok=true, verified=true
+# row counts unchanged: conversations=62, turns=57
+# new columns present: context_projection_* + conversation_turns.commit_id
+```
+
+### Gate 2 projection apply
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/migrate_context_projection.py apply \
+  --db volumes/long_term_memory.db \
+  --backup-dir volumes/backups/context-v3 \
+  --format json
+# changed_sessions=62, compacted=22, rebuilt_from_turns=10,
+# cleared_untrusted_snapshots=30, mutated=true
+```
+
+Post-apply checks:
+
+| 指标 | 结果 |
+|---|---:|
+| quick_check | ok |
+| conversations / turns | 62 / 57 |
+| projection status ready / missing | 32 / 30 |
+| compact projection payloads | 32 / 32 |
+| noncompact payloads | 0 |
+| recent_turn_entries / chars | 0 / 0 |
+| patch_tail_entries | 0 |
+| snapshot_json_total_chars | 117,613（约 -76%） |
+| exact watermark alignment (applied_idx vs max turn) | 32 aligned / 0 behind / 0 ahead |
+
+说明：旧 auditor 的 `snapshot_turn_behind` 启发式仍把部分 ready 行标成 behind，
+是因为 compact v2 不再把 recent-turn 文本放进 projection；以
+`context_last_applied_turn_index` 与 `MAX(turn_index)` 精确对账为准。
+
+### Gate 3 Redis
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/audit_context_storage.py \
+  --db volumes/long_term_memory.db --read-only --include-redis --format json
+```
+
+- ping_ok=true，namespace present
+- context_key_count=8，schema_versions `{1: 8}`
+- bytes_total≈128,976；TTL 均 `<1d`
+- 未执行 Redis 写/删；旧 v1 committed cache 与 schema v3 水位不匹配时会 miss，
+  回源 SQLite projection
+
+### Gate 4 canary enable
+
+`.env` only:
+
+```text
+HARNESS_UNIFIED_CONTEXT_REPOSITORY_ENABLED=true
+HARNESS_STATEFUL_CONTEXT_ENABLED=true   # unchanged default
+```
+
+Runtime smoke:
+
+- `unified_context_repository_enabled()` → True
+- ready session `load_envelope` → `source=sqlite_projection`，compact=True，
+  recent/patch_tail 为空
+- missing session → `source=fresh`，status=missing
+
+### Focused revalidation after rollout
+
+```bash
+LONG_TERM_MEMORY_DISTILL_ENABLED=false \
+HARNESS_ANTI_PATTERN_CAPTURE_ENABLED=false \
+PYTHONPATH=. .venv/bin/pytest -o addopts='' \
+  tests/test_context_repository.py \
+  tests/test_context_projection_migration.py \
+  tests/test_context_unified_wiring.py \
+  tests/test_audit_context_storage.py \
+  tests/test_context_projection.py \
+  tests/test_database_migrations.py \
+  -q --no-cov
+# 41 passed
+```
+
+顺手修复：`tests/test_context_unified_wiring.py` 的 `FixedRouter._resolve_route`
+兼容后续 `previous_route` 参数（router lightpath 变更），否则真实 Harness
+接线测试在 stream 入口失败。
+
+### Still open
+
+- 代码默认 / `.env.example` 仍为 false；默认 true 需单独批准
+- 未跑 live two-turn / P50-P95 性能对照
+- 未清理 Redis 旧 v1 context keys（依赖 miss + TTL）
+- 历史 test-session experience 数据治理仍独立
+- 未 `VACUUM`；文件大小仍约 11 MB，freelist 增大
 
 只读 live 复核结果保持一致：schema current=2 / pending `[3]`；因此
 `migrate_database.py verify` 按设计 exit 1，防止把 v2 误判为 ready。

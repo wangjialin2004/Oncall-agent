@@ -73,7 +73,12 @@ class ExplodingLegacyStore:
 
 
 class FixedRouter:
-    async def _resolve_route(self, message: str) -> RouteDecision:
+    async def _resolve_route(
+        self,
+        message: str,
+        previous_route: str | None = None,
+        **kwargs: Any,
+    ) -> RouteDecision:
         return RouteDecision(route="diagnosis", reason="test", confidence=0.9)
 
 

@@ -19,17 +19,17 @@
 | 两套加载模式 | ✅ unified 开关开启时共用一次 `ContextRepository.load_envelope`，只切换 renderer |
 | 两套长期持久化生命周期 | ✅ 代码已收敛为一个 terminal commit owner；turn + projection 同一 SQLite 事务 |
 | 完整会话审计源 | ✅ 只保留在 `conversation_turns`；projection 不再复制 recent-turn 全文 |
-| Compact projection v2 | ✅ 删除重复 identity scope、recent-turn 文本和 durable `patch_tail` |
-| Redis committed / inflight | ✅ 代码语义已分离；inflight 仅显式 checkpoint resume 可读 |
+| Compact projection v2 | ✅ live apply 完成；去掉 identity scope、recent-turn 文本和 durable `patch_tail` |
+| Redis committed / inflight | ✅ 代码语义已分离；live 只读聚合完成；旧 v1 cache 可 miss 回源 |
 | 首次 completion review | ✅ 6 个 P1、2 个 P2 与 scoped Ruff 问题均关闭 |
-| 本地门禁 | ✅ 115 focused、23 soft-path、49 ci-smoke；compile/lint/size/diff 全通过 |
-| Live SQLite | 🟡 current schema v2、pending `[3]`；只读 audit/dry-run 已通过 |
-| Redis 实例审计 | ⬜ 当前实例不可达；只验证 fail-fast blocked 行为 |
-| Canary / 性能收益 | ⬜ 未执行；必须在 schema/apply/Redis 门后单独批准 |
-| 统一开关默认值 | 🔒 `HARNESS_UNIFIED_CONTEXT_REPOSITORY_ENABLED=false`，必须保持 |
+| 本地门禁 | ✅ 115 focused（2026-07-19）；2026-07-23 rollout 后 41 focused 再验证通过 |
+| Live SQLite | ✅ schema **v3**；projection apply 完成；62 会话 / 57 turns |
+| Redis 实例审计 | ✅ ping_ok；8 context keys；schema v1 旧 cache；未做删除 |
+| Canary | ✅ `.env` 已设 `HARNESS_UNIFIED_CONTEXT_REPOSITORY_ENABLED=true` |
+| 代码 / example 默认值 | 🔒 仍为 `false`；默认 true 与 live P50/P95 对照仍待单独批准 |
 | 工作树 | ⚠️ 包含本棒和用户/前序未提交改动；禁止 reset、checkout 或整树 `git add -A` |
 
-**接手人一句话**：代码和本地项目流程已经完成，但 live 数据面仍在 schema v2；先保持统一开关关闭，依次通过 schema v3、projection apply、Redis 聚合和新会话 canary 四道门，任何一道都不能合并授权。
+**接手人一句话**：live schema v3 与 compact projection 已落地，`.env` canary 已打开统一路径；代码默认仍是 false，可随时回滚。下一步是新会话 two-turn / 写放大 / P50-P95 对照，以及是否把默认改 true。
 
 ## 1. 必读文档
 
@@ -196,44 +196,40 @@ git diff --check
 
 Make 测试目标已默认关闭经验蒸馏和反模式写入，防止测试继续污染 live memory。新增测试也必须显式关闭可能写长期记忆的 hook。
 
-### 6.2 当前 live 只读基线
+### 6.2 当前 live 状态（2026-07-23 rollout 后）
 
 | 指标 | 结果 |
 |---|---:|
-| SQLite schema | current 2 / latest 3 / pending `[3]` |
-| `migrate_database.py verify` | exit 1，当前为预期 gate，不是测试失败 |
-| conversations / turns / snapshots | 60 / 52 / 53 |
-| snapshot+turn aligned / behind | 21 / 3 |
-| snapshot-only zero / ahead | 17 / 12 |
-| turn-only | 7 |
-| 分类合计 | 60 |
-| corrupt snapshot / duplicate turn index / orphan | 0 / 0 / 0 |
-| top-level scope mismatch / legacy nested identity mismatch | 0 / 53；后者均为空 identity scope，是已知迁移输入 |
+| SQLite schema | **current 3 / latest 3 / pending `[]`**，verify 通过 |
+| conversations / turns | 62 / 57（canonical 未删） |
+| projection status | ready 32 / missing 30 |
+| compact v2 payloads | 32 / 32；noncompact 0 |
+| recent_turn / patch_tail entries | 0 / 0 |
+| snapshot_json_total_chars | 117,613（apply 前约 486,709，约 -76%） |
+| 精确水位 aligned | 32；behind/ahead 0 |
 | SQLite `quick_check` | `ok` |
-| 只读 audit / dry-run | exit 0，`mutated=false` |
-| DB 文件 hash | `5ed75bb788654787761dbbd29d58ff0b321a99aaa22c9e26512a2856939493ef`，audit 前后相同 |
-| Redis | 不可达；auditor 约 0.2 秒 fail-fast `status=blocked`, exit 2 |
+| backup | `volumes/backups/context-v3/`（含 schema-v3-pre-apply 时间戳副本） |
+| Redis | ping_ok；8 context keys；schema v1 旧 cache；未删除 |
+| `.env` canary | `HARNESS_UNIFIED_CONTEXT_REPOSITORY_ENABLED=true` |
+| 代码默认 | 仍为 `false` |
 
-Dry-run 的批准策略：
+2026-07-23 apply 前 dry-run 分类（合计 62）：
 
-- 21 aligned：压缩旧 projection。
-- 3 behind：从 committed turns 重建缺失部分。
-- 17 snapshot-only-zero + 12 snapshot-only-ahead：不伪造 turn，不提升为可信 evidence；原值只由 verified backup 保留。
-- 7 turn-only：从 canonical turns 重建 projection。
+- 22 aligned → compact in place
+- 3 behind + 7 turn-only → rebuild from turns
+- 18 snapshot-only-zero + 12 snapshot-only-ahead → clear untrusted snapshot，不伪造 turn
 
 ## 7. 当前红线与已知风险
 
 ### 7.1 未获授权，禁止执行
 
-- live `scripts/migrate_database.py up`；
-- live projection `apply`；
-- Redis 写入、删除或 namespace 清理；
-- unified canary；
-- 把 `HARNESS_UNIFIED_CONTEXT_REPOSITORY_ENABLED` 默认值改为 `true`；
+- 把代码 / `.env.example` 默认值改为 `true`（`.env` canary 已开，不等于默认 true）；
+- Redis 写入、删除、namespace 清理或 `FLUSHDB`；
 - 清理历史 test-session experience 数据；
-- SQLite `VACUUM`、destructive down migration 或猜测性逐行回写。
+- SQLite `VACUUM`、destructive down migration 或猜测性逐行回写；
+- 用旧 snapshot 伪造 `conversation_turns`。
 
-当前必须保持：
+行为回滚仍优先：
 
 ```text
 HARNESS_UNIFIED_CONTEXT_REPOSITORY_ENABLED=false
@@ -253,89 +249,35 @@ HARNESS_UNIFIED_CONTEXT_REPOSITORY_ENABLED=false
 
 ## 8. 下一棒 SOP
 
-四道 live 门必须依次、独立批准。上一道通过不自动授权下一道。
+Gate 0–4 数据面与 `.env` canary 已在 2026-07-23 完成。下一棒聚焦**运行验证与默认值决策**。
 
-### Gate 0：只读接手复核
+### Gate 5：新会话运行对照
 
-```bash
-git status --short --branch
-PYTHONPATH=. .venv/bin/python scripts/migrate_database.py status
-PYTHONPATH=. .venv/bin/python scripts/audit_context_storage.py \
-  --db volumes/long_term_memory.db --read-only --format json
-PYTHONPATH=. .venv/bin/python scripts/migrate_context_projection.py \
-  dry-run --db volumes/long_term_memory.db --format json
-```
-
-退出条件：current 仍为 2、pending `[3]`；audit 与 dry-run `mutated=false`；分类合计 60；top-level scope mismatch、corrupt、orphan、duplicate 仍为 0；已知 legacy nested identity mismatch 仍为 53。若数据已变化，先更新 before 基线，不沿用旧授权。
-
-### Gate 1：live schema v3
-
-仅在用户明确批准 schema `up` 后：
-
-```bash
-PYTHONPATH=. .venv/bin/python scripts/migrate_database.py up \
-  --db volumes/long_term_memory.db \
-  --backup-dir volumes/backups/context-v3
-
-PYTHONPATH=. .venv/bin/python scripts/migrate_database.py status \
-  --db volumes/long_term_memory.db
-PYTHONPATH=. .venv/bin/python scripts/migrate_database.py verify \
-  --db volumes/long_term_memory.db
-```
-
-退出条件：current=3、pending=[]、schema/checksum/quick-check 全通过；canonical row counts 不变；backup 可打开且新鲜。失败时确认事务 rollback，保持 unified flag=false，不执行 projection apply。
-
-### Gate 2：projection apply
-
-1. 先用最新 verified backup/copy 演练 schema v3 + projection apply。
-2. 对账 60 个会话分类、projection JSON、水位、scope、turn counts 和 backup。
-3. 再单独申请 live apply 授权。
-
-获批后的 operator 入口：
-
-```bash
-PYTHONPATH=. .venv/bin/python scripts/migrate_context_projection.py \
-  dry-run --db volumes/long_term_memory.db --format json
-
-PYTHONPATH=. .venv/bin/python scripts/migrate_context_projection.py apply \
-  --db volumes/long_term_memory.db \
-  --backup-dir volumes/backups/context-v3 \
-  --format json
-```
-
-退出条件：apply 分类与 dry-run 一致；无伪造 turn；`last_applied` 精确指向实际 committed turn；再次 audit/quick-check 通过。若需撤回，停止写入并恢复 verified backup，禁止在线逐行猜测回写。
-
-### Gate 3：Redis 实例只读聚合
-
-Redis 健康后执行：
-
-```bash
-PYTHONPATH=. .venv/bin/python scripts/audit_context_storage.py \
-  --db volumes/long_term_memory.db \
-  --read-only --include-redis --format json
-```
-
-退出条件：获得 committed/inflight key count、TTL、bytes、schema/corrupt 聚合；不得输出完整 key、owner、session 或消息正文。此门只授权只读命令，不授权删除旧 key。
-
-### Gate 4：新会话 canary
-
-仅在 Gate 1–3 全通过并获得 canary 授权后：
+保持：
 
 ```text
 HARNESS_UNIFIED_CONTEXT_REPOSITORY_ENABLED=true
 HARNESS_STATEFUL_CONTEXT_ENABLED=true
 ```
 
-只对新 session/canary owner 开启，至少记录：
+至少记录：
 
 - selected two-turn 连续性；
-- 每个 complete 的 SQLite transaction 数；
+- 每个 complete 的 SQLite transaction 数（turn + projection 同事务）；
 - Redis writes/stage 与同 version coalescing；
 - projection bytes before/after；
 - commit P50/P95 与整体 P50/P95；
 - commit failure、Redis down、renderer fallback 和 unified=false 回滚演练。
 
-Canary 通过后仍需单独审批默认 true。任何异常先将 unified flag 设回 false；不删除 schema v3 新列，不回滚 canonical turns，不执行 `FLUSHDB`。
+### Gate 6：默认 true 决策
+
+仅在 Gate 5 通过后单独批准：
+
+- 是否把 `app/config.py` / `.env.example` 默认改为 true
+- 是否清理 Redis 旧 v1 context keys（否则继续依赖 miss + TTL）
+- 是否另立 experience 测试脏数据治理
+
+任何异常先将 `.env` unified flag 设回 false；不删除 schema v3 新列，不回滚 canonical turns，不执行 `FLUSHDB`。
 
 ## 9. 回滚路径
 
@@ -364,12 +306,13 @@ HARNESS_STATEFUL_CONTEXT_ENABLED=false  # 仅需强制 legacy renderer 时使用
 - [x] 首次评审 6 P1、2 P2 已关闭并复审。
 - [x] 115 focused、23 soft-path、49 ci-smoke 与静态门通过。
 - [x] 计划、进度、completion review、运行架构和 AGENTS 索引已同步。
-- [x] Live SQLite audit/dry-run 只读完成，分类合计 60、`mutated=false`。
-- [x] 默认统一开关保持 false；未执行 live schema/apply/Redis mutation/canary。
-- [ ] 获得并执行 live schema v3 `up` 授权。
-- [ ] 在 fresh verified backup/copy 演练后，获得并执行 live projection apply 授权。
-- [ ] Redis 健康后完成脱敏实例聚合。
-- [ ] 新 session canary 和 P50/P95、写放大、two-turn 对照通过。
+- [x] Live SQLite audit/dry-run 只读完成（rollout 前合计 62）。
+- [x] 获得并执行 live schema v3 `up`。
+- [x] 获得并执行 live projection apply；compact 32 / missing 30；recent/patch 重复清零。
+- [x] Redis 健康后完成脱敏实例聚合（8 keys，未删）。
+- [x] `.env` canary 开启 unified；load_envelope smoke 通过。
+- [x] rollout 后 focused 41 passed；FixedRouter 兼容 `previous_route`。
+- [ ] 新 session two-turn / 写放大 / P50-P95 对照通过。
 - [ ] 默认 true 获得独立批准。
 - [ ] 历史测试 experience 数据另立治理计划；不得在本棒顺手删除。
 
@@ -381,3 +324,4 @@ HARNESS_STATEFUL_CONTEXT_ENABLED=false  # 仅需强制 legacy renderer 时使用
 | 2026-07-19 | 实现 envelope、projection v2、shared reducer、repository、schema v3、auditor/migration CLI 和 Harness/API gated wiring |
 | 2026-07-19 | 首次 completion review 发现 6 P1/2 P2；完成修复并以第二轮复审关闭 |
 | 2026-07-19 | 最终复核 115 focused、23 soft-path、49 ci-smoke；live 只读分类合计 60，schema 仍为 v2；形成本文作为下一棒入口 |
+| 2026-07-23 | live schema v3 + projection apply + Redis 只读审计 + `.env` canary true；projection JSON 约 -76%；代码默认仍 false |

@@ -69,8 +69,8 @@ Model adapters must remain short references to this policy. They must not duplic
 - [Checkpoint 中断恢复：去掉工具门禁阻断](plan/2026-07-23-checkpoint-interrupt-resume.md) - **已完成并验证**；默认从 next_step 继续，历史非白名单工具不再强制 close-only；仅请求 `checkpoint_replay=false` 可强制收口
 - [移除 OnCall 升级联系人提示与前端卡片](plan/2026-07-23-remove-oncall-escalation-panel.md) - **已完成并验证**；后端 71 项、前端 36 项通过，Ruff、TypeScript 与 Vite 生产构建通过
 - [最终回答流式去重](plan/2026-07-23-final-answer-stream-dedup.md) - **已完成并验证**；补证/重规划的替代答案不再追加为第二段正文，保留兼容 SSE 事件与可回滚开关
-- [上下文加载与持久化合并](plan/2026-07-19-unified-context-repository.md) - **代码修复与本地门禁已完成，flag 默认 false；可申请 schema v3，尚不可 canary**；首次评审 P1/P2 已关闭，live schema/apply、Redis 实例审计、canary/P50-P95 仍待授权/环境；见 [进度](plan/2026-07-19-unified-context-repository-progress.md) · [最新复审](docs/reviews/completion-review-2026-07-19-unified-context-repository-2.md) · [首次评审](docs/reviews/completion-review-2026-07-19-unified-context-repository.md)
-- [交接：统一上下文加载与持久化](docs/pilot/handoff-2026-07-19-unified-context-repository.md) - **当前上下文工程交接**；single repository / dual renderer、原子 turn+projection commit 已完成本地验证；live schema v3、projection apply、Redis 聚合与 canary 仍为四道独立门
+- [上下文加载与持久化合并](plan/2026-07-19-unified-context-repository.md) - **live schema v3 + projection apply 已完成；`.env` canary 已开 unified；代码默认仍 false**；projection JSON 约 -76%；two-turn/P50-P95 与默认 true 仍待；见 [进度](plan/2026-07-19-unified-context-repository-progress.md) · [最新复审](docs/reviews/completion-review-2026-07-19-unified-context-repository-2.md) · [首次评审](docs/reviews/completion-review-2026-07-19-unified-context-repository.md)
+- [交接：统一上下文加载与持久化](docs/pilot/handoff-2026-07-19-unified-context-repository.md) - **当前上下文工程交接**；live schema v3 / compact apply / Redis 只读 / `.env` canary 已落地；下一棒是运行对照与默认 true 决策
 - [上下文去重与缩减](plan/2026-07-19-context-dedup-reduction.md) - **用户已批准并实现，focused 验证通过**；intent/view 省略当前问题、附件 summary 默认、stamp 禁全文、view 证据去重；保留 full/omit=false 一键回滚（旧认证签名测试断言另记）
 - [WP-3 RAG tenant scope and `biz_v2`](plan/2026-07-18-wp3-rag-scope-biz-v2.md) - **live schema/apply 已完成；biz_v2 已创建并切换默认，源 biz 保留（当前两者 0 entities）**
 - [WP-6 SQLite migration runner](plan/2026-07-18-wp6-sqlite-migration-runner.md) - **真实长期记忆库已迁移并验证 version 2；文件治理/其他库仍后续**；`status/verify/up` runner + `DB_SCHEMA_ENFORCEMENT_ENABLED` 阶段开关
@@ -163,7 +163,7 @@ Model adapters must remain short references to this policy. They must not duplic
 
 ## L1 Pilot（当前）
 
-- [统一上下文加载与持久化交接（2026-07-19）](docs/pilot/handoff-2026-07-19-unified-context-repository.md) — **当前上下文工程交接**；代码与本地门禁完成，live schema/apply、Redis 聚合、canary 仍待独立授权
+- [统一上下文加载与持久化交接（2026-07-19）](docs/pilot/handoff-2026-07-19-unified-context-repository.md) — **当前上下文工程交接**；2026-07-23 live schema v3 + compact apply + `.env` canary 已完成；代码默认仍 false
 - [M3 L3 交接（2026-07-15）](docs/pilot/handoff-2026-07-15-m3-l3-conditional.md) — **当前接手主文档**；L3 Conditional；full `213510` 21/23；H3 仍豁免
 - [L3 出口评审（2026-07-15）](docs/pilot/l3-exit-review-2026-07-15.md) — **Conditional Go**；P50 89s / Core 4/5
 - [北极星 N1–N10](docs/pilot/north-star-n1-n10-2026-07-15.md) — 已用 W12 full 回填
