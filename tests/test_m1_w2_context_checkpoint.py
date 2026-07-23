@@ -129,6 +129,7 @@ def test_checkpoint_default_idempotent_tools_include_readonly_queries():
     assert store.is_step_idempotent(["query_prometheus_alerts"]) is True
     assert store.is_step_idempotent(["retrieve_knowledge", "recall_experience"]) is True
     assert store.is_step_idempotent(["delegate_to_expert"]) is True
+    assert store.is_step_idempotent(["delegate_parallel"]) is True
     assert store.is_step_idempotent(["dangerous_write_tool"]) is False
 
 

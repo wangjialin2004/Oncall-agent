@@ -214,12 +214,30 @@ async def test_force_expert_delegation_off_does_not_seed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_re_evidence_triggers_when_answer_has_no_tool_evidence(monkeypatch):
+@pytest.mark.parametrize(
+    ("replacement_enabled", "expected_visible"),
+    [
+        (True, "I guess CPU is high but no tool was used."),
+        (
+            False,
+            "I guess CPU is high but no tool was used."
+            "checkout-api CPU is 87.5% based on alerts tool.",
+        ),
+    ],
+)
+async def test_re_evidence_replaces_prior_visible_answer_by_default(
+    monkeypatch, replacement_enabled, expected_visible
+):
     from app.config import config as app_config
 
     monkeypatch.setattr(app_config, "harness_re_evidence_enabled", True)
     monkeypatch.setattr(app_config, "harness_re_evidence_max_rounds", 1)
     monkeypatch.setattr(app_config, "harness_corrective_verify_enabled", True)
+    monkeypatch.setattr(
+        app_config,
+        "harness_final_answer_replacement_enabled",
+        replacement_enabled,
+    )
     monkeypatch.setattr(app_config, "harness_force_expert_delegation", False)
     monkeypatch.setattr(
         "app.agent.harness.loop.stateful_context_enabled",
@@ -290,6 +308,22 @@ async def test_re_evidence_triggers_when_answer_has_no_tool_evidence(monkeypatch
     ]
     assert len(verify_events) >= 2
     assert verify_events[-1]["payload"]["evidence_count"] >= 1
+
+    visible = "".join(
+        str(event.get("data") or "")
+        for event in events
+        if event.get("type") == "content"
+    )
+    assert visible == expected_visible
+
+    complete_payload = next(
+        event for event in reversed(events) if event.get("type") == "complete"
+    )
+    assert "checkout-api CPU is 87.5% based on alerts tool." in complete_payload["answer"]
+    if replacement_enabled:
+        assert complete_payload.get("replace_streamed_answer") is True
+    else:
+        assert "replace_streamed_answer" not in complete_payload
 
     complete = next(e for e in events if e.get("stage") == "complete")
     assert complete["payload"].get("re_evidence_rounds_used") == 1

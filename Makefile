@@ -10,6 +10,7 @@ HEALTH_CHECK_API = $(SERVER_URL)/health/readiness
 AUTH_TOKEN ?=
 DOCS_DIR = aiops-docs
 MILVUS_CONTAINER = milvus-standalone
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 
 # 颜色输出
 GREEN = \033[0;32m
@@ -22,7 +23,7 @@ NC = \033[0m
         install install-dev dev run test test-quick ci-smoke format lint fix type-check \
         security pre-commit-install pre-commit check-all format-check frontend-test frontend-build coverage docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
-        start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp
+        start-redis start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp
 
 # ============================================================
 # 默认目标：显示帮助信息
@@ -48,6 +49,7 @@ help:
 	@echo "  $(YELLOW)make status-mcp$(NC)   - 📊 查看 MCP 服务状态"
 	@echo ""
 	@echo "$(CYAN)【MCP 服务管理】$(NC)"
+	@echo "  $(YELLOW)make start-redis$(NC)   - 🗄️  启动本地 Redis 容器（默认 :6380）"
 	@echo "  $(YELLOW)make start-cls$(NC)     - 📋 启动 CLS MCP 服务"
 	@echo "  $(YELLOW)make stop-cls$(NC)      - 🛑 停止 CLS MCP 服务"
 	@echo "  $(YELLOW)make start-monitor$(NC) - 📊 启动 Monitor MCP 服务"
@@ -207,66 +209,130 @@ stop-prometheus:
 # ============================================================
 # MCP 服务管理
 # ============================================================
+# 进程探测用 TCP 端口 / pid 文件，避免 `pgrep -f` 误匹配 Makefile 自身命令行。
+MCP_CLS_PORT ?= 8003
+MCP_MONITOR_PORT ?= 8004
+REDIS_CONTAINER ?= super-biz-redis
+REDIS_HOST_PORT ?= 6380
+
+# 返回 0 表示 host:port 可连。用法: $(call port_up,127.0.0.1,8003)
+define port_up
+$(PYTHON) -c "import socket,sys; s=socket.socket(); s.settimeout(0.3); \
+code=s.connect_ex(('$(1)', int('$(2)'))); s.close(); sys.exit(0 if code==0 else 1)"
+endef
+
+# 从 pid 文件读取存活 PID；文件缺失或进程已死时输出空。
+define live_pid_from_file
+if [ -f "$(1)" ]; then \
+	_pid=$$(tr -d '[:space:]' < "$(1)" 2>/dev/null); \
+	if [ -n "$$_pid" ] && kill -0 "$$_pid" 2>/dev/null; then \
+		printf '%s' "$$_pid"; \
+	fi; \
+fi
+endef
+
+# 启动本地 Redis（匹配 .env REDIS_URL=redis://127.0.0.1:6380/0 的 super-biz-redis 容器）
+start-redis:
+	@echo "$(YELLOW)🗄️  启动 Redis ($(REDIS_CONTAINER) → 127.0.0.1:$(REDIS_HOST_PORT))...$(NC)"
+	@if $(call port_up,127.0.0.1,$(REDIS_HOST_PORT)); then \
+		echo "$(GREEN)✅ Redis 已在监听 127.0.0.1:$(REDIS_HOST_PORT)$(NC)"; \
+	elif docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx '$(REDIS_CONTAINER)'; then \
+		docker start $(REDIS_CONTAINER) >/dev/null; \
+		sleep 1; \
+		if $(call port_up,127.0.0.1,$(REDIS_HOST_PORT)); then \
+			echo "$(GREEN)✅ Redis 容器已启动 ($(REDIS_CONTAINER))$(NC)"; \
+		else \
+			echo "$(RED)❌ Redis 容器启动后端口仍不可达$(NC)"; \
+			exit 1; \
+		fi; \
+	elif docker info > /dev/null 2>&1; then \
+		docker run -d --name $(REDIS_CONTAINER) \
+			-p 127.0.0.1:$(REDIS_HOST_PORT):6379 \
+			--restart unless-stopped redis:7-alpine >/dev/null; \
+		sleep 1; \
+		if $(call port_up,127.0.0.1,$(REDIS_HOST_PORT)); then \
+			echo "$(GREEN)✅ Redis 容器已创建并启动 ($(REDIS_CONTAINER))$(NC)"; \
+		else \
+			echo "$(RED)❌ Redis 容器创建后端口仍不可达$(NC)"; \
+			exit 1; \
+		fi; \
+	else \
+		echo "$(RED)❌ Docker 不可用，且 127.0.0.1:$(REDIS_HOST_PORT) 无 Redis$(NC)"; \
+		exit 1; \
+	fi
 
 # 启动 CLS MCP 服务
 start-cls:
 	@echo "$(YELLOW)📋 启动 CLS MCP 服务...$(NC)"
-	@if pgrep -f "mcp_servers/cls_server.py" > /dev/null 2>&1; then \
-		echo "$(GREEN)✅ CLS MCP 服务已经在运行中$(NC)"; \
+	@if $(call port_up,127.0.0.1,$(MCP_CLS_PORT)); then \
+		echo "$(GREEN)✅ CLS MCP 服务已经在运行中 (port $(MCP_CLS_PORT))$(NC)"; \
 	else \
 		echo "$(YELLOW)📦 正在启动 CLS MCP 服务（后台运行）...$(NC)"; \
-		nohup .venv/bin/python mcp_servers/cls_server.py > mcp_cls.log 2>&1 & \
+		nohup $(PYTHON) mcp_servers/cls_server.py > mcp_cls.log 2>&1 & \
 		echo $$! > mcp_cls.pid; \
-		sleep 2; \
-		if pgrep -f "mcp_servers/cls_server.py" > /dev/null 2>&1; then \
+		ready=0; \
+		for i in 1 2 3 4 5 6 7 8 9 10; do \
+			if $(call port_up,127.0.0.1,$(MCP_CLS_PORT)); then ready=1; break; fi; \
+			sleep 0.5; \
+		done; \
+		if [ $$ready -eq 1 ]; then \
 			echo "$(GREEN)✅ CLS MCP 服务启动成功$(NC)"; \
 			echo "$(YELLOW)   PID: $$(cat mcp_cls.pid)$(NC)"; \
-			echo "$(YELLOW)   URL: http://127.0.0.1:8003/mcp$(NC)"; \
+			echo "$(YELLOW)   URL: http://127.0.0.1:$(MCP_CLS_PORT)/mcp$(NC)"; \
 			echo "$(YELLOW)   日志: mcp_cls.log$(NC)"; \
 		else \
-			echo "$(RED)❌ CLS MCP 服务启动失败$(NC)"; \
+			echo "$(RED)❌ CLS MCP 服务启动失败（端口 $(MCP_CLS_PORT) 未监听）$(NC)"; \
 			echo "$(YELLOW)请检查日志: tail -f mcp_cls.log$(NC)"; \
+			exit 1; \
 		fi; \
 	fi
 
 # 启动 Monitor MCP 服务
 start-monitor:
 	@echo "$(YELLOW)📊 启动 Monitor MCP 服务...$(NC)"
-	@if pgrep -f "mcp_servers/monitor_server.py" > /dev/null 2>&1; then \
-		echo "$(GREEN)✅ Monitor MCP 服务已经在运行中$(NC)"; \
+	@if $(call port_up,127.0.0.1,$(MCP_MONITOR_PORT)); then \
+		echo "$(GREEN)✅ Monitor MCP 服务已经在运行中 (port $(MCP_MONITOR_PORT))$(NC)"; \
 	else \
 		echo "$(YELLOW)📦 正在启动 Monitor MCP 服务（后台运行）...$(NC)"; \
-		nohup .venv/bin/python mcp_servers/monitor_server.py > mcp_monitor.log 2>&1 & \
+		nohup $(PYTHON) mcp_servers/monitor_server.py > mcp_monitor.log 2>&1 & \
 		echo $$! > mcp_monitor.pid; \
-		sleep 2; \
-		if pgrep -f "mcp_servers/monitor_server.py" > /dev/null 2>&1; then \
+		ready=0; \
+		for i in 1 2 3 4 5 6 7 8 9 10; do \
+			if $(call port_up,127.0.0.1,$(MCP_MONITOR_PORT)); then ready=1; break; fi; \
+			sleep 0.5; \
+		done; \
+		if [ $$ready -eq 1 ]; then \
 			echo "$(GREEN)✅ Monitor MCP 服务启动成功$(NC)"; \
 			echo "$(YELLOW)   PID: $$(cat mcp_monitor.pid)$(NC)"; \
-			echo "$(YELLOW)   URL: http://127.0.0.1:8004/mcp$(NC)"; \
+			echo "$(YELLOW)   URL: http://127.0.0.1:$(MCP_MONITOR_PORT)/mcp$(NC)"; \
 			echo "$(YELLOW)   日志: mcp_monitor.log$(NC)"; \
 		else \
-			echo "$(RED)❌ Monitor MCP 服务启动失败$(NC)"; \
+			echo "$(RED)❌ Monitor MCP 服务启动失败（端口 $(MCP_MONITOR_PORT) 未监听）$(NC)"; \
 			echo "$(YELLOW)请检查日志: tail -f mcp_monitor.log$(NC)"; \
+			exit 1; \
 		fi; \
 	fi
 
 # 停止 Monitor MCP 服务
 stop-monitor:
 	@echo "$(YELLOW)🛑 停止 Monitor MCP 服务...$(NC)"
-	@if [ -f mcp_monitor.pid ]; then \
-		pid=$$(cat mcp_monitor.pid); \
-		if ps -p $$pid > /dev/null 2>&1; then \
-			kill $$pid; \
-			echo "$(GREEN)✅ Monitor MCP 服务已停止 (PID: $$pid)$(NC)"; \
-		else \
-			echo "$(YELLOW)⚠️  进程不存在 (PID: $$pid)$(NC)"; \
-		fi; \
+	@pid="$$($(call live_pid_from_file,mcp_monitor.pid))"; \
+	if [ -n "$$pid" ]; then \
+		kill $$pid 2>/dev/null || true; \
+		sleep 0.5; \
+		if kill -0 $$pid 2>/dev/null; then kill -9 $$pid 2>/dev/null || true; fi; \
+		echo "$(GREEN)✅ Monitor MCP 服务已停止 (PID: $$pid)$(NC)"; \
 		rm -f mcp_monitor.pid; \
 	else \
-		echo "$(YELLOW)⚠️  未找到 mcp_monitor.pid 文件$(NC)"; \
-		pkill -f "mcp_servers/monitor_server.py" 2>/dev/null && \
-			echo "$(GREEN)✅ 已停止所有 Monitor MCP 进程$(NC)" || \
+		rm -f mcp_monitor.pid; \
+		# 仅按真实 python 进程 cmdline 匹配，排除当前 shell / make 行
+		pids=$$(ps -eo pid=,args= | awk '/[p]ython[^ ]* .*mcp_servers\/monitor_server\.py/ {print $$1}'); \
+		if [ -n "$$pids" ]; then \
+			echo "$$pids" | xargs -r kill 2>/dev/null || true; \
+			echo "$(GREEN)✅ 已停止 Monitor MCP 进程: $$pids$(NC)"; \
+		else \
 			echo "$(YELLOW)⚠️  没有运行中的 Monitor MCP 进程$(NC)"; \
+		fi; \
 	fi
 
 # 检查 MCP 服务状态
@@ -274,29 +340,35 @@ status-mcp:
 	@echo "$(YELLOW)📊 MCP 服务状态:$(NC)"
 	@echo ""
 	@echo "$(CYAN)CLS MCP 服务:$(NC)"
-	@if pgrep -f "mcp_servers/cls_server.py" > /dev/null 2>&1; then \
-		pid=$$(pgrep -f "mcp_servers/cls_server.py"); \
+	@pid="$$($(call live_pid_from_file,mcp_cls.pid))"; \
+	if $(call port_up,127.0.0.1,$(MCP_CLS_PORT)); then \
 		echo "  状态: $(GREEN)运行中$(NC)"; \
-		echo "  PID: $$pid"; \
-		echo "  URL: http://127.0.0.1:8003/mcp"; \
-		curl -s http://127.0.0.1:8003/mcp > /dev/null 2>&1 && \
-			echo "  连接: $(GREEN)✅ 正常$(NC)" || \
-			echo "  连接: $(RED)❌ 无法连接$(NC)"; \
+		if [ -n "$$pid" ]; then echo "  PID: $$pid"; fi; \
+		echo "  URL: http://127.0.0.1:$(MCP_CLS_PORT)/mcp"; \
+		echo "  连接: $(GREEN)✅ 端口可达$(NC)"; \
 	else \
 		echo "  状态: $(RED)未运行$(NC)"; \
+		if [ -n "$$pid" ]; then \
+			echo "  警告: pid 文件仍指向 $$pid，但端口 $(MCP_CLS_PORT) 不可达"; \
+		elif [ -f mcp_cls.pid ]; then \
+			echo "  警告: 存在陈旧 mcp_cls.pid"; \
+		fi; \
 	fi
 	@echo ""
 	@echo "$(CYAN)Monitor MCP 服务:$(NC)"
-	@if pgrep -f "mcp_servers/monitor_server.py" > /dev/null 2>&1; then \
-		pid=$$(pgrep -f "mcp_servers/monitor_server.py"); \
+	@pid="$$($(call live_pid_from_file,mcp_monitor.pid))"; \
+	if $(call port_up,127.0.0.1,$(MCP_MONITOR_PORT)); then \
 		echo "  状态: $(GREEN)运行中$(NC)"; \
-		echo "  PID: $$pid"; \
-		echo "  URL: http://127.0.0.1:8004/mcp"; \
-		curl -s http://127.0.0.1:8004/mcp > /dev/null 2>&1 && \
-			echo "  连接: $(GREEN)✅ 正常$(NC)" || \
-			echo "  连接: $(RED)❌ 无法连接$(NC)"; \
+		if [ -n "$$pid" ]; then echo "  PID: $$pid"; fi; \
+		echo "  URL: http://127.0.0.1:$(MCP_MONITOR_PORT)/mcp"; \
+		echo "  连接: $(GREEN)✅ 端口可达$(NC)"; \
 	else \
 		echo "  状态: $(RED)未运行$(NC)"; \
+		if [ -n "$$pid" ]; then \
+			echo "  警告: pid 文件仍指向 $$pid，但端口 $(MCP_MONITOR_PORT) 不可达"; \
+		elif [ -f mcp_monitor.pid ]; then \
+			echo "  警告: 存在陈旧 mcp_monitor.pid"; \
+		fi; \
 	fi
 	@echo ""
 	@echo "$(CYAN)Math MCP 服务:$(NC)"
@@ -306,11 +378,13 @@ status-mcp:
 # FastAPI 服务管理
 # ============================================================
 
-# 启动所有服务（MCP + FastAPI）
+# 启动所有服务（Redis + MCP + FastAPI）
 start:
 	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
 	@echo "$(GREEN)🚀 启动所有服务$(NC)"
 	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
+	@echo ""
+	@$(MAKE) start-redis || echo "$(YELLOW)⚠️  Redis 未启动（若 REDIS_ENABLED=true，readiness 可能 degraded）$(NC)"
 	@echo ""
 	@$(MAKE) start-cls
 	@sleep 1
@@ -331,12 +405,23 @@ start-api:
 		echo "$(GREEN)✅ FastAPI 服务已经在运行中 ($(SERVER_URL))$(NC)"; \
 	else \
 		echo "$(YELLOW)📦 正在启动 FastAPI 服务（后台运行）...$(NC)"; \
-		nohup .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 9900 > server.log 2>&1 & \
+		nohup $(PYTHON) -m uvicorn app.main:app --host 127.0.0.1 --port 9900 > server.log 2>&1 & \
 		echo $$! > server.pid; \
-		echo "$(GREEN)✅ FastAPI 服务启动命令已执行$(NC)"; \
 		echo "$(YELLOW)   PID: $$(cat server.pid)$(NC)"; \
 		echo "$(YELLOW)   URL: $(SERVER_URL)$(NC)"; \
 		echo "$(YELLOW)   日志: server.log$(NC)"; \
+		ready=0; \
+		for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+			if curl -s -f $(HEALTH_CHECK_API) > /dev/null 2>&1; then ready=1; break; fi; \
+			sleep 0.5; \
+		done; \
+		if [ $$ready -eq 1 ]; then \
+			echo "$(GREEN)✅ FastAPI 服务已就绪$(NC)"; \
+		else \
+			echo "$(YELLOW)⚠️  FastAPI 已拉起但 readiness 未通过，请检查 server.log 与依赖 (Redis/MCP/Milvus)$(NC)"; \
+			curl -s $(HEALTH_CHECK_API) || true; \
+			echo ""; \
+		fi; \
 	fi
 
 # 停止所有服务（FastAPI + MCP）
@@ -358,39 +443,43 @@ stop:
 # 停止 CLS MCP 服务
 stop-cls:
 	@echo "$(YELLOW)🛑 停止 CLS MCP 服务...$(NC)"
-	@if [ -f mcp_cls.pid ]; then \
-		pid=$$(cat mcp_cls.pid); \
-		if ps -p $$pid > /dev/null 2>&1; then \
-			kill $$pid; \
-			echo "$(GREEN)✅ CLS MCP 服务已停止 (PID: $$pid)$(NC)"; \
-		else \
-			echo "$(YELLOW)⚠️  进程不存在 (PID: $$pid)$(NC)"; \
-		fi; \
+	@pid="$$($(call live_pid_from_file,mcp_cls.pid))"; \
+	if [ -n "$$pid" ]; then \
+		kill $$pid 2>/dev/null || true; \
+		sleep 0.5; \
+		if kill -0 $$pid 2>/dev/null; then kill -9 $$pid 2>/dev/null || true; fi; \
+		echo "$(GREEN)✅ CLS MCP 服务已停止 (PID: $$pid)$(NC)"; \
 		rm -f mcp_cls.pid; \
 	else \
-		echo "$(YELLOW)⚠️  未找到 mcp_cls.pid 文件$(NC)"; \
-		pkill -f "mcp_servers/cls_server.py" 2>/dev/null && \
-			echo "$(GREEN)✅ 已停止所有 CLS MCP 进程$(NC)" || \
+		rm -f mcp_cls.pid; \
+		pids=$$(ps -eo pid=,args= | awk '/[p]ython[^ ]* .*mcp_servers\/cls_server\.py/ {print $$1}'); \
+		if [ -n "$$pids" ]; then \
+			echo "$$pids" | xargs -r kill 2>/dev/null || true; \
+			echo "$(GREEN)✅ 已停止 CLS MCP 进程: $$pids$(NC)"; \
+		else \
 			echo "$(YELLOW)⚠️  没有运行中的 CLS MCP 进程$(NC)"; \
+		fi; \
 	fi
 
 # 停止 FastAPI 服务
 stop-api:
 	@echo "$(YELLOW)🛑 停止 FastAPI 服务...$(NC)"
-	@if [ -f server.pid ]; then \
-		pid=$$(cat server.pid); \
-		if ps -p $$pid > /dev/null 2>&1; then \
-			kill $$pid; \
-			echo "$(GREEN)✅ FastAPI 服务已停止 (PID: $$pid)$(NC)"; \
-		else \
-			echo "$(YELLOW)⚠️  进程不存在 (PID: $$pid)$(NC)"; \
-		fi; \
+	@pid="$$($(call live_pid_from_file,server.pid))"; \
+	if [ -n "$$pid" ]; then \
+		kill $$pid 2>/dev/null || true; \
+		sleep 0.5; \
+		if kill -0 $$pid 2>/dev/null; then kill -9 $$pid 2>/dev/null || true; fi; \
+		echo "$(GREEN)✅ FastAPI 服务已停止 (PID: $$pid)$(NC)"; \
 		rm -f server.pid; \
 	else \
-		echo "$(YELLOW)⚠️  未找到 server.pid 文件$(NC)"; \
-		pkill -f "uvicorn app.main:app" 2>/dev/null && \
-			echo "$(GREEN)✅ 已停止所有 uvicorn 进程$(NC)" || \
+		rm -f server.pid; \
+		pids=$$(ps -eo pid=,args= | awk '/[u]vicorn app\.main:app/ {print $$1}'); \
+		if [ -n "$$pids" ]; then \
+			echo "$$pids" | xargs -r kill 2>/dev/null || true; \
+			echo "$(GREEN)✅ 已停止 uvicorn 进程: $$pids$(NC)"; \
+		else \
 			echo "$(YELLOW)⚠️  没有运行中的 uvicorn 进程$(NC)"; \
+		fi; \
 	fi
 
 # 重启所有服务
@@ -561,42 +650,44 @@ remove:  ## 移除依赖包 (用法: make remove PKG=package_name)
 
 format:  ## 格式化代码
 	@echo "$(YELLOW)🎨 格式化代码...$(NC)"
-	python3 -m ruff check --select I --fix app/ 2>/dev/null || true
-	python3 -m ruff format app/ 2>/dev/null || python3 -m black app/
+	$(PYTHON) -m ruff check --select I --fix app/ 2>/dev/null || true
+	$(PYTHON) -m ruff format app/ 2>/dev/null || $(PYTHON) -m black app/
 	@echo "$(GREEN)✅ 格式化完成$(NC)"
 
 format-check:  ## 只读格式检查
 	@echo "$(YELLOW)🎨 检查代码格式（不修改工作树）...$(NC)"
-	python3 -m ruff format --check app/ tests/ scripts/
+	$(PYTHON) -m ruff format --check app/ tests/ scripts/
 
 lint:  ## 代码检查
 	@echo "$(YELLOW)🔍 代码检查...$(NC)"
-	python3 -m ruff check app/ 2>/dev/null || python3 -m flake8 app/
+	$(PYTHON) -m ruff check app/ 2>/dev/null || $(PYTHON) -m flake8 app/
 	@echo "$(GREEN)✅ 检查完成$(NC)"
 
 fix:  ## 自动修复代码问题
 	@echo "$(YELLOW)🔧 自动修复代码问题...$(NC)"
-	python3 -m ruff check --fix app/ 2>/dev/null || true
-	python3 -m ruff format app/ 2>/dev/null || python3 -m black app/
+	$(PYTHON) -m ruff check --fix app/ 2>/dev/null || true
+	$(PYTHON) -m ruff format app/ 2>/dev/null || $(PYTHON) -m black app/
 	@echo "$(GREEN)✅ 修复完成$(NC)"
 
 type-check:  ## 类型检查
 	@echo "$(YELLOW)🔍 类型检查...$(NC)"
-	python3 -m mypy app/ --ignore-missing-imports
+	$(PYTHON) -m mypy app/ --ignore-missing-imports
 	@echo "$(GREEN)✅ 类型检查完成$(NC)"
 
 security:  ## 安全检查
 	@echo "$(YELLOW)🔒 安全检查...$(NC)"
-	python3 -m bandit -r app/ -ll
+	$(PYTHON) -m bandit -r app/ -ll
 	@echo "$(GREEN)✅ 安全检查完成$(NC)"
 
 test:  ## 运行测试
 	@echo "$(YELLOW)🧪 运行测试...$(NC)"
-	python3 -m pytest tests/ -v --cov=app --cov-report=term-missing --cov-report=html
+	LONG_TERM_MEMORY_DISTILL_ENABLED=false HARNESS_ANTI_PATTERN_CAPTURE_ENABLED=false \
+		$(PYTHON) -m pytest tests/ -v --cov=app --cov-report=term-missing --cov-report=html
 
 test-quick:  ## 快速测试
 	@echo "$(YELLOW)⚡ 快速测试...$(NC)"
-	python3 -m pytest tests/ -v
+	LONG_TERM_MEMORY_DISTILL_ENABLED=false HARNESS_ANTI_PATTERN_CAPTURE_ENABLED=false \
+		$(PYTHON) -m pytest tests/ -v
 
 frontend-test:  ## 前端测试
 	cd frontend && npm test -- --run
@@ -606,7 +697,8 @@ frontend-build:  ## 前端构建
 
 ci-smoke:  ## M1 最小门禁：W1–W4 核心 + verifier/checkpoint/context
 	@echo "$(YELLOW)🚦 ci-smoke...$(NC)"
-	python -m pytest \
+	LONG_TERM_MEMORY_DISTILL_ENABLED=false HARNESS_ANTI_PATTERN_CAPTURE_ENABLED=false \
+	$(PYTHON) -m pytest \
 		tests/test_m1_close_the_loop.py \
 		tests/test_m1_w2_context_checkpoint.py \
 		tests/test_m1_w3_replan_latency.py \
@@ -619,12 +711,13 @@ ci-smoke:  ## M1 最小门禁：W1–W4 核心 + verifier/checkpoint/context
 
 check-harness-size:  ## harness 单文件 ≤1000 行
 	@echo "$(YELLOW)📏 check-harness-size...$(NC)"
-	@python -c "from pathlib import Path; bad=[]; \
+	@$(PYTHON) -c "from pathlib import Path; bad=[]; \
 [bad.append((p, sum(1 for _ in p.open(encoding='utf-8', errors='ignore')))) \
  for p in Path('app/agent/harness').glob('*.py')]; \
-[print(f'{n:5d} {p}') for p,n in sorted(bad, key=lambda x: x[1])]; \
-over=[(p,n) for p,n in bad if n>1000]; \
-raise SystemExit(f'over limit: {over}') if over else print('OK all harness files <= 1000 lines')"
+	[print(f'{n:5d} {p}') for p,n in sorted(bad, key=lambda x: x[1])]; \
+	over=[(p,n) for p,n in bad if n>1000]; \
+	print(f'over limit: {over}' if over else 'OK all harness files <= 1000 lines'); \
+	__import__('sys').exit(1 if over else 0)"
 	@echo "$(GREEN)✅ check-harness-size passed$(NC)"
 
 check-all:  ## 运行所有检查

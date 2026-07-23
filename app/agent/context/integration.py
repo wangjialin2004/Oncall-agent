@@ -54,6 +54,7 @@ from app.agent.context.views import (
     render_recent_message_view,
 )
 from app.config import config
+from app.services.attachment_reference_service import strip_attachment_wrapper
 
 
 def stateful_context_enabled() -> bool:
@@ -148,6 +149,11 @@ async def build_stateful_context(
     so the rendered view always reflects what the user is asking right now.
     They are framework-only writes (plan §3.3).
     """
+    # Intent is a compact framework field.  API callers may pass the composed
+    # attachment message for compatibility, so normalize it at this boundary
+    # before writing the whiteboard.
+    current_question = strip_attachment_wrapper(current_question)
+    current_goal = strip_attachment_wrapper(current_goal)
     store = store or build_default_store()
     result = await store.get_or_rebuild(owner_key, session_id, rebuild=rebuild)
 

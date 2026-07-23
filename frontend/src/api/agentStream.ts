@@ -56,7 +56,6 @@ export function translateBackendEvent(
       const clarification = payload.clarification as Record<string, unknown> | null | undefined;
       const missing = payload.missing_params;
       const suggestedRaw = payload.suggested_actions;
-      const escalationRaw = payload.escalation as Record<string, unknown> | null | undefined;
       const suggested_actions = Array.isArray(suggestedRaw)
         ? suggestedRaw
             .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
@@ -68,26 +67,12 @@ export function translateBackendEvent(
             }))
             .filter((item) => item.id)
         : undefined;
-      const escalation =
-        escalationRaw && typeof escalationRaw === "object"
-          ? {
-              configured: Boolean(escalationRaw.configured),
-              text: String(escalationRaw.text ?? ""),
-              contacts: Array.isArray(escalationRaw.contacts)
-                ? (escalationRaw.contacts as unknown[])
-                    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
-                    .map((item) => ({
-                      name: String(item.name ?? ""),
-                      channel: String(item.channel ?? ""),
-                    }))
-                    .filter((item) => item.name)
-                : [],
-            }
-          : null;
+      const replacementMarker = payload.replace_streamed_answer === true;
       return {
         type: "complete",
         route,
         answer: String(payload.answer ?? ""),
+        ...(replacementMarker ? { replace_streamed_answer: true } : {}),
         case_id: String(payload.case_id ?? ""),
         events: (payload.events as TimelineEvent[]) ?? [],
         distill_draft: distill
@@ -109,7 +94,6 @@ export function translateBackendEvent(
             }
           : null,
         suggested_actions,
-        escalation,
       };
     }
     case "error":

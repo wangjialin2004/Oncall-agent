@@ -17,7 +17,7 @@ import json
 import pytest
 
 from app.agent.context.operations import framework_patch
-from app.agent.context.state import AgentContextState, SECTION_INTENT
+from app.agent.context.state import SECTION_INTENT, AgentContextState
 from app.agent.context.store import ContextStateStore, ContextStateStoreSettings
 from app.agent.harness.loop import HarnessService
 from app.agent.harness.state import HarnessState
@@ -34,6 +34,14 @@ from tests._fake_redis import FakeRedis
 @pytest.fixture
 def fake_redis() -> FakeRedis:
     return FakeRedis()
+
+
+@pytest.fixture(autouse=True)
+def _disable_unrelated_memory_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep context tests isolated from live experience distill/index hooks."""
+
+    monkeypatch.setattr(config, "long_term_memory_distill_enabled", False)
+    monkeypatch.setattr(config, "harness_anti_pattern_capture_enabled", False)
 
 
 @pytest.fixture
@@ -300,7 +308,9 @@ async def test_stateful_context_redis_hit_skips_legacy_context_builder(monkeypat
     system_prompt = llm.calls[0]["messages"][0].content  # type: ignore[index,union-attr]
     assert "base harness prompt" in system_prompt
     assert "当前会话状态白板" in system_prompt
-    assert "current_goal: redis hit?" in system_prompt
+    assert "current_goal: redis hit?" not in system_prompt
+    assert "redis hit?" not in system_prompt
+    assert "redis hit?" in llm.calls[0]["messages"][-1].content  # type: ignore[index,union-attr]
 
 
 @pytest.mark.asyncio
@@ -386,15 +396,18 @@ async def test_stateful_context_records_tool_evidence_and_checkpoint_ref(
         ttl_seconds=300,
         redis_factory=lambda: fake_redis,
     )
-    tool = RuntimeTool(
-        name="check_redis_health",
-        description="Check Redis.",
-        handler=lambda arguments: {
+    async def fake_check_redis(arguments):
+        return {
             "ok": True,
             "summary": "ping ok",
             "latency_ms": 7,
             "fact": "Redis PING 成功",
-        },
+        }
+
+    tool = RuntimeTool(
+        name="check_redis_health",
+        description="Check Redis.",
+        handler=fake_check_redis,
     )
     llm = _LLM(
         [

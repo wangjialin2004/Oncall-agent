@@ -58,6 +58,34 @@ describe("parseSseFrame", () => {
 });
 
 describe("translateBackendEvent", () => {
+  it("keeps the replacement marker only when a final answer supersedes streamed prose", () => {
+    const replacement = translateBackendEvent(
+      {
+        type: "complete",
+        route: "diagnosis",
+        answer: "verified",
+        replace_streamed_answer: true,
+        case_id: "",
+        events: [],
+      },
+      "auto",
+    );
+    const ordinary = translateBackendEvent(
+      {
+        type: "complete",
+        route: "diagnosis",
+        answer: "ordinary",
+        replace_streamed_answer: false,
+        case_id: "",
+        events: [],
+      },
+      "auto",
+    );
+
+    expect(replacement).toMatchObject({ type: "complete", replace_streamed_answer: true });
+    expect(ordinary).not.toHaveProperty("replace_streamed_answer");
+  });
+
   it("maps route_event to route_selected", () => {
     const payload = { type: "route_event", route: "metric", summary: "matched" };
     expect(
@@ -263,7 +291,6 @@ describe("streamAgent", () => {
       missing_params: undefined,
       clarification: null,
       suggested_actions: undefined,
-      escalation: null,
     });
   });
 
@@ -297,7 +324,6 @@ describe("streamAgent", () => {
       missing_params: undefined,
       clarification: null,
       suggested_actions: undefined,
-      escalation: null,
     });
   });
 
@@ -331,11 +357,10 @@ describe("streamAgent", () => {
       missing_params: undefined,
       clarification: null,
       suggested_actions: undefined,
-      escalation: null,
     });
   });
 
-  it("parses suggested_actions and escalation from complete payloads", async () => {
+  it("parses suggested_actions from complete payloads", async () => {
     localStorage.setItem("authToken", "token-a");
     const onEvent = vi.fn();
     vi.stubGlobal(
@@ -356,11 +381,6 @@ describe("streamAgent", () => {
                 requires_confirm: true,
               },
             ],
-            escalation: {
-              configured: true,
-              text: "升级联系人",
-              contacts: [{ name: "Alice", channel: "pager" }],
-            },
           }),
         ]),
       ),
@@ -379,11 +399,6 @@ describe("streamAgent", () => {
             requires_confirm: true,
           },
         ],
-        escalation: {
-          configured: true,
-          text: "升级联系人",
-          contacts: [{ name: "Alice", channel: "pager" }],
-        },
       }),
     );
   });

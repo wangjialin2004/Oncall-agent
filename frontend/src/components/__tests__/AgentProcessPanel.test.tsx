@@ -306,19 +306,12 @@ describe("AgentProcessPanel business steps", () => {
               requires_confirm: true,
             },
           ],
-          escalation: {
-            configured: true,
-            text: "升级联系人",
-            contacts: [{ name: "Alice", channel: "pager" }],
-          },
         })}
         onConfirmSuggestion={onConfirmSuggestion}
       />,
     );
 
     expect(screen.getByTestId("suggested-actions-card")).toBeInTheDocument();
-    expect(screen.getByTestId("escalation-card")).toBeInTheDocument();
-    expect(screen.getByText("Alice")).toBeInTheDocument();
     expect(screen.getByText(/不会自动执行重启/)).toBeInTheDocument();
 
     const buttons = screen.getAllByRole("button", { name: "确认建议" });

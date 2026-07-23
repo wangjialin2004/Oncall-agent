@@ -6,6 +6,7 @@ import pytest
 
 from app.config import config
 from app.services.database_migration_service import DatabaseMigrationService
+from tests._context_db import create_verified_backup
 
 
 def test_status_and_verify_are_read_only_for_empty_database(tmp_path) -> None:
@@ -23,18 +24,21 @@ def test_up_requires_backup_and_is_idempotent(tmp_path) -> None:
     db_path = tmp_path / "memory.db"
     backup_dir = tmp_path / "backups"
     backup_dir.mkdir()
-    (backup_dir / db_path.name).write_bytes(b"verified backup")
+    (backup_dir / db_path.name).touch()
     service = DatabaseMigrationService(db_path=db_path, backup_dir=backup_dir)
 
     first = service.up()
     assert first["schema_ok"] is True
     assert first["checksums_ok"] is True
-    assert first["current_version"] == 2
+    assert first["current_version"] == 3
     second = service.up()
-    assert second["current_version"] == 2
+    assert second["current_version"] == 3
     with sqlite3.connect(db_path) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 3
         assert connection.execute("SELECT 1 FROM sqlite_master WHERE name='uploaded_files'").fetchone()
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='idx_conversation_turns_commit_id'"
+        ).fetchone()
 
     with sqlite3.connect(db_path) as connection:
         connection.execute("UPDATE schema_migrations SET checksum='tampered'")
@@ -45,7 +49,7 @@ def test_up_failure_rolls_back_without_version_record(tmp_path, monkeypatch: pyt
     db_path = tmp_path / "memory.db"
     backup_dir = tmp_path / "backups"
     backup_dir.mkdir()
-    (backup_dir / db_path.name).write_bytes(b"verified backup")
+    (backup_dir / db_path.name).touch()
     service = DatabaseMigrationService(db_path=db_path, backup_dir=backup_dir)
     monkeypatch.setattr(service, "_table_sql", None, raising=False)
 
@@ -65,8 +69,6 @@ def test_up_failure_rolls_back_without_version_record(tmp_path, monkeypatch: pyt
 def test_up_migrates_known_legacy_columns(tmp_path) -> None:
     db_path = tmp_path / "memory.db"
     backup_dir = tmp_path / "backups"
-    backup_dir.mkdir()
-    (backup_dir / db_path.name).write_bytes(b"verified backup")
     with sqlite3.connect(db_path) as connection:
         connection.execute(
             "CREATE TABLE conversations (owner_key TEXT, session_id TEXT, title TEXT, created_at TEXT, updated_at TEXT)"
@@ -74,6 +76,7 @@ def test_up_migrates_known_legacy_columns(tmp_path) -> None:
         connection.execute(
             "CREATE TABLE conversation_turns (id INTEGER, owner_key TEXT, session_id TEXT, turn_index INTEGER, user_message TEXT, assistant_answer TEXT, route TEXT, case_id TEXT, events_json TEXT, created_at TEXT)"
         )
+    create_verified_backup(db_path, backup_dir)
 
     service = DatabaseMigrationService(db_path=db_path, backup_dir=backup_dir)
     result = service.up()
@@ -85,8 +88,15 @@ def test_up_migrates_known_legacy_columns(tmp_path) -> None:
         turn_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(conversation_turns)")
         }
-    assert {"memory_summary", "context_state_json"} <= conversation_columns
-    assert {"user_context", "attachment_refs_json"} <= turn_columns
+    assert {
+        "memory_summary",
+        "context_state_json",
+        "context_projection_version",
+        "context_last_applied_turn_id",
+        "context_last_applied_turn_index",
+        "context_projection_status",
+    } <= conversation_columns
+    assert {"user_context", "attachment_refs_json", "commit_id"} <= turn_columns
 
 
 def test_service_enforcement_verifies_version_without_altering(
@@ -117,7 +127,7 @@ def test_service_enforcement_accepts_explicitly_migrated_database(
     db_path = tmp_path / "memory.db"
     backup_dir = tmp_path / "backups"
     backup_dir.mkdir()
-    (backup_dir / db_path.name).write_bytes(b"verified backup")
+    (backup_dir / db_path.name).touch()
     DatabaseMigrationService(db_path=db_path, backup_dir=backup_dir).up()
     monkeypatch.setattr(config, "db_schema_enforcement_enabled", True)
 

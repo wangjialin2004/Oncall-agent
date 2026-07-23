@@ -1406,36 +1406,6 @@ function SuggestedActionsCard({
   );
 }
 
-function EscalationCard({ run }: { run: AgentRun }) {
-  const escalation = run.escalation;
-  if (!escalation) {
-    return null;
-  }
-  const contacts = escalation.contacts ?? [];
-  return (
-    <div
-      className={`panel-card hitl-card escalation-card${
-        escalation.configured ? "" : " is-unconfigured"
-      }`}
-      data-testid="escalation-card"
-    >
-      <span className="label">升级联系</span>
-      {escalation.configured && contacts.length > 0 ? (
-        <ul className="hitl-contact-list">
-          {contacts.map((contact) => (
-            <li key={`${contact.name}-${contact.channel}`}>
-              <strong>{contact.name}</strong>
-              {contact.channel ? <span> · {contact.channel}</span> : null}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p>{escalation.text || "未配置值班联系人，请走现有 OnCall 升级流程。"}</p>
-      )}
-    </div>
-  );
-}
-
 function CheckpointBanner({ run }: { run: AgentRun }) {
   const resume = run.checkpointResume;
   const close = run.checkpointConservativeClose;
@@ -1570,7 +1540,6 @@ export function AgentProcessPanel({
       {run.status === "completed" && run.answer ? (
         <>
           <SuggestedActionsCard run={run} onConfirmSuggestion={onConfirmSuggestion} />
-          <EscalationCard run={run} />
           <FeedbackCard run={run} onFeedback={onFeedback} onDistill={onDistill} />
         </>
       ) : null}

@@ -53,6 +53,7 @@ from app.services.conversation_service import ConversationService
 from app.services.harness_checkpoint import HarnessCheckpointStore
 
 from app.services.router_service import RouteDecision, RouterService
+from app.services.session_scope_service import AuthenticatedPrincipal
 
 from tests._fake_redis import FakeRedis
 
@@ -204,14 +205,6 @@ def _disable_extra_harness_loops(monkeypatch) -> None:
     ):
         monkeypatch.setattr(f"app.agent.harness.loop.config.{attr}", value, raising=False)
         monkeypatch.setattr(f"app.config.config.{attr}", value, raising=False)
-    # Escalation footer always has text when contacts empty; classic tests assert exact answers.
-    monkeypatch.setattr(
-        "app.agent.harness.close_path.HarnessClosePathMixin._build_escalation_block",
-        lambda self: {"configured": False, "text": "", "contacts": []},
-    )
-
-
-
 class FakeExpert:
 
     async def run(self, *, message: str, session_id: str, trace_id: str, context: str = ""):
@@ -797,6 +790,16 @@ async def _drain_event_source_response(response) -> None:
         pass
 
 
+def _test_principal(owner_key: str = "owner-1") -> AuthenticatedPrincipal:
+    return AuthenticatedPrincipal(
+        username="test-user",
+        owner_key=owner_key,
+        storage_owner_key=owner_key,
+        project_id="default",
+        role="operator",
+    )
+
+
 
 
 
@@ -816,7 +819,7 @@ async def test_assistant_stream_uses_raw_session_id_for_harness(monkeypatch):
 
         ChatRequest(id="visible-session", question="check cpu"),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -848,7 +851,7 @@ async def test_assistant_stream_always_uses_harness_when_flag_is_false(monkeypat
 
         ChatRequest(id="visible-session", question="check memory"),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -896,7 +899,7 @@ async def test_assistant_stream_injects_attachment_context_into_message(monkeypa
 
         ),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -994,7 +997,7 @@ async def test_assistant_history_keeps_attachment_context_for_follow_up(tmp_path
 
         ),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -1004,7 +1007,7 @@ async def test_assistant_history_keeps_attachment_context_for_follow_up(tmp_path
 
         ChatRequest(id="visible-session", question="continue with the key points"),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -1248,7 +1251,7 @@ async def test_assistant_harness_two_turn_flow_persists_and_reloads_history(
 
         ChatRequest(id="visible-session", question=first_question),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -1258,7 +1261,7 @@ async def test_assistant_harness_two_turn_flow_persists_and_reloads_history(
 
         ChatRequest(id="visible-session", question=second_question),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -1723,285 +1726,139 @@ async def test_harness_checkpoint_resume_replays_from_next_step_without_skipping
 
 
 @pytest.mark.asyncio
+async def test_harness_checkpoint_resume_continues_despite_non_whitelisted_history():
+    """Default resume continues from next_step even if history had non-whitelist tools.
 
-async def test_harness_checkpoint_resume_non_idempotent_closes_without_tool_replay():
-
-    fake_redis = FakeRedis()
-
-    store = HarnessCheckpointStore(
-
-        namespace="test",
-
-        ttl_seconds=300,
-
-        idempotent_tools=("delegate_to_expert",),
-
-        redis_factory=lambda: fake_redis,
-
-    )
-
-    await store.save_step(
-
-        owner_key="user-1",
-
-        session_id="trace-resume-close",
-
-        state=_checkpoint_state(session_id="trace-resume-close", owner_key="user-1", step=2),
-
-        messages=_checkpoint_messages("query_prometheus_alerts"),
-
-        step_index=2,
-
-        step_payload={
-
-            "step": 2,
-
-            "tool_calls": [
-
-                {"id": "checkpoint-call", "function": {"name": "query_prometheus_alerts"}}
-
-            ],
-
-            "events": [],
-
-            "completed": True,
-
-        },
-
-    )
-
-    dangerous_tool = RuntimeTool(
-
-        name="query_prometheus_alerts",
-
-        description="Should not be replayed in conservative checkpoint resume.",
-
-        handler=lambda arguments: (_ for _ in ()).throw(AssertionError("tool replayed")),
-
-    )
-
-    fake_llm = FakeLLM(
-
-        [LLMResponse(content="checkpoint close answer", raw={}, usage={"total_tokens": 5})]
-
-    )
-
-    service = HarnessService(
-
-        router=FakeRouter(route="metric"),
-
-        llm_client=fake_llm,
-
-        tools=[dangerous_tool],
-
-        limits=HarnessLimits(max_steps=4, token_budget=1000, timeout_seconds=5),
-
-        checkpoint_store=store,
-
-    )
-
-
-
-    events = [
-
-        event
-
-        async for event in service.stream(
-
-            "resume conservatively",
-
-            session_id="trace-resume-close",
-
-            owner_key="user-1",
-
-        )
-
-    ]
-
-
-
-    stages = [event.get("stage") for event in events]
-
-    content = "".join(str(event["data"]) for event in events if event.get("type") == "content")
-
-    assert "checkpoint_resume" in stages
-
-    assert "checkpoint_conservative_close" in stages
-
-    assert "model_decision" not in stages
-
-    assert len(fake_llm.calls) == 1
-
-    assert "tools" not in fake_llm.calls[0]["kwargs"]
-
-    assert fake_llm.calls[0]["messages"][0].content == "system prompt from checkpoint"
-
-    assert content == "checkpoint close answer"
-
-
-
-
-
-@pytest.mark.asyncio
-
-async def test_harness_checkpoint_resume_replay_override_replays_non_idempotent_tool():
-
-    """When the caller passes ``checkpoint_replay=True``, the conservative
-
-    short-circuit is bypassed: a non-whitelisted step still gets replayed.
-
-
-
-    The dangerous tool's handler is wired to raise if invoked, so reaching it
-
-    is itself the success signal. We also assert the conservative_close event
-
-    never fires (because we asked for verbatim replay).
-
+    Historical tool calls are not re-executed; the model may choose new tools.
     """
-
     fake_redis = FakeRedis()
-
     store = HarnessCheckpointStore(
-
         namespace="test",
-
         ttl_seconds=300,
-
         idempotent_tools=("delegate_to_expert",),
-
         redis_factory=lambda: fake_redis,
-
     )
-
     await store.save_step(
-
         owner_key="user-1",
-
-        session_id="trace-resume-replay",
-
-        state=_checkpoint_state(session_id="trace-resume-replay", owner_key="user-1", step=2),
-
+        session_id="trace-resume-continue",
+        state=_checkpoint_state(session_id="trace-resume-continue", owner_key="user-1", step=2),
         messages=_checkpoint_messages("query_prometheus_alerts"),
-
         step_index=2,
-
         step_payload={
-
             "step": 2,
-
             "tool_calls": [
-
                 {"id": "checkpoint-call", "function": {"name": "query_prometheus_alerts"}}
-
             ],
-
             "events": [],
-
             "completed": True,
-
         },
-
     )
-
-    replayed_tool = RuntimeTool(
-
+    safe_tool = RuntimeTool(
         name="query_prometheus_alerts",
-
-        description="Caller explicitly opted into replay; must run.",
-
-        handler=lambda arguments: "replayed evidence",
-
+        description="May be chosen by the model after resume; not a historical replay.",
+        handler=lambda arguments: "fresh evidence",
     )
-
     fake_llm = FakeLLM(
-
         [
-
             LLMResponse(
-
                 content="",
-
                 raw={},
-
                 tool_calls=[
-
                     {
-
-                        "id": "replayed-call",
-
+                        "id": "new-call",
                         "type": "function",
-
                         "function": {"name": "query_prometheus_alerts", "arguments": "{}"},
-
                     }
-
                 ],
-
                 usage={"total_tokens": 3},
-
             ),
-
-            LLMResponse(content="replay completed", raw={}, usage={"total_tokens": 5}),
-
+            LLMResponse(content="continued after resume", raw={}, usage={"total_tokens": 5}),
         ]
-
     )
-
     service = HarnessService(
-
         router=FakeRouter(route="metric"),
-
         llm_client=fake_llm,
-
-        tools=[replayed_tool],
-
+        tools=[safe_tool],
         limits=HarnessLimits(max_steps=4, token_budget=1000, timeout_seconds=5),
-
         checkpoint_store=store,
-
     )
-
-
-
     events = [
-
         event
-
         async for event in service.stream(
-
-            "resume aggressively",
-
-            session_id="trace-resume-replay",
-
+            "resume and continue",
+            session_id="trace-resume-continue",
             owner_key="user-1",
-
-            checkpoint_replay=True,
-
         )
-
     ]
-
-
-
     stages = [event.get("stage") for event in events]
-
     resume_events = [event for event in events if event.get("stage") == "checkpoint_resume"]
-
     assert "checkpoint_resume" in stages
-
     assert "checkpoint_conservative_close" not in stages
-
     assert resume_events
-
-    assert resume_events[0]["payload"]["replay_override"] is True
-
+    assert resume_events[0]["payload"].get("continue_from_next_step") is True
+    assert resume_events[0]["payload"].get("conservative") is False
     assert "model_decision" in stages
-
     assert len(fake_llm.calls) >= 1
 
 
-
+@pytest.mark.asyncio
+async def test_harness_checkpoint_resume_close_only_when_override_false():
+    """Explicit checkpoint_replay=False still forces close-only finalization."""
+    fake_redis = FakeRedis()
+    store = HarnessCheckpointStore(
+        namespace="test",
+        ttl_seconds=300,
+        idempotent_tools=("delegate_to_expert",),
+        redis_factory=lambda: fake_redis,
+    )
+    await store.save_step(
+        owner_key="user-1",
+        session_id="trace-resume-close",
+        state=_checkpoint_state(session_id="trace-resume-close", owner_key="user-1", step=2),
+        messages=_checkpoint_messages("query_prometheus_alerts"),
+        step_index=2,
+        step_payload={
+            "step": 2,
+            "tool_calls": [
+                {"id": "checkpoint-call", "function": {"name": "query_prometheus_alerts"}}
+            ],
+            "events": [],
+            "completed": True,
+        },
+    )
+    dangerous_tool = RuntimeTool(
+        name="query_prometheus_alerts",
+        description="Must not run in close-only resume.",
+        handler=lambda arguments: (_ for _ in ()).throw(AssertionError("tool replayed")),
+    )
+    fake_llm = FakeLLM(
+        [LLMResponse(content="checkpoint close answer", raw={}, usage={"total_tokens": 5})]
+    )
+    service = HarnessService(
+        router=FakeRouter(route="metric"),
+        llm_client=fake_llm,
+        tools=[dangerous_tool],
+        limits=HarnessLimits(max_steps=4, token_budget=1000, timeout_seconds=5),
+        checkpoint_store=store,
+    )
+    events = [
+        event
+        async for event in service.stream(
+            "resume close-only",
+            session_id="trace-resume-close",
+            owner_key="user-1",
+            checkpoint_replay=False,
+        )
+    ]
+    stages = [event.get("stage") for event in events]
+    content = "".join(str(event["data"]) for event in events if event.get("type") == "content")
+    assert "checkpoint_resume" in stages
+    assert "checkpoint_conservative_close" in stages
+    assert "model_decision" not in stages
+    assert len(fake_llm.calls) == 1
+    assert "tools" not in fake_llm.calls[0]["kwargs"]
+    assert fake_llm.calls[0]["messages"][0].content == "system prompt from checkpoint"
+    assert content == "checkpoint close answer"
 
 
 @pytest.mark.asyncio
@@ -2274,9 +2131,11 @@ async def test_harness_delays_missing_param_clarification_until_after_tool_attem
 
 @pytest.mark.asyncio
 
-async def test_harness_stream_does_not_seed_delegate_before_model_decision():
+async def test_harness_stream_does_not_seed_delegate_before_model_decision(monkeypatch):
 
     """The routed expert is exposed as a tool, but harness no longer calls it first."""
+
+    _disable_extra_harness_loops(monkeypatch)
 
     delegate_tool = create_delegate_tool(
 
@@ -4912,7 +4771,7 @@ async def test_assistant_keyword_resolves_historical_attachment_without_new_uplo
 
         ),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -5292,7 +5151,7 @@ async def test_assistant_history_resolves_attachment_by_keyword_and_reloads_full
 
         ),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 

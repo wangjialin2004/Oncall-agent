@@ -7,9 +7,9 @@ Each completed step writes three keys to Redis:
 * ``{ns}:ckpt:{owner}:{session}:messages`` - serialized ``list[ChatMessage]`` for LLM resume
 
 Resume happens transparently on the next ``POST /api/assistant`` with the same
-``session_id``. When ``harness_checkpoint_replay=False`` (the default), any
-step containing a non-idempotent tool short-circuits the loop into a single
-closing LLM call instead of replaying external side effects.
+``session_id``. The harness restores state/context and continues from the next
+incomplete step; historical tool calls are **not** re-executed. A request-level
+``checkpoint_replay=False`` can still force a close-only finalization.
 
 This module is the only public surface the harness loop should import from.
 All Redis IO is wrapped in a fail-soft envelope so Redis outages never break
@@ -31,14 +31,17 @@ from app.config import config
 from app.core.llm_client import ChatMessage
 from app.services.redis_client import (
     is_redis_available,
+    redis_health_snapshot,
     reset_redis_client,
 )
 from app.utils.serialization import json_dumps, json_loads
 from app.utils.time import utc_now
 
 _DEFAULT_TOOLS: tuple[str, ...] = (
-    # Delegation + read-only investigation tools (safe to replay).
+    # Read-only / idempotent investigation tools (metadata + is_step_idempotent).
+    # Resume no longer gates on this list; it continues from next_step by default.
     "delegate_to_expert",
+    "delegate_parallel",
     "query_prometheus_alerts",
     "retrieve_knowledge",
     "recall_experience",
@@ -156,10 +159,13 @@ class HarnessCheckpointStore:
     # ------------------------------------------------------- public surface
 
     def is_enabled(self) -> bool:
+        if self._redis_factory is not None:
+            return True
         return (
             bool(getattr(config, "redis_enabled", False))
             and bool(getattr(config, "harness_checkpoint_enabled", False))
             and is_redis_available()
+            and redis_health_snapshot().get("status") == "ready"
         )
 
     async def save_step(

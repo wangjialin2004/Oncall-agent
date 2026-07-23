@@ -11,7 +11,7 @@ by design — callers should use the controlled patch API.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 # Single source of truth for the schema version. Bump only when the on-disk /
@@ -20,7 +20,7 @@ SCHEMA_VERSION = 1
 
 
 def _utcnow_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat()
+    return datetime.now(tz=UTC).isoformat()
 
 
 @dataclass(slots=True)
@@ -189,6 +189,11 @@ class AgentContextState:
     tool: ToolBlock = field(default_factory=ToolBlock)
     output: OutputBlock = field(default_factory=OutputBlock)
     patch_tail: list[dict[str, Any]] = field(default_factory=list)
+    # Runtime-only unified repository metadata. Persistence serializers omit
+    # these fields; they only bind inflight recovery to the loaded projection.
+    _runtime_base_projection_version: int = field(default=0, repr=False)
+    _runtime_run_id: str = field(default="", repr=False)
+    _runtime_rehydrated_run_id: str = field(default="", repr=False)
 
     # ---- access by section name (used by operations / persistence) ----
 

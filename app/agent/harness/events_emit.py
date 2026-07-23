@@ -215,6 +215,42 @@ class HarnessEventsMixin:
         if stateful_ctx is not None:
             source = str(getattr(stateful_ctx, "source", "") or "")
             warnings = list(getattr(stateful_ctx, "warnings", None) or [])
+        from app.services.context_repository import unified_context_repository_enabled
+
+        if unified_context_repository_enabled():
+            if source == "redis_inflight":
+                event = make_agent_event(
+                    agent="harness",
+                    stage="context_rehydrate",
+                    status="completed",
+                    summary="Context rehydrated from unified inflight recovery.",
+                    payload={
+                        "source": source,
+                        "context_snapshot_ref": resume_context_ref,
+                        "warnings": warnings,
+                    },
+                    trace_id=session_id,
+                    span_id=f"harness:{session_id}:context_rehydrate",
+                )
+                state.timeline_events.append(event)
+                yield event
+                return
+            fail_event = make_agent_event(
+                agent="harness",
+                stage="context_rehydrate_failed",
+                status="degraded",
+                summary="Unified inflight context was unavailable; using committed context.",
+                payload={
+                    "context_snapshot_ref": resume_context_ref,
+                    "source": source or "fresh",
+                    "warnings": warnings,
+                },
+                trace_id=session_id,
+                span_id=f"harness:{session_id}:context_rehydrate_failed",
+            )
+            state.timeline_events.append(fail_event)
+            yield fail_event
+            return
         # Store ladder already tried redis → db_snapshot → rebuild. Surface that.
         if source in {"redis", "db_snapshot", "rebuilt"}:
             event = make_agent_event(

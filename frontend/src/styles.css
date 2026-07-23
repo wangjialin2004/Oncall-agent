@@ -2628,12 +2628,6 @@ a {
   white-space: nowrap;
 }
 
-.escalation-card.is-unconfigured {
-  border-color: color-mix(in srgb, var(--running) 30%, var(--line));
-  background: var(--running-soft);
-  box-shadow: inset 2px 0 0 0 var(--running);
-}
-
 .feedback-correct {
   display: grid;
   gap: 10px;

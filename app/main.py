@@ -90,6 +90,36 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("MCP disabled; skip client prewarm")
 
+    # Local BGE-M3 first-load is multi-second and has crashed under WSL+CUDA.
+    # Warm the model off the request path so the first RAG call does not
+    # block the harness SSE stream (or silently die mid-tool).
+    try:
+        provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
+        if provider in {"", "local_bge_m3", "bge", "bge3", "bge_m3", "local", "local_bge", "flagembedding"}:
+            import asyncio
+
+            from app.services.vector_embedding_service import get_vector_embedding_service
+
+            def _warm_embedding() -> int:
+                service = get_vector_embedding_service()
+                # Prefer an explicit load hook if present; otherwise a tiny encode.
+                load = getattr(service, "_load_model", None)
+                if callable(load):
+                    load()
+                    return int(getattr(service, "dimensions", 0) or 0)
+                vector = service.embed_query("embedding warmup")
+                return len(vector)
+
+            dims = await asyncio.to_thread(_warm_embedding)
+            logger.info(
+                "✅ 本地 embedding 预热完成 (provider={}, device={}, dims={})",
+                provider or "local_bge_m3",
+                getattr(config, "embedding_device", "") or "auto",
+                dims,
+            )
+    except Exception as e:
+        logger.warning("本地 embedding 预热失败（按需懒加载）：{}", e)
+
     logger.info("=" * 60)
 
     yield

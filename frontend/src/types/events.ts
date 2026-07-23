@@ -68,23 +68,18 @@ export type SuggestedAction = {
   requires_confirm: boolean;
 };
 
-export type EscalationInfo = {
-  configured: boolean;
-  text: string;
-  contacts: Array<{ name: string; channel: string }>;
-};
-
 export type CompleteEvent = {
   type: "complete";
   route: AgentRoute;
   answer: string;
+  /** True when the server verified/replaced already streamed draft prose. */
+  replace_streamed_answer?: boolean;
   case_id: string;
   events: TimelineEvent[];
   distill_draft?: DistillDraftInfo | null;
   missing_params?: string[];
   clarification?: ClarificationInfo | null;
   suggested_actions?: SuggestedAction[];
-  escalation?: EscalationInfo | null;
 };
 
 export type ErrorEvent = {
@@ -163,8 +158,6 @@ export type AgentRun = {
   clarification?: ClarificationInfo | null;
   /** Read-only follow-up suggestions from harness complete (W9). */
   suggestedActions?: SuggestedAction[];
-  /** Escalation contacts / unconfigured notice from harness complete (W9). */
-  escalation?: EscalationInfo | null;
   /** Action ids the operator has confirmed this session (audit-only). */
   confirmedActionIds?: string[];
   /** Set when this run picked up a saved checkpoint from Redis. */

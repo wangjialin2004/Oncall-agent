@@ -37,6 +37,9 @@ _GENERIC_FILE_TERMS = {
     "表格",
     "csv",
     "json",
+    "attachment",
+    "file",
+    "document",
 }
 _STOPWORDS = {
     "这个",
@@ -61,6 +64,54 @@ _STOPWORDS = {
 }
 _OVERVIEW_HINTS = ("讲了什么", "主要内容", "主要讲", "概要", "概述", "摘要", "重点", "总结")
 _DETAIL_HINTS = ("详细", "具体", "原文", "全文", "第", "章节", "页", "提到", "怎么说", "步骤", "摘录")
+_OVERVIEW_HINTS_EN = ("summary", "summarize", "overview", "main points", "key points")
+_DETAIL_HINTS_EN = (
+    "detail",
+    "detailed",
+    "full text",
+    "original",
+    "verbatim",
+    "section",
+    "page",
+    "quote",
+    "step",
+)
+_ATTACHMENT_QUESTION_MARKER_RE = re.compile(
+    r"(?:^|\n)(?:用户问题|user question)\s*[:：]\s*\n",
+    re.IGNORECASE,
+)
+
+
+def strip_attachment_wrapper(message: str) -> str:
+    """Return the user question from an API-composed attachment message.
+
+    The assistant API deliberately keeps the attachment material in the
+    runtime user message.  Stateful intent and history stamps must carry only
+    the user-visible question, so this parser accepts the current wrapper and
+    leaves ordinary messages untouched when the marker is absent or ambiguous.
+    """
+    text = (message or "").strip()
+    if not text:
+        return ""
+    matches = list(_ATTACHMENT_QUESTION_MARKER_RE.finditer(text))
+    if not matches:
+        return text
+    match = matches[-1]
+    prefix = text[: match.start()]
+    # Avoid stripping a user's literal quotation unless it has the known
+    # attachment wrapper preamble or an attachment block.
+    lowered = prefix.lower()
+    if "附件材料" not in prefix and "附件" not in prefix and "attachment" not in lowered:
+        return text
+    question = text[match.end() :].strip()
+    return question or text
+
+
+def normalize_attachment_prompt_mode(mode: str | None = None) -> str:
+    """Return a supported attachment prompt mode, defaulting conservatively."""
+    value = str(mode if mode is not None else getattr(config, "harness_attachment_prompt_mode", "summary"))
+    value = value.strip().lower()
+    return value if value in {"full", "summary", "index"} else "summary"
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,9 +336,14 @@ class AttachmentReferenceService:
         resolved: ResolvedAttachmentReference,
     ) -> bool:
         normalized_question = (question or "").strip()
-        if any(hint in normalized_question for hint in _DETAIL_HINTS):
+        folded_question = normalized_question.casefold()
+        if any(hint in normalized_question for hint in _DETAIL_HINTS) or any(
+            hint in folded_question for hint in _DETAIL_HINTS_EN
+        ):
             return True
-        if any(hint in normalized_question for hint in _OVERVIEW_HINTS):
+        if any(hint in normalized_question for hint in _OVERVIEW_HINTS) or any(
+            hint in folded_question for hint in _OVERVIEW_HINTS_EN
+        ):
             return False
         return bool(resolved.matched_keywords)
 
@@ -357,7 +413,14 @@ class AttachmentReferenceService:
     @staticmethod
     def _mentions_file(question: str) -> bool:
         normalized = (question or "").lower()
-        return any(term.lower() in normalized for term in _GENERIC_FILE_TERMS)
+        for term in _GENERIC_FILE_TERMS:
+            lowered = term.lower()
+            if lowered.isascii() and lowered.isalpha():
+                if re.search(rf"\b{re.escape(lowered)}\b", normalized):
+                    return True
+            elif lowered in normalized:
+                return True
+        return False
 
     def _build_summary(self, content: str) -> str:
         lines = [" ".join(line.split()) for line in (content or "").splitlines()]

@@ -351,7 +351,13 @@ export default function App() {
           item.id === assistantId
             ? {
                 ...item,
-                content: item.content || event.answer || "",
+                // Only replace provisional streamed prose when the server
+                // explicitly marks its final answer as authoritative. Older
+                // servers and the rollback flag retain legacy append output.
+                content:
+                  event.replace_streamed_answer && event.answer
+                    ? event.answer
+                    : item.content || event.answer || "",
                 status: "completed",
               }
             : item,
@@ -427,7 +433,6 @@ export default function App() {
           missingParams: event.missing_params ?? event.clarification?.missing_params ?? prev.missingParams,
           clarification: event.clarification ?? prev.clarification ?? null,
           suggestedActions: event.suggested_actions ?? prev.suggestedActions ?? [],
-          escalation: event.escalation ?? prev.escalation ?? null,
         };
       } else if (event.type === "error") {
         next = {

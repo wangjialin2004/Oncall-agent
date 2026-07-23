@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     llm_retry_base_delay: float = 0.5
 
     # Router + 专家 Agent 配置
-    # 语义路由低于该置信度时回退到综合诊断（最稳，可跨域排查）
+    # 语义路由低于该置信度时，旧行为回退 diagnosis；新行为见 low_confidence_keep 开关
     router_min_confidence: float = 0.55
     # 将关键词分为强/弱两层；弱词只作为语义路由提示，避免单个泛化词误导路由
     router_keyword_tiering_enabled: bool = True
@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     # 语义误把“具体目标 + 事故信号”归为 knowledge 时，提升为 diagnosis；
     # 关闭后保留原始语义路由，便于一键回滚。
     router_concrete_incident_override_enabled: bool = True
+    # 「继续/然后呢」等短句续聊继承上一轮 conversation route；关则每轮独立路由
+    router_continuation_inherit_enabled: bool = True
+    # 低置信时尽量保留语义 route（knowledge 非故障等），不全量 diagnosis；关则恢复旧回退
+    router_low_confidence_keep_semantic_enabled: bool = True
+    # knowledge 轻问题（问候/身份/纯解释）跳过 re_evidence/replan 与硬证据要求
+    harness_knowledge_light_path_enabled: bool = True
     # 单个专家执行超时（秒），超时返回降级答案
     expert_timeout_seconds: float = 120.0
 
@@ -138,6 +144,9 @@ class Settings(BaseSettings):
     # 低置信 / 有缺口时，在定稿前最多再跑 N 轮「补取证」tool loop（M1 Close the Loop）
     harness_re_evidence_enabled: bool = True
     harness_re_evidence_max_rounds: int = 1
+    # Once user-visible content has streamed, keep re-evidence/replan replacement
+    # prose in complete.answer instead of appending a second answer body.
+    harness_final_answer_replacement_enabled: bool = True
     # 计划 required_evidence 与成功工具名做类型细匹配（M1 W2）
     harness_evidence_match_enabled: bool = True
     # mid-loop / post re-evidence 规则 replan（M1 W3）
@@ -192,7 +201,6 @@ class Settings(BaseSettings):
     # M3 W9：最终答案结构化 suggested_actions[]（只读建议，确认不执行）。
     hitl_suggested_actions_enabled: bool = True
     # M3 W9：升级联系人，空则输出标准「未配置」块。格式 name|channel;name2|channel2
-    oncall_escalation_contacts: str = ""
     # M3 W10：成功 run 半自动蒸馏（默认 draft+confirm，禁止静默全量入库）。
     long_term_memory_distill_enabled: bool = True
     long_term_memory_auto_distill: bool = False
@@ -217,6 +225,18 @@ class Settings(BaseSettings):
     harness_context_db_snapshot_enabled: bool = True
     harness_context_patch_history_limit: int = 200
     harness_context_tools_enabled: bool = True
+    # Context deduplication / attachment prompt controls.  Each switch is
+    # independently reversible so a rollout can fall back without changing
+    # the stateful-context storage contract.
+    harness_context_intent_omit_from_view_enabled: bool = True
+    harness_attachment_prompt_mode: str = "summary"  # full | summary | index
+    harness_preference_inject_mode: str = "router_and_harness"  # router_and_harness | harness_only
+    harness_context_view_dedup_tool_evidence: bool = True
+    harness_context_size_metrics_enabled: bool = False
+    # Unified ContextRepository (single load + atomic turn/projection commit).
+    # Default false preserves the existing dual-path behaviour; enable only after
+    # migration dry-run / canary approval (plan 2026-07-19-unified-context-repository).
+    harness_unified_context_repository_enabled: bool = False
 
     # 日志分析管线（处理上万行日志）
     # 进入聚类前允许处理的最大原始行数（超出按时间倒序截断并提示）
@@ -284,10 +304,11 @@ class Settings(BaseSettings):
 
     # Harness loop checkpoint (step-level, Redis-backed).
     # Only effective when all three of harness_enabled, harness_checkpoint_enabled,
-    # and redis_enabled are True. Conservative replay is the default: on resume the
-    # harness skips any step that contains a non-idempotent tool and goes straight
-    # to a single closing LLM call. Set harness_checkpoint_replay=True to replay
-    # remaining steps verbatim (best-effort; external side effects may double-fire).
+    # and redis_enabled are True. Resume restores state/context and continues from
+    # the next incomplete step; historical tool calls are not re-executed.
+    # harness_checkpoint_replay is retained for compatibility (both true/false now
+    # continue by default). Request body checkpoint_replay=False can still force
+    # close-only finalization when harness_checkpoint_request_override_enabled.
     harness_checkpoint_enabled: bool = True
     harness_checkpoint_ttl_seconds: int = 1800
     harness_checkpoint_replay: bool = False

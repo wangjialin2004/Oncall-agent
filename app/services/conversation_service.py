@@ -144,6 +144,26 @@ class ConversationService:
             for row in rows
         ]
 
+    def get_last_route(self, owner_key: str, session_id: str) -> str | None:
+        """Return the most recent non-empty route for a session, if any."""
+        if not owner_key or not session_id:
+            return None
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT route FROM conversation_turns
+                WHERE owner_key = ? AND session_id = ?
+                  AND route IS NOT NULL AND TRIM(route) != ''
+                ORDER BY turn_index DESC
+                LIMIT 1
+                """,
+                (owner_key, session_id),
+            ).fetchone()
+        if row is None:
+            return None
+        route = str(row["route"] or "").strip()
+        return route or None
+
     def get_rolling_summary(self, owner_key: str, session_id: str) -> dict[str, Any]:
         """Return the rolling summary state for a conversation."""
         with self._connection() as connection:

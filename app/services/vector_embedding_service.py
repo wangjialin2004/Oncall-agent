@@ -52,6 +52,24 @@ def _normalize_provider(raw: str | None) -> str:
     return aliases.get(value, value or "local_bge_m3")
 
 
+def _running_under_wsl() -> bool:
+    """Best-effort WSL detection (kernel name or /proc/version marker)."""
+
+    try:
+        import platform
+        import re
+
+        if re.search(r"microsoft|wsl", platform.release(), flags=re.I):
+            return True
+    except Exception:
+        pass
+    try:
+        with open("/proc/version", encoding="utf-8", errors="ignore") as fh:
+            return "microsoft" in fh.read().lower()
+    except Exception:
+        return False
+
+
 class DashScopeEmbeddings:
     """DashScope OpenAI-compatible text embedding client (degradation path)."""
 
@@ -154,6 +172,16 @@ class LocalBgeM3Embeddings:
     def _resolve_device(self) -> str | None:
         if self.device:
             return self.device
+        # WSL2 + NVIDIA libcuda has produced fatal SIGSEGV during BGE-M3
+        # encode in this environment (see dmesg: segfault in libcuda.so).
+        # Prefer CPU by default on WSL; operators can still force cuda via
+        # EMBEDDING_DEVICE=cuda after validating their driver stack.
+        if _running_under_wsl():
+            logger.warning(
+                "WSL detected; defaulting local BGE-M3 to device=cpu to avoid "
+                "libcuda segfaults. Set EMBEDDING_DEVICE=cuda to override."
+            )
+            return "cpu"
         try:
             import torch
 

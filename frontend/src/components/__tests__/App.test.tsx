@@ -241,11 +241,6 @@ describe("App", () => {
             requires_confirm: true,
           },
         ],
-        escalation: {
-          configured: false,
-          text: "未配置值班联系人",
-          contacts: [],
-        },
       });
     });
 
@@ -285,6 +280,50 @@ describe("App", () => {
     await user.keyboard("{Enter}");
 
     expect((await screen.findAllByText("fallback answer")).length).toBeGreaterThan(0);
+  });
+
+  it("replaces a provisional streamed answer with the canonical complete answer", async () => {
+    vi.mocked(streamAgent).mockImplementationOnce(async ({ onEvent }) => {
+      onEvent({ type: "content", data: "provisional answer" });
+      onEvent({
+        type: "complete",
+        route: "diagnosis",
+        answer: "verified replacement answer",
+        replace_streamed_answer: true,
+        case_id: "",
+        events: [],
+      });
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(await waitForChatReady(), "check cpu");
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByText("verified replacement answer")).toBeInTheDocument();
+    expect(screen.queryByText("provisional answer")).not.toBeInTheDocument();
+  });
+
+  it("keeps legacy appended content when replacement is not requested", async () => {
+    vi.mocked(streamAgent).mockImplementationOnce(async ({ onEvent }) => {
+      onEvent({ type: "content", data: "initial answer" });
+      onEvent({ type: "content", data: " replacement answer" });
+      onEvent({
+        type: "complete",
+        route: "diagnosis",
+        answer: "replacement answer",
+        replace_streamed_answer: false,
+        case_id: "",
+        events: [],
+      });
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(await waitForChatReady(), "check cpu");
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByText("initial answer replacement answer")).toBeInTheDocument();
   });
 
   it("shows a checkpoint_resume banner when the harness reports a resumed run", async () => {

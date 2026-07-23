@@ -125,6 +125,27 @@ MIGRATIONS: tuple[Migration, ...] = (
             ("experience_memories", "approved_at", "TEXT NOT NULL DEFAULT ''"),
         ),
     ),
+    # Additive only: commit/watermark metadata for unified context repository.
+    # Does not rewrite context_state_json contents.
+    Migration(
+        3,
+        "unified_context_projection_watermarks",
+        # column_additions run before statements so the partial unique index
+        # can reference the newly added commit_id column.
+        column_additions=(
+            ("conversation_turns", "commit_id", "TEXT"),
+            ("conversations", "context_projection_version", "INTEGER NOT NULL DEFAULT 0"),
+            ("conversations", "context_last_applied_turn_id", "INTEGER"),
+            ("conversations", "context_last_applied_turn_index", "INTEGER NOT NULL DEFAULT -1"),
+            ("conversations", "context_projection_status", "TEXT NOT NULL DEFAULT 'missing'"),
+        ),
+        statements=(
+            # Partial unique index: non-empty commit_id is idempotent per owner/session.
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_turns_commit_id "
+            "ON conversation_turns (owner_key, session_id, commit_id) "
+            "WHERE commit_id IS NOT NULL AND commit_id != ''",
+        ),
+    ),
 )
 
 REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
@@ -132,11 +153,13 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "owner_key", "session_id", "title", "created_at", "updated_at",
         "memory_summary", "memory_summary_turn_index", "context_state_json",
         "context_state_version", "context_state_updated_at",
+        "context_projection_version", "context_last_applied_turn_id",
+        "context_last_applied_turn_index", "context_projection_status",
     ),
     "conversation_turns": (
         "id", "owner_key", "session_id", "turn_index", "user_message",
         "user_context", "attachment_refs_json", "assistant_answer", "route",
-        "case_id", "events_json", "created_at",
+        "case_id", "events_json", "created_at", "commit_id",
     ),
     "uploaded_files": (
         "id", "owner_key", "original_name", "stored_name", "storage_backend",
@@ -181,6 +204,9 @@ class DatabaseMigrationService:
         return result
 
     def up(self) -> dict[str, Any]:
+        current_status = self.status()
+        if current_status.get("schema_ok"):
+            return current_status
         self._check_backup_and_space()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(str(self.db_path), timeout=30.0) as connection:
@@ -192,8 +218,8 @@ class DatabaseMigrationService:
                 for migration in MIGRATIONS:
                     if migration.version <= current:
                         continue
-                    for statement in migration.statements:
-                        connection.execute(statement)
+                    # Prefer column additions first so later statements may
+                    # reference newly added columns (e.g. partial indexes).
                     for table, column, definition in migration.column_additions:
                         self._add_column_if_missing(
                             connection,
@@ -201,6 +227,8 @@ class DatabaseMigrationService:
                             column=column,
                             definition=definition,
                         )
+                    for statement in migration.statements:
+                        connection.execute(statement)
                     missing = self._missing_schema(connection)
                     if migration.version == self.latest_version and missing:
                         raise RuntimeError(
@@ -283,13 +311,98 @@ class DatabaseMigrationService:
         return missing
 
     def _check_backup_and_space(self) -> None:
+        self.verify_backup()
         backup = self.backup_dir / self.db_path.name
-        if not backup.is_file() or backup.stat().st_size <= 0:
-            raise RuntimeError(f"verified backup is required: {backup}")
         usage = shutil.disk_usage(self.db_path.parent if self.db_path.parent.exists() else Path("."))
         required = max(1 << 20, int(backup.stat().st_size * 1.2))
         if usage.free < required:
             raise RuntimeError("insufficient free disk space for migration")
+
+    def verify_backup(self) -> dict[str, Any]:
+        """Validate the operator backup without changing either database.
+
+        Existing databases require a fresh, healthy backup with matching
+        canonical row counts. A zero-byte SQLite image is accepted only for a
+        database that does not exist yet, where there is no source data to lose.
+        """
+
+        backup = self.backup_dir / self.db_path.name
+        if not backup.is_file():
+            raise RuntimeError(f"verified backup is required: {backup}")
+        if self.db_path.exists() and backup.stat().st_size <= 0:
+            raise RuntimeError(f"verified backup is empty: {backup}")
+        try:
+            if backup.resolve() == self.db_path.resolve():
+                raise RuntimeError("backup path must differ from source database")
+        except FileNotFoundError:
+            pass
+
+        backup_health = self._read_only_health(backup)
+        if backup_health["quick_check"] != "ok":
+            raise RuntimeError("backup quick_check failed")
+        if not self.db_path.exists():
+            if backup_health["tables"]:
+                raise RuntimeError("fresh database backup must be an empty SQLite image")
+            return {
+                "backup": str(backup),
+                "source_exists": False,
+                "quick_check": "ok",
+                "row_counts_match": True,
+            }
+
+        source_health = self._read_only_health(self.db_path)
+        if source_health["quick_check"] != "ok":
+            raise RuntimeError("source database quick_check failed")
+        if backup.stat().st_mtime_ns < self.db_path.stat().st_mtime_ns:
+            raise RuntimeError("backup is older than source database")
+
+        source_tables = set(source_health["tables"])
+        backup_tables = set(backup_health["tables"])
+        if source_tables != backup_tables:
+            raise RuntimeError("backup schema table set does not match source")
+        critical_tables = source_tables & {"conversations", "conversation_turns"}
+        mismatched = [
+            table
+            for table in sorted(critical_tables)
+            if source_health["row_counts"].get(table)
+            != backup_health["row_counts"].get(table)
+        ]
+        if mismatched:
+            raise RuntimeError(
+                "backup canonical row counts do not match source: " + ", ".join(mismatched)
+            )
+        return {
+            "backup": str(backup),
+            "source_exists": True,
+            "quick_check": "ok",
+            "row_counts_match": True,
+        }
+
+    @staticmethod
+    def _read_only_health(path: Path) -> dict[str, Any]:
+        uri = f"file:{path.resolve().as_posix()}?mode=ro"
+        try:
+            with sqlite3.connect(uri, uri=True, timeout=5.0) as connection:
+                connection.execute("PRAGMA query_only=ON")
+                quick = connection.execute("PRAGMA quick_check").fetchone()
+                tables = [
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                    ).fetchall()
+                ]
+                row_counts = {
+                    table: int(connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+                    for table in tables
+                }
+        except sqlite3.DatabaseError as exc:
+            raise RuntimeError(f"backup/source is not a healthy SQLite database: {path}") from exc
+        return {
+            "quick_check": str(quick[0] if quick else "unknown"),
+            "tables": tables,
+            "row_counts": row_counts,
+        }
 
 
 database_migration_service = DatabaseMigrationService()

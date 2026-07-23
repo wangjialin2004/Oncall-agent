@@ -41,6 +41,18 @@ class HarnessPolicyMixin:
         }
     )
 
+    @staticmethod
+    def _is_knowledge_light_plan(plan: Any | None) -> bool:
+        """True when planner marked a knowledge light-path (no hard evidence)."""
+        if plan is None:
+            return False
+        if str(getattr(plan, "focus_route", "") or "").strip() != "knowledge":
+            return False
+        if not bool(getattr(config, "harness_knowledge_light_path_enabled", True)):
+            return False
+        required = list(getattr(plan, "required_evidence", None) or [])
+        return len(required) == 0
+
     _CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
     def _effective_max_steps(self, route: str) -> int:
@@ -112,6 +124,7 @@ class HarnessPolicyMixin:
         verification_gaps: Sequence[str] | None,
         force_after_re_evidence: bool,
         aux_routes: Sequence[str],
+        plan: Any | None = None,
     ) -> bool:
         if not bool(getattr(config, "harness_replan_enabled", True)):
             return False
@@ -119,6 +132,8 @@ class HarnessPolicyMixin:
         if replan_times_used >= max_times:
             return False
         if resume_close_only:
+            return False
+        if self._is_knowledge_light_plan(plan):
             return False
         if state.over_budget(self.limits):
             return False
@@ -369,7 +384,7 @@ class HarnessPolicyMixin:
         """Build a minimal gap notice when tools failed and model returned no prose.
 
         Used by RE2-style primary-fail paths so complete.answer is not only the
-        escalation footer. Read-only; never claims remediation was executed.
+        empty response. Read-only; never claims remediation was executed.
         """
         if self._has_successful_tool_evidence(state.timeline_events):
             return ""
