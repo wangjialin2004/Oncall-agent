@@ -32,14 +32,13 @@ Repository instructions are applied in this order: host/system and explicit user
 | Codex | `AGENTS.md` then `CODEX.md` | Apply shared policy; use only Codex-specific execution guidance from the adapter. |
 | Other models / IDE agents | `AGENTS.md` | Treat this file as complete policy; do not infer generic rules from a different model's adapter. |
 
-### Shared mandatory workflow
+### Shared workflow
 
-- Before any non-trivial implementation, write an executable plan in `plan/` (or `docs/superpowers/plans/` where explicitly required) and add it to **Current Plan Index** below. A task is non-trivial when it adds a feature or flag, changes the harness main loop, changes API/event contracts, alters evaluations or CI, or spans a multi-file refactor.
-- A plan must state the problem, decisions and defaults, scope and non-goals, affected files, flags, verification commands and exit criteria, risks, and rollback path. Ask for direction before a decision that changes defaults, has destructive impact, or changes a data-source strategy.
+- Plans in `plan/` (or `docs/superpowers/plans/` where explicitly required) are optional design and progress artifacts. They may document the problem, decisions and defaults, scope and non-goals, affected files, flags, verification commands and exit criteria, risks, and rollback path, but do not gate implementation.
+- Ask for direction before a decision that changes defaults, has destructive impact, or changes a data-source strategy.
 - Before designing or implementing a new feature, first search this repository for an existing capability, then research current, maintained solutions in official documentation and on GitHub. Prefer adapting proven implementations over rebuilding them from scratch.
-- Record candidate repositories and documentation links, the checked release/version and date, license, maintenance and security status, project compatibility, and the adoption or rejection rationale in the implementation plan. Do not copy code or add a dependency without license and security review plus local verification.
-- During implementation, record material deviations. On completion, record verification evidence in a progress document or the plan, then update the index status.
-- A single typo/comment correction, read-only investigation, or a user-provided one-file change under 20 lines may skip a formal plan; still state intent and validate proportionately.
+- Record candidate repositories and documentation links, the checked release/version and date, license, maintenance and security status, project compatibility, and the adoption or rejection rationale in the associated change documentation. Do not copy code or add a dependency without license and security review plus local verification.
+- During implementation, record material deviations. On completion, record verification evidence in the applicable change documentation; update the plan index when a plan exists.
 
 ### Shared engineering and safety boundaries
 
@@ -110,7 +109,7 @@ Model adapters must remain short references to this policy. They must not duplic
 - [助手消息工具协议泄漏与中文乱码修复](plan/2026-07-16-assistant-tool-protocol-and-mojibake-guard.md) - **已实现**；隔离 planner/re-evidence/replan 工具决策文本，修复运行时乱码并兼容历史脏消息；见 [进度](plan/2026-07-16-assistant-tool-protocol-and-mojibake-guard-progress.md)
 - [智能体过程栏信息架构与步骤展示优化](plan/2026-07-15-agent-process-panel-information-architecture.md) - **已实现，待 Git 元数据恢复后提交**；原始 SSE 事件归并为业务步骤，修正状态/计数，详情分层并保留 V1 回退；前端 70 tests + build + 3 档浏览器 QA 通过
 - [Harness loop 拆分与简化](plan/2026-07-15-harness-loop-split-simplify.md) - **已合入**；`loop.py` 3672→门面+mixin（单文件≤1000）；见 [进度](plan/2026-07-15-harness-loop-split-progress.md) · [交接](docs/pilot/handoff-2026-07-16-harness-loop-split.md)
-- [CLAUDE.md — 项目协作约定](CLAUDE.md) - **先计划后编码**；M1 焦点；红线与文档规范
+- [CLAUDE.md — 项目协作约定](CLAUDE.md) - M1 焦点；红线与文档规范
 - [完整 Agent 系统差距 → 3 个月演进路线图](plan/2026-07-13-complete-agent-system-3-month-roadmap.md) - L1 Go 基线 → M1 闭环/时延/评测 → M2 并行委派/数据面/共享内核 → M3 自学习/HITL/预生产（L3）
 - [M1 W1 实施计划：Close the Loop](plan/2026-07-13-m1-w1-close-the-loop-implementation.md) - re-evidence / force_delegation / 变更边界 / 评测；**2026-07-13 补录，Day1 已按此落地**
 - [M1 W2 实施计划：Context / Checkpoint / Evidence / CI](plan/2026-07-13-m1-w2-context-checkpoint-evidence-ci.md) - 多轮白板、超时落盘、证据细匹配、ci-smoke
