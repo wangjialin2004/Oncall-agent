@@ -7,7 +7,6 @@ from typing import Any
 from loguru import logger
 
 from app.agent.agent_loop import tool_call_payload
-from app.agent.context.integration import persist_stateful_context as _persist_stateful_context
 from app.agent.context.operations import framework_patch
 from app.agent.context.state import SECTION_OUTPUT
 from app.agent.events import make_agent_event
@@ -27,18 +26,15 @@ from app.core.metrics import (
     observe_agent_tokens,
     observe_tool_calls_from_timeline,
 )
-from app.services.context_repository import unified_context_repository_enabled
 
 
 async def persist_stateful_context(*args, **kwargs):
     """Route unified stage persistence to the inflight recovery key."""
-    if unified_context_repository_enabled():
-        from app.agent.context.unified import persist_runtime_state
+    from app.agent.context.unified import persist_runtime_state
 
-        state = args[0] if args else kwargs.get("state")
-        warnings, _ = await persist_runtime_state(state, store=kwargs.get("store"))
-        return warnings
-    return await _persist_stateful_context(*args, **kwargs)
+    state = args[0] if args else kwargs.get("state")
+    warnings, _ = await persist_runtime_state(state, store=kwargs.get("store"))
+    return warnings
 
 
 class HarnessClosePathMixin:

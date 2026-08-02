@@ -66,7 +66,7 @@ class _FakeRouter:
     def __init__(self, route: str = "diagnosis") -> None:
         self.route = route
 
-    async def _resolve_route(self, message: str) -> RouteDecision:
+    async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
         return RouteDecision(route=self.route, reason="fake_focus", confidence=0.8)
 
 
@@ -126,7 +126,7 @@ async def test_harness_error_event_carries_duration_ms():
     """``stage=error`` 事件顶层必须包含 ``duration_ms``，便于前端回放耗时。"""
 
     class _BoomRouter:
-        async def _resolve_route(self, message: str) -> RouteDecision:  # noqa: ARG002
+        async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:  # noqa: ARG002
             raise RuntimeError("synthetic failure inside the loop")
 
     fake_llm = _FakeLLM(

@@ -10,8 +10,11 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import type { AgentMode, ChatMessage, RunStatus } from "../types/events";
+import type { AgentMode, AgentRun, ChatMessage, RunStatus } from "../types/events";
 import { sanitizeAssistantContent } from "../utils/assistantContent";
+import { AgentActivityFeed } from "./chat/AgentActivityFeed";
+import { InlineAgentActivity } from "./chat/InlineAgentActivity";
+import { RunOutcome } from "./chat/RunOutcome";
 
 export type PendingAttachment = {
   fileId: string;
@@ -21,6 +24,9 @@ export type PendingAttachment = {
 type ChatWorkspaceProps = {
   mode: AgentMode;
   messages: ChatMessage[];
+  runs?: Record<string, AgentRun>;
+  inlineActivityEnabled?: boolean;
+  granularActivityEnabled?: boolean;
   runStatus: RunStatus;
   pendingAttachments: PendingAttachment[];
   selectedId?: string;
@@ -34,12 +40,22 @@ type ChatWorkspaceProps = {
   onRemoveAttachment: (fileId: string) => void;
   onUploadFile: (file: File) => Promise<{ fileId: string; fileName: string; deduplicated: boolean }>;
   onSelectMessage?: (id: string) => void;
+  onRunFeedback?: (
+    runId: string,
+    kind: "adopted" | "corrected",
+    actualRootCause?: string,
+  ) => void;
+  onRunDistill?: (runId: string, action: "confirm" | "reject") => void;
+  onRunConfirmSuggestion?: (runId: string, actionId: string) => void;
   onStop: () => void;
 };
 
 export function ChatWorkspace({
   mode,
   messages,
+  runs = {},
+  inlineActivityEnabled = true,
+  granularActivityEnabled = true,
   runStatus,
   pendingAttachments,
   selectedId,
@@ -51,6 +67,9 @@ export function ChatWorkspace({
   onRemoveAttachment,
   onUploadFile,
   onSelectMessage,
+  onRunFeedback,
+  onRunDistill,
+  onRunConfirmSuggestion,
   onStop,
 }: ChatWorkspaceProps) {
   const [message, setMessage] = useState("");
@@ -60,6 +79,13 @@ export function ChatWorkspace({
   const messagesRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const successResetTimerRef = useRef<number | null>(null);
+  const activityVersion = messages
+    .filter((item) => item.role === "assistant")
+    .map((item) => {
+      const run = runs[item.id];
+      return `${item.id}:${run?.events.length ?? 0}:${run?.status ?? ""}:${item.content.length}`;
+    })
+    .join("|");
 
   useEffect(() => {
     const messagesEl = messagesRef.current;
@@ -71,7 +97,7 @@ export function ChatWorkspace({
       return;
     }
     messagesEl.scrollTop = messagesEl.scrollHeight;
-  }, [messages]);
+  }, [messages, activityVersion]);
 
   useEffect(() => {
     return () => {
@@ -178,8 +204,40 @@ export function ChatWorkspace({
           </div>
         ) : (
           messages.map((item) => {
-            const selectable = item.role === "assistant" && Boolean(onSelectMessage);
+            const selectable =
+              !inlineActivityEnabled && item.role === "assistant" && Boolean(onSelectMessage);
             const isSelected = selectable && item.id === selectedId;
+            const assistantContent =
+              item.role === "assistant" ? sanitizeAssistantContent(item.content) : "";
+            const run = item.role === "assistant" ? runs[item.id] : undefined;
+
+            if (item.role === "assistant" && inlineActivityEnabled && granularActivityEnabled && run) {
+              return (
+                <section className="assistant-turn" key={item.id}>
+                  <AgentActivityFeed run={run} />
+                  {assistantContent ? (
+                    <article className="message assistant">
+                      <div className="message-bubble">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {assistantContent}
+                        </ReactMarkdown>
+                      </div>
+                    </article>
+                  ) : null}
+                  <RunOutcome
+                    run={run}
+                    onFeedback={(kind, actualRootCause) =>
+                      onRunFeedback?.(item.id, kind, actualRootCause)
+                    }
+                    onDistill={(action) => onRunDistill?.(item.id, action)}
+                    onConfirmSuggestion={(actionId) =>
+                      onRunConfirmSuggestion?.(item.id, actionId)
+                    }
+                  />
+                </section>
+              );
+            }
+
             return (
               <article
                 className={`message ${item.role}${isSelected ? " selected" : ""}`}
@@ -204,9 +262,25 @@ export function ChatWorkspace({
                     : {})}
                 >
                   {item.role === "assistant" ? (
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {sanitizeAssistantContent(item.content)}
-                    </ReactMarkdown>
+                    <>
+                      {inlineActivityEnabled && run ? (
+                        <InlineAgentActivity
+                          run={run}
+                          onFeedback={(kind, actualRootCause) =>
+                            onRunFeedback?.(item.id, kind, actualRootCause)
+                          }
+                          onDistill={(action) => onRunDistill?.(item.id, action)}
+                          onConfirmSuggestion={(actionId) =>
+                            onRunConfirmSuggestion?.(item.id, actionId)
+                          }
+                        />
+                      ) : null}
+                      {assistantContent ? (
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {assistantContent}
+                        </ReactMarkdown>
+                      ) : null}
+                    </>
                   ) : (
                     item.content
                   )}

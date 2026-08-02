@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
+from app.agent.context.envelope import CompletedTurnCommit
 from app.agent.context.operations import framework_patch
 from app.agent.context.state import SECTION_INTENT, AgentContextState
 from app.agent.context.store import ContextStateStore, ContextStateStoreSettings
@@ -27,7 +29,9 @@ from app.core.runtime_tools import RuntimeTool
 from app.services.harness_checkpoint import (
     HarnessCheckpointStore,
 )
+from app.services.context_repository import ContextRepository, ContextRepositorySettings
 from app.services.router_service import RouteDecision
+from tests._context_db import initialize_context_db
 from tests._fake_redis import FakeRedis
 
 
@@ -38,10 +42,15 @@ def fake_redis() -> FakeRedis:
 
 @pytest.fixture(autouse=True)
 def _disable_unrelated_memory_writes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep context tests isolated from live experience distill/index hooks."""
+    """Keep context tests isolated from live experience distill/index hooks.
+
+    The tests cover checkpoint/state compatibility primitives independently of
+    the production context loading path.
+    """
 
     monkeypatch.setattr(config, "long_term_memory_distill_enabled", False)
     monkeypatch.setattr(config, "harness_anti_pattern_capture_enabled", False)
+    monkeypatch.setattr(config, "harness_llm_planning_enabled", False)
 
 
 @pytest.fixture
@@ -62,7 +71,12 @@ def _state(**overrides) -> HarnessState:
 
 
 class _Router:
-    async def _resolve_route(self, message: str) -> RouteDecision:
+    async def _resolve_route(
+        self,
+        message: str,
+        previous_route: str | None = None,
+        **kwargs,
+    ) -> RouteDecision:
         return RouteDecision(route="diagnosis", reason="stateful-test", confidence=0.9)
 
 
@@ -279,14 +293,29 @@ def test_stateful_context_config_flags_are_explicit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stateful_context_redis_hit_skips_legacy_context_builder(monkeypatch) -> None:
+async def test_unified_context_load_skips_legacy_context_builder(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.setattr(config, "harness_stateful_context_enabled", True)
     monkeypatch.setattr(config, "harness_context_tools_enabled", False)
     redis = _MemoryRedis()
-    store = _store(redis)
+    repository = ContextRepository(
+        db_path=initialize_context_db(tmp_path / "redis-hit.db"),
+        redis_get_set=redis,
+        settings=ContextRepositorySettings(redis_enabled=True, db_snapshot_enabled=True),
+    )
     seeded = AgentContextState(owner_key="owner-1", session_id="sess-stateful")
     framework_patch(seeded, SECTION_INTENT, "current_goal", op="set", value="seeded")
-    await store.save("owner-1", "sess-stateful", seeded)
+    await repository.commit_completed_turn(
+        CompletedTurnCommit(
+            owner_key="owner-1",
+            session_id="sess-stateful",
+            commit_id="seeded",
+            user_message="prior question",
+            assistant_answer="prior answer",
+            projection=seeded,
+        )
+    )
 
     llm = _LLM([LLMResponse(content="final answer", raw={})])
     service = HarnessService(
@@ -294,7 +323,7 @@ async def test_stateful_context_redis_hit_skips_legacy_context_builder(monkeypat
         router=_Router(),
         llm_client=llm,
         tools=[],
-        context_store=store,
+        context_repository=repository,
     )
 
     events = [
@@ -307,7 +336,7 @@ async def test_stateful_context_redis_hit_skips_legacy_context_builder(monkeypat
     assert any(event.get("type") == "complete" for event in events)
     system_prompt = llm.calls[0]["messages"][0].content  # type: ignore[index,union-attr]
     assert "base harness prompt" in system_prompt
-    assert "当前会话状态白板" in system_prompt
+    assert "当前会话白板" in system_prompt
     assert "current_goal: redis hit?" not in system_prompt
     assert "redis hit?" not in system_prompt
     assert "redis hit?" in llm.calls[0]["messages"][-1].content  # type: ignore[index,union-attr]
@@ -337,24 +366,40 @@ async def test_stateful_context_registers_only_safe_context_tools(monkeypatch) -
 
     tool_defs = llm.calls[0]["kwargs"]["tools"]  # type: ignore[index]
     names = {tool.name for tool in tool_defs}
-    assert {"context_read", "context_note", "read_attachment"}.issubset(names)
+    # Whiteboard is already injected into the system prompt, so context_read is
+    # omitted by default; note + attachment tools still bind to the whiteboard.
+    assert {"context_note", "read_attachment"}.issubset(names)
+    assert "context_read" not in names
     assert "context_patch" not in names
     assert "context_rollback" not in names
 
 
 @pytest.mark.asyncio
-async def test_stateful_context_merges_current_attachment_refs(monkeypatch) -> None:
+async def test_unified_context_merges_current_attachment_refs(
+    tmp_path: Path, monkeypatch
+) -> None:
     monkeypatch.setattr(config, "harness_stateful_context_enabled", True)
     monkeypatch.setattr(config, "harness_context_tools_enabled", True)
     redis = _MemoryRedis()
-    store = _store(redis)
+    repository = ContextRepository(
+        db_path=initialize_context_db(tmp_path / "attachments.db"),
+        redis_get_set=redis,
+        settings=ContextRepositorySettings(redis_enabled=True, db_snapshot_enabled=True),
+    )
     llm = _LLM([LLMResponse(content="done", raw={})])
+    committed_states: list[AgentContextState] = []
+
+    async def committer(event, context_state):
+        assert event["type"] == "complete"
+        assert context_state is not None
+        committed_states.append(context_state)
+
     service = HarnessService(
         context_builder=_ExplodingContextBuilder(),
         router=_Router(),
         llm_client=llm,
         tools=[],
-        context_store=store,
+        context_repository=repository,
     )
 
     _ = [
@@ -372,11 +417,11 @@ async def test_stateful_context_merges_current_attachment_refs(monkeypatch) -> N
                     "status": "indexed",
                 }
             ],
+            completion_committer=committer,
         )
     ]
 
-    loaded = await store.get_or_rebuild("owner-1", "sess-attachment")
-    assert loaded.state.conversation.active_attachment_refs[0]["file_id"] == "file_1"
+    assert committed_states[0].conversation.active_attachment_refs[0]["file_id"] == "file_1"
     system_prompt = llm.calls[0]["messages"][0].content  # type: ignore[index,union-attr]
     assert "active_attachments" in system_prompt
     assert "file_1" in system_prompt
@@ -384,12 +429,16 @@ async def test_stateful_context_merges_current_attachment_refs(monkeypatch) -> N
 
 @pytest.mark.asyncio
 async def test_stateful_context_records_tool_evidence_and_checkpoint_ref(
-    monkeypatch,
+    tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(config, "harness_stateful_context_enabled", True)
     monkeypatch.setattr(config, "harness_context_tools_enabled", False)
     redis = _MemoryRedis()
-    store = _store(redis)
+    repository = ContextRepository(
+        db_path=initialize_context_db(tmp_path / "evidence.db"),
+        redis_get_set=redis,
+        settings=ContextRepositorySettings(redis_enabled=True, db_snapshot_enabled=True),
+    )
     fake_redis = FakeRedis()
     checkpoint_store = HarnessCheckpointStore(
         namespace="stateful-ckpt",
@@ -421,33 +470,42 @@ async def test_stateful_context_records_tool_evidence_and_checkpoint_ref(
             LLMResponse(content="redis is healthy", raw={}),
         ]
     )
+    committed_states: list[AgentContextState] = []
+
+    async def committer(event, context_state):
+        assert event["type"] == "complete"
+        assert context_state is not None
+        committed_states.append(context_state)
+
     service = HarnessService(
         context_builder=_ExplodingContextBuilder(),
         router=_Router(),
         llm_client=llm,
         tools=[tool],
-        context_store=store,
+        context_repository=repository,
         checkpoint_store=checkpoint_store,
     )
 
     _ = [
         event
         async for event in service.stream(
-            "check redis", session_id="sess-evidence", owner_key="owner-1"
+            "check redis",
+            session_id="sess-evidence",
+            owner_key="owner-1",
+            completion_committer=committer,
         )
     ]
     await asyncio.sleep(0.05)
 
-    loaded = await store.get_or_rebuild("owner-1", "sess-evidence")
-    assert loaded.state.evidence.tool_summaries
-    assert loaded.state.evidence.tool_summaries[0].tool == "check_redis_health"
-    assert loaded.state.evidence.tool_summaries[0].raw_ref == "tool:call-redis"
+    assert committed_states[0].evidence.tool_summaries
+    assert committed_states[0].evidence.tool_summaries[0].tool == "check_redis_health"
+    assert committed_states[0].evidence.tool_summaries[0].raw_ref == "tool:call-redis"
 
     meta = json.loads(
         await fake_redis.get(checkpoint_store._meta_key("owner-1", "sess-evidence"))
     )
     assert meta["context_version"] is not None
-    assert meta["context_snapshot_ref"].endswith(f"v{meta['context_version']}")
+    assert meta["context_snapshot_ref"].startswith("context-inflight:")
     messages = json.loads(
         await fake_redis.get(checkpoint_store._messages_key("owner-1", "sess-evidence"))
         or "[]"

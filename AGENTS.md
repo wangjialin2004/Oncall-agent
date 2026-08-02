@@ -49,6 +49,12 @@ Repository instructions are applied in this order: host/system and explicit user
 - Keep `.env`, real tokens, passwords, and pilot pass markers out of commits and documentation. Do not weaken authentication, CORS, or owner authorization.
 - Keep `app/agent/harness/*.py` files at or below 1000 lines. Do not add new flag logic to the `loop.py` facade when an existing focused mixin/module is appropriate.
 - New behaviour needs focused tests. Harness changes require the relevant unit tests plus one existing soft-path regression. Record reusable evaluation commands and results in the progress record.
+- Completing a feature, or any project change that alters runtime behaviour, API/SSE contracts, harness/context persistence, routing, tools, frontend interaction, flags/defaults, or data schema, **requires end-to-end testing before calling the work done**. E2E means exercising the full path that users or operators hit—not only unit/focused tests. Minimum bar:
+  1. **Automated path e2e**: at least one test that crosses API/harness (or the owning surface) into persistence/reload or the equivalent multi-step flow for that feature.
+  2. **Live/runtime e2e** when a server or external dependency is part of the change: hit the running app (or documented dry-run substitute), verify success and failure/degraded paths that the change touches, and confirm durable side effects (DB/projection/cache/events) when applicable.
+  3. **Continuity/regression e2e** for multi-turn, checkpoint, or stateful features: two-turn or resume flow must prove history/state is reloaded, not only that a single request returns 200.
+  4. Record commands, session/request identifiers (non-secret), and pass/fail evidence in the plan progress or handoff. If live LLM/upstream is unavailable, still pass the automated path e2e and record the live degraded result; do not mark semantic continuity as verified until a healthy live run succeeds.
+  Pure docs/typo/comment-only changes may skip e2e; still state that skip explicitly.
 
 ### Documentation responsibilities
 
@@ -65,12 +71,26 @@ Model adapters must remain short references to this policy. They must not duplic
 
 ## Current Plan Index
 
+- [Prometheus Compose project membership](plan/2026-08-02-compose-prometheus-project-membership.md) - **implemented; Compose validation, orphan-free base startup, Prometheus readiness, and target discovery passed**; `aiops-prometheus` is now an explicit `monitoring` profile service in the main Compose project and retains its volume; API scrape remains degraded because the container cannot reach the host-bound FastAPI `:9900`; focused test baseline has 7 unrelated failures
+
+- [Retire legacy ContextBuilder context path](plan/2026-08-02-retire-legacy-context-builder.md) - **implemented; automated API/Harness two-turn, checkpoint/inflight, soft-path, and focused quality gates passed; live FastAPI was not listening**; `ContextRepository` is the sole API/Harness context path and legacy terminal persistence is removed; see [progress](plan/2026-08-02-retire-legacy-context-builder-progress.md)
+
+- [WSL full-stack startup script](plan/2026-08-01-wsl-stack-start-script.md) - **implemented and live-verified**; wraps the existing Make lifecycle with detached Vite startup, explicit degraded/skip switches, HTTP readiness checks, and idempotent frontend reuse; see [progress](plan/2026-08-01-wsl-stack-start-script-progress.md)
+- [可观测执行详情：计划、工具结果与证据缺口](plan/2026-08-01-observable-execution-details.md) - **已实现；自动化 API/history e2e、前端全量测试、构建与 live SSE 通过**；公开执行详情默认开启，可通过 `HARNESS_PUBLIC_PROGRESS_DETAILS_ENABLED=false` 回退到最小公开事件契约；见 [进度](plan/2026-08-01-observable-execution-details-progress.md)
+
+- [Remove legacy ContextSnapshotService](plan/2026-08-01-remove-context-snapshot-service.md) - **implemented; automated API two-turn e2e, checkpoint degradation, migration audit, lint, and focused regression passed; live FastAPI was unavailable**; `ContextRepository` is the default persistence/recovery owner and canonical turns/projection columns were retained; see [progress](plan/2026-08-01-remove-context-snapshot-service-progress.md)
+- [Tool failure classification and suppression](plan/2026-08-01-tool-failure-classification.md) - **implemented; focused/soft-path regression, public contract, lint, and live Prometheus dry-run passed**; normalizes local/MCP/structured tool failures, avoids repeat calls to terminally unavailable sources, and preserves the public SSE contract; see [progress](plan/2026-08-01-tool-failure-classification-progress.md)
+- [Agent activity delegation hierarchy](plan/2026-07-29-agent-activity-delegation-hierarchy.md) - **implemented; automated path, full frontend, build, and public-contract tests passed; authenticated Browser QA pending**; deduplicates parented child-Agent dispatch markers and nests child tool/MCP activity beneath its owning Agent without changing the public SSE contract; see [progress](plan/2026-07-29-agent-activity-delegation-hierarchy-progress.md)
+- [对话内逐条工具 / Agent 活动消息](plan/2026-07-26-granular-chat-agent-activity.md) - **已实现，自动化与双视口 mock browser QA 通过；认证 live 待补**；每个节点、工具调用和 Agent 派遣独立成块并可展开安全详情，状态原位更新，最终回答另起助手气泡；见 [进度](plan/2026-07-26-granular-chat-agent-activity-progress.md)
+- [对话内实时工具 / 专家过程流](plan/2026-07-26-inline-chat-agent-activity.md) - **已实现，自动化与一次健康 live 闭环通过；登录后浏览器 QA 待补**；对话内工具/专家实时过程、服务端公开事件脱敏、旧右栏环境变量回退；见 [进度](plan/2026-07-26-inline-chat-agent-activity-progress.md) · [交接](docs/pilot/handoff-2026-07-26-inline-chat-agent-activity.md)
+- [并行专家过程栏可视化](plan/2026-07-23-parallel-expert-process-panel.md) - **已完成并验证**；`delegate_parallel` 按专家拆卡片并排、修正专家计数；前端 23 focused + 全量测试与 build 通过
 - [路由纠偏 + 轻问题快路径 + 续聊继承](plan/2026-07-23-router-lightpath-and-continuation.md) - **已完成并验证**；续聊继承上一轮 route、低置信不全量 diagnosis、knowledge 轻路径跳过 re_evidence/replan；focused 测试通过
 - [Checkpoint 中断恢复：去掉工具门禁阻断](plan/2026-07-23-checkpoint-interrupt-resume.md) - **已完成并验证**；默认从 next_step 继续，历史非白名单工具不再强制 close-only；仅请求 `checkpoint_replay=false` 可强制收口
 - [移除 OnCall 升级联系人提示与前端卡片](plan/2026-07-23-remove-oncall-escalation-panel.md) - **已完成并验证**；后端 71 项、前端 36 项通过，Ruff、TypeScript 与 Vite 生产构建通过
 - [最终回答流式去重](plan/2026-07-23-final-answer-stream-dedup.md) - **已完成并验证**；补证/重规划的替代答案不再追加为第二段正文，保留兼容 SSE 事件与可回滚开关
 - [上下文加载与持久化合并](plan/2026-07-19-unified-context-repository.md) - **live schema v3 + projection apply 已完成；`.env` canary 已开 unified；代码默认仍 false**；projection JSON 约 -76%；two-turn/P50-P95 与默认 true 仍待；见 [进度](plan/2026-07-19-unified-context-repository-progress.md) · [最新复审](docs/reviews/completion-review-2026-07-19-unified-context-repository-2.md) · [首次评审](docs/reviews/completion-review-2026-07-19-unified-context-repository.md)
-- [交接：统一上下文加载与持久化](docs/pilot/handoff-2026-07-19-unified-context-repository.md) - **当前上下文工程交接**；live schema v3 / compact apply / Redis 只读 / `.env` canary 已落地；下一棒是运行对照与默认 true 决策
+- [交接：统一上下文 live canary 与运行时收口（2026-07-23）](docs/pilot/handoff-2026-07-23-unified-context-runtime-canary.md) - **当前上下文/运行时交接**；schema v3 + compact + canary + 动态 plan + 白板工具去冗余 `context_read` + E2E；默认 true / 旧 dual-path 退役仍待
+- [交接：统一上下文加载与持久化（2026-07-19 架构）](docs/pilot/handoff-2026-07-19-unified-context-repository.md) - 架构与迁移细节；运行状态见 2026-07-23 交接
 - [上下文去重与缩减](plan/2026-07-19-context-dedup-reduction.md) - **用户已批准并实现，focused 验证通过**；intent/view 省略当前问题、附件 summary 默认、stamp 禁全文、view 证据去重；保留 full/omit=false 一键回滚（旧认证签名测试断言另记）
 - [WP-3 RAG tenant scope and `biz_v2`](plan/2026-07-18-wp3-rag-scope-biz-v2.md) - **live schema/apply 已完成；biz_v2 已创建并切换默认，源 biz 保留（当前两者 0 entities）**
 - [WP-6 SQLite migration runner](plan/2026-07-18-wp6-sqlite-migration-runner.md) - **真实长期记忆库已迁移并验证 version 2；文件治理/其他库仍后续**；`status/verify/up` runner + `DB_SCHEMA_ENFORCEMENT_ENABLED` 阶段开关
@@ -163,7 +183,9 @@ Model adapters must remain short references to this policy. They must not duplic
 
 ## L1 Pilot（当前）
 
-- [统一上下文加载与持久化交接（2026-07-19）](docs/pilot/handoff-2026-07-19-unified-context-repository.md) — **当前上下文工程交接**；2026-07-23 live schema v3 + compact apply + `.env` canary 已完成；代码默认仍 false
+- [对话内实时工具 / 专家过程流交接（2026-07-26）](docs/pilot/handoff-2026-07-26-inline-chat-agent-activity.md) — **当前前端 / 公开事件契约交接**；实现与自动化/live 证据、隐私边界、旧右栏回滚；登录后 Browser QA 待补
+- [统一上下文 live canary 与运行时收口（2026-07-23）](docs/pilot/handoff-2026-07-23-unified-context-runtime-canary.md) — **当前上下文/运行时交接**；canary + 动态 plan + 白板工具 + E2E；代码默认仍 false
+- [统一上下文加载与持久化交接（2026-07-19）](docs/pilot/handoff-2026-07-19-unified-context-repository.md) — 架构与迁移；状态以 2026-07-23 交接为准
 - [M3 L3 交接（2026-07-15）](docs/pilot/handoff-2026-07-15-m3-l3-conditional.md) — **当前接手主文档**；L3 Conditional；full `213510` 21/23；H3 仍豁免
 - [L3 出口评审（2026-07-15）](docs/pilot/l3-exit-review-2026-07-15.md) — **Conditional Go**；P50 89s / Core 4/5
 - [北极星 N1–N10](docs/pilot/north-star-n1-n10-2026-07-15.md) — 已用 W12 full 回填

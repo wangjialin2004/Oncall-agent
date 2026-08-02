@@ -7,10 +7,7 @@ from typing import Any
 from loguru import logger
 
 from app.agent.agent_loop import stream_tool_results, tool_call_payload
-from app.agent.context.integration import (
-    capture_tool_outcome,
-    persist_stateful_context as _persist_stateful_context,
-)
+from app.agent.context.integration import capture_tool_outcome
 from app.agent.context.state import AgentContextState
 from app.agent.context.tools_evidence import record_delegate_merge
 from app.agent.events import make_agent_event
@@ -31,18 +28,15 @@ from app.config import config
 from app.core.llm_client import ChatMessage, ToolCall
 from app.core.runtime_tools import RuntimeTool
 from app.core.tool_calling import _stringify_tool_result
-from app.services.context_repository import unified_context_repository_enabled
 
 
 async def persist_stateful_context(*args, **kwargs):
     """Route unified stage persistence to the inflight recovery key."""
-    if unified_context_repository_enabled():
-        from app.agent.context.unified import persist_runtime_state
+    from app.agent.context.unified import persist_runtime_state
 
-        state = args[0] if args else kwargs.get("state")
-        warnings, _ = await persist_runtime_state(state, store=kwargs.get("store"))
-        return warnings
-    return await _persist_stateful_context(*args, **kwargs)
+    state = args[0] if args else kwargs.get("state")
+    warnings, _ = await persist_runtime_state(state, store=kwargs.get("store"))
+    return warnings
 
 
 def get_expert(route: str):
@@ -554,6 +548,25 @@ class HarnessToolsRuntimeMixin:
                         },
                         trace_id=state.trace_id,
                         span_id=f"delegate_parallel:{tool_call.id}:start",
+                    )
+                )
+            else:
+                # The terminal ``tool_event`` is intentionally emitted by
+                # ``stream_tool_results`` after execution. This separate
+                # agent lifecycle marker lets the UI show immediate progress
+                # without changing tool metrics or exposing arguments.
+                events.append(
+                    make_agent_event(
+                        agent="harness",
+                        stage="tool_start",
+                        status="in_progress",
+                        summary=f"Starting {tool_call.name}.",
+                        payload={
+                            "tool": tool_call.name,
+                            "tool_call_id": tool_call.id,
+                        },
+                        trace_id=state.trace_id,
+                        span_id=f"tool:{tool_call.id}:start",
                     )
                 )
         return events

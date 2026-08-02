@@ -1,7 +1,8 @@
 # 文档索引（docs/）
 
-> 更新：2026-07-19 — 新增统一上下文加载与持久化交接；产品状态仍为 L3 Conditional。
-> **上下文工程接手** → [`pilot/handoff-2026-07-19-unified-context-repository.md`](./pilot/handoff-2026-07-19-unified-context-repository.md)
+> 更新：2026-07-26 — 对话内实时工具 / 专家过程流交接；产品状态仍为 L3 Conditional。
+> **当前前端 / 公开事件契约接手** → [`pilot/handoff-2026-07-26-inline-chat-agent-activity.md`](./pilot/handoff-2026-07-26-inline-chat-agent-activity.md)
+> **上下文/运行时接手** → [`pilot/handoff-2026-07-23-unified-context-runtime-canary.md`](./pilot/handoff-2026-07-23-unified-context-runtime-canary.md)
 > **产品主交接** → [`pilot/handoff-2026-07-15-m3-l3-conditional.md`](./pilot/handoff-2026-07-15-m3-l3-conditional.md)
 
 ---
@@ -43,7 +44,9 @@ docs/
 
 | 优先级 | 文档 | 说明 |
 |---|---|---|
-| **P0** | [handoff-2026-07-19-unified-context-repository.md](./pilot/handoff-2026-07-19-unified-context-repository.md) | **当前上下文工程交接**：代码与本地门禁完成；live schema/apply、Redis、canary 仍受门控 |
+| **P0** | [handoff-2026-07-26-inline-chat-agent-activity.md](./pilot/handoff-2026-07-26-inline-chat-agent-activity.md) | **当前前端 / 公开事件契约交接**：对话内工具/专家过程、服务端脱敏、回滚开关、自动化/live 证据与待补 Browser QA |
+| **P0** | [handoff-2026-07-23-unified-context-runtime-canary.md](./pilot/handoff-2026-07-23-unified-context-runtime-canary.md) | **当前上下文/运行时交接**：live schema v3 + compact + canary + 动态 plan + 白板工具 + E2E；默认 true 仍待 |
+| **P0** | [handoff-2026-07-19-unified-context-repository.md](./pilot/handoff-2026-07-19-unified-context-repository.md) | 统一上下文架构与迁移细节；运行状态以 07-23 交接为准 |
 | **P0** | [handoff-2026-07-15-m3-l3-conditional.md](./pilot/handoff-2026-07-15-m3-l3-conditional.md) | **当前产品主交接**：L3 Conditional、full 21/23、H3 豁免 |
 | **P0** | [handoff-2026-07-18-security-tenant-reliability.md](./pilot/handoff-2026-07-18-security-tenant-reliability.md) | 安全、租户隔离、migration 与 deployment 工程交接 |
 | P1 | [handoff-2026-07-13-l1-m1-w2.md](./pilot/handoff-2026-07-13-l1-m1-w2.md) | 历史 L1 Go + M1 W1/W2 交接 |

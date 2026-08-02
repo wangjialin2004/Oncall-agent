@@ -22,7 +22,7 @@ NC = \033[0m
 .PHONY: help init start stop restart check upload clean up down status wait \
         install install-dev dev run test test-quick ci-smoke format lint fix type-check \
         security pre-commit-install pre-commit check-all format-check frontend-test frontend-build coverage docs shell \
-        ipython watch add add-dev remove list-docs test-upload sync logs \
+        ipython watch add add-dev remove list-docs test-upload sync logs start-prometheus stop-prometheus \
         start-redis start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp
 
 # ============================================================
@@ -195,7 +195,7 @@ status:
 # 启动本地 Prometheus（容器，抓取宿主机 9900 的 /metrics）
 start-prometheus:
 	@echo "$(YELLOW)📈 启动 Prometheus 容器...$(NC)"
-	@docker compose -f monitoring.yml up -d
+	@docker compose -f vector-database.yml --profile monitoring up -d prometheus
 	@echo "$(GREEN)✅ Prometheus: http://localhost:9090$(NC)"
 	@echo "$(YELLOW)   前置: 应用需在宿主机 9900 暴露 /metrics（make start）$(NC)"
 	@echo "$(YELLOW)   启用真实指标: export MONITOR_TARGET_MODE=prometheus 后重启 monitor MCP$(NC)"
@@ -203,7 +203,7 @@ start-prometheus:
 # 停止本地 Prometheus
 stop-prometheus:
 	@echo "$(YELLOW)🛑 停止 Prometheus 容器...$(NC)"
-	@docker compose -f monitoring.yml down
+	@docker compose -f vector-database.yml --profile monitoring stop prometheus
 	@echo "$(GREEN)✅ Prometheus 已停止$(NC)"
 
 # ============================================================

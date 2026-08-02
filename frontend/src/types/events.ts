@@ -33,6 +33,13 @@ export type TimelineEvent = {
   span_id?: string;
   started_at?: number;
   payload?: Record<string, unknown>;
+  actions?: SuggestedAction[];
+};
+
+/** Bounded, display-safe tool-result field emitted by the public SSE projector. */
+export type PublicResultField = {
+  label: string;
+  value: string;
 };
 
 export type ContentEvent = {

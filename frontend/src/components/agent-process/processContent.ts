@@ -403,6 +403,51 @@ function toolResultPresentation(event: TimelineEvent): {
     };
   }
 
+  if (event.tool === "delegate_parallel" || data.parallel === true) {
+    const results = Array.isArray(data.results) ? data.results : [];
+    const experts = Array.isArray(data.experts)
+      ? data.experts.map((item) => presentAgent(String(item))).filter(Boolean)
+      : results
+          .map((item) => {
+            const row = asRecord(item);
+            return row ? presentAgent(String(row.expert ?? "")) : "";
+          })
+          .filter(Boolean);
+    const fields: ProcessDetailField[] = [];
+    if (data.status !== undefined) {
+      fields.push({ label: "状态", value: text(data.status) });
+    }
+    if (experts.length > 0) {
+      fields.push({ label: "专家", value: experts.join("、") });
+    }
+    if (data.wall_ms !== undefined) {
+      fields.push({ label: "耗时", value: `${text(data.wall_ms)} ms` });
+    }
+    const items = results
+      .map((item) => {
+        const row = asRecord(item);
+        if (!row) {
+          return text(item, 180);
+        }
+        return [
+          presentAgent(String(row.expert ?? "")),
+          text(row.status),
+          text(row.answer ?? row.error ?? row.subtask, 120),
+        ]
+          .filter(Boolean)
+          .join(" · ");
+      })
+      .filter(Boolean);
+    return {
+      summary:
+        experts.length > 0
+          ? `并行委派 ${experts.join("、")}${data.wall_ms !== undefined ? ` · ${text(data.wall_ms)} ms` : ""}`
+          : text(data.summary ?? data.message) || "并行委派专家",
+      fields,
+      items,
+    };
+  }
+
   if (event.tool === "delegate_to_expert" || data.expert) {
     const fields: ProcessDetailField[] = [];
     if (data.status !== undefined) {
@@ -491,10 +536,24 @@ export function presentEventSummary(event: TimelineEvent): string {
   }
   if (event.type === "tool_event") {
     const result = toolResultPresentation(event);
-    if (event.tool === "context_read" || event.tool === "delegate_to_expert") {
+    if (
+      event.tool === "context_read" ||
+      event.tool === "delegate_to_expert" ||
+      event.tool === "delegate_parallel"
+    ) {
       return result.summary || humanize(event.summary ?? "") || `${presentTool(event.tool)}已执行`;
     }
     return humanize(event.summary ?? "") || result.summary || `${presentTool(event.tool)}已执行`;
+  }
+  if (event.stage === "delegate_parallel_start" || event.stage === "delegate_parallel_done") {
+    const experts = Array.isArray(event.payload?.experts)
+      ? event.payload.experts.map((item) => presentAgent(String(item))).filter(Boolean)
+      : [];
+    if (experts.length > 0) {
+      return event.stage === "delegate_parallel_done"
+        ? `并行专家完成：${experts.join("、")}`
+        : `并行委派 ${experts.join("、")}`;
+    }
   }
   return humanize(event.summary ?? "");
 }

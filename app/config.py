@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     llm_provider: str = "openai"  # openai | azure | custom
     llm_base_url: str = "https://dasuapi.com/v1"
     llm_api_key: str = "get.env('LLM_API_KEY')"
-    llm_model: str = "gpt-5.4"
+    llm_model: str = "gpt-5.6-luna"
     llm_timeout: float = 60.0
     # 瞬时错误（429 / 5xx / 网络超时）的指数退避重试次数；鉴权错误不重试
     llm_max_retries: int = 2
@@ -128,13 +128,16 @@ class Settings(BaseSettings):
     harness_delegate_timeout_seconds: float = 90.0
     # 模型分层：planner 用轻量模型做路由/单步判断，reasoner 用深度模型做最终收口/证据自检
     llm_planner_model: str = ""
-    llm_reasoner_model: str = "gpt-5.4"
+    llm_reasoner_model: str = "gpt-5.6-luna"
     harness_tool_timeout_seconds: float = 30.0
     harness_tool_collection_timeout_seconds: float = 5.0
     harness_tool_max_output_chars: int = 6000
     # 工具瞬时错误（超时/网络/5xx）的有限重试次数；鉴权/权限类错误不重试
     harness_tool_max_retries: int = 1
     harness_tool_retry_backoff_seconds: float = 0.5
+    # Omit a terminal non-retryable tool from later model menus in one run.
+    # False restores the previous behavior of re-offering it.
+    harness_failed_tool_suppression_enabled: bool = True
     # 连续多少步“重复工具调用且无新增证据”后提前收尾，防止空转
     harness_no_progress_limit: int = 2
     # harness 直连日志类工具时，对超大输出走 analyze_logs 聚类摘要而非硬截断
@@ -149,6 +152,9 @@ class Settings(BaseSettings):
     harness_final_answer_replacement_enabled: bool = True
     # 计划 required_evidence 与成功工具名做类型细匹配（M1 W2）
     harness_evidence_match_enabled: bool = True
+    # Public SSE progress details: safe plan/result/evidence summaries. Set
+    # false to restore the minimal pre-detail public event contract.
+    harness_public_progress_details_enabled: bool = True
     # mid-loop / post re-evidence 规则 replan（M1 W3）
     harness_replan_enabled: bool = True
     harness_replan_max_times: int = 1
@@ -213,10 +219,8 @@ class Settings(BaseSettings):
     harness_llm_planning_enabled: bool = False
     harness_llm_verify_enabled: bool = False
 
-    # Stateful Harness context whiteboard（默认开启，主路径用 Redis/DB 白板）。
-    # 主路径：True（ContextState 白板）。False = legacy ContextBuilder，
-    # 仅作 rebuild/fallback（见 docs/pilot/context-dual-path.md；H4 收敛，不删代码）。
-    # DEPRECATED 语义：legacy 路径不再接收新特性；新能力只加在 stateful 路径。
+    # Stateful Harness context renderer（默认开启）。ContextRepository 始终拥有
+    # 运行时加载和持久化；False 仅选择兼容的 LLM 视图渲染，不会回退存储路径。
     harness_stateful_context_enabled: bool = True
     # rebuild-from-turns：从 recent_turns 重建白板（resume / 冷启动）。
     harness_context_rebuild_from_turns_enabled: bool = True
@@ -225,6 +229,10 @@ class Settings(BaseSettings):
     harness_context_db_snapshot_enabled: bool = True
     harness_context_patch_history_limit: int = 200
     harness_context_tools_enabled: bool = True
+    # When the whiteboard view + turn history are already in the model prompt,
+    # omit context_read by default (note/attachment tools still register).
+    # Set true only for debugging section-level re-reads.
+    harness_context_read_when_view_injected: bool = False
     # Context deduplication / attachment prompt controls.  Each switch is
     # independently reversible so a rollout can fall back without changing
     # the stateful-context storage contract.
@@ -234,10 +242,6 @@ class Settings(BaseSettings):
     harness_context_view_dedup_tool_evidence: bool = True
     harness_context_size_metrics_enabled: bool = False
     # Unified ContextRepository (single load + atomic turn/projection commit).
-    # Default false preserves the existing dual-path behaviour; enable only after
-    # migration dry-run / canary approval (plan 2026-07-19-unified-context-repository).
-    harness_unified_context_repository_enabled: bool = False
-
     # 日志分析管线（处理上万行日志）
     # 进入聚类前允许处理的最大原始行数（超出按时间倒序截断并提示）
     # 注意：原 20000 会触发 5~10 个 Map-Reduce chunk（每个 10~30s）远超总闸门

@@ -6,13 +6,11 @@ from collections.abc import Sequence
 from typing import Any
 
 from app.agent.context.integration import stamp_recent_turns
-from app.agent.context.operations import merge_active_attachment_refs
 from app.agent.context.state import AgentContextState
 from app.agent.harness.state import HarnessState
 from app.agent.stream_common import TIMELINE_EVENT_TYPES
 from app.config import config
 from app.core.llm_client import ChatMessage, LLMClient, get_default_llm_client
-from app.core.runtime_tools import RuntimeTool
 from app.services.attachment_reference_service import strip_attachment_wrapper
 from app.services.harness_checkpoint import CheckpointResume
 
@@ -28,54 +26,6 @@ class HarnessCheckpointOpsMixin:
         """
         return await get_default_llm_client()
 
-    async def _rebuild_context_state_from_legacy(
-        self,
-        *,
-        owner_key: str,
-        session_id: str,
-        message: str,
-        tools: Sequence[RuntimeTool],
-        focus_hint: str,
-        llm_client: Any,
-    ) -> AgentContextState:
-        """Cold-start ContextState from the legacy ContextBuilder.
-
-        This is only used after Redis and DB snapshot both miss. The normal
-        stateful path must not call this method, because it may read
-        conversation turns and rolling summary data.
-        """
-        legacy = await self.context_builder.abuild(
-            message=message,
-            owner_key=owner_key,
-            session_id=session_id,
-            tools=tools,
-            focus_hint=focus_hint,
-            llm_client=llm_client,
-        )
-        rebuilt = AgentContextState(owner_key=owner_key, session_id=session_id)
-        stamp_recent_turns(
-            rebuilt,
-            turns=[
-                {"role": item.role, "content": item.content}
-                for item in legacy.history_messages
-                if item.content
-            ],
-            last_turn_index=len(legacy.history_messages),
-            history_limit=int(getattr(config, "harness_context_patch_history_limit", 200)),
-        )
-        legacy_refs = [
-            ref.to_dict()
-            for ref in getattr(legacy, "active_attachments", ()) or ()
-            if hasattr(ref, "to_dict")
-        ]
-        if legacy_refs:
-            merge_active_attachment_refs(
-                rebuilt,
-                legacy_refs,
-                history_limit=int(getattr(config, "harness_context_patch_history_limit", 200)),
-            )
-        return rebuilt
-
     @staticmethod
     def _recent_dicts_to_messages(items: Sequence[dict[str, Any]]) -> list[ChatMessage]:
         messages: list[ChatMessage] = []
@@ -90,15 +40,9 @@ class HarnessCheckpointOpsMixin:
     def _context_snapshot_ref(context_state: AgentContextState | None) -> str | None:
         if context_state is None:
             return None
-        from app.services.context_repository import unified_context_repository_enabled
+        from app.agent.context.unified import inflight_context_ref
 
-        if unified_context_repository_enabled():
-            from app.agent.context.unified import inflight_context_ref
-
-            return inflight_context_ref(
-                context_state._runtime_run_id or context_state.session_id
-            )
-        return f"{context_state.owner_key}:{context_state.session_id}:v{int(context_state.version)}"
+        return inflight_context_ref(context_state._runtime_run_id or context_state.session_id)
 
     @staticmethod
     def _stamp_current_turn(

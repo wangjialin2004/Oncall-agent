@@ -1,5 +1,7 @@
 """Knowledge retrieval runtime tool."""
 
+from typing import Any
+
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -22,15 +24,25 @@ class RetrieveKnowledgeArgs(BaseModel):
     query: str = Field(description="User question or search query")
 
 
-def _retrieve_knowledge(query: str) -> tuple[str, list[RetrievedDocument]]:
+def _retrieve_knowledge(query: str) -> tuple[str, list[RetrievedDocument]] | dict[str, Any]:
     """Retrieve relevant knowledge base context for a user question."""
     try:
         logger.info(f"Knowledge retrieval tool called: query='{query}'")
+        request_context = get_request_context()
+        if bool(getattr(config, "rag_tenant_scope_enabled", True)) and request_context is None:
+            logger.warning("Knowledge retrieval skipped because request scope is absent.")
+            return {
+                "success": False,
+                "status": "error",
+                "error_code": "missing_request_scope",
+                "retryable": False,
+                "message": "知识检索需要有效的请求范围，未返回知识证据。",
+            }
 
         results = vector_search_service.search(
             query,
             top_k=config.rag_top_k,
-            context=get_request_context(),
+            context=request_context,
         )
 
         if not results:
@@ -45,7 +57,13 @@ def _retrieve_knowledge(query: str) -> tuple[str, list[RetrievedDocument]]:
 
     except Exception as e:
         logger.error(f"Knowledge retrieval tool failed: {e}")
-        return f"检索知识时发生错误: {str(e)}", []
+        return {
+            "success": False,
+            "status": "error",
+            "error_code": "knowledge_retrieval_failed",
+            "retryable": True,
+            "message": "知识库暂时不可用，未返回知识证据。",
+        }
 
 
 retrieve_knowledge = make_runtime_tool(

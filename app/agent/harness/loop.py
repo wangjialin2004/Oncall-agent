@@ -171,7 +171,7 @@ class HarnessService(
                                 runtime.get("context_state"),
                             )
                             runtime["unified_commit_done"] = True
-                            # Marker for API to skip legacy _persist_turn without
+                            # Marker for the API's unified terminal commit without
                             # changing SSE type semantics.
                             event = dict(event)
                             event["_unified_context_commit_attempted"] = True

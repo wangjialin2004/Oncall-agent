@@ -130,13 +130,21 @@ function ActivityDetails({
   activity,
   ownerTitle,
   showHeader,
+  compact = false,
 }: {
   activity: ProcessActivity;
   ownerTitle: string;
   showHeader: boolean;
+  compact?: boolean;
 }) {
   return (
-    <section className="process-activity">
+    <section
+      className={`process-activity${compact ? " process-activity--expert-card" : ""}${
+        activity.parallelGroupId ? " process-activity--parallel" : ""
+      }`}
+      data-expert={activity.expertKey || undefined}
+      data-parallel-group={activity.parallelGroupId || undefined}
+    >
       {showHeader ? (
         <header>
           <strong>{activity.title}</strong>
@@ -152,6 +160,33 @@ function ActivityDetails({
       ))}
     </section>
   );
+}
+
+type ActivityRenderItem =
+  | { kind: "single"; activity: ProcessActivity }
+  | { kind: "parallel"; groupId: string; activities: ProcessActivity[] };
+
+function groupActivitiesForRender(activities: ProcessActivity[]): ActivityRenderItem[] {
+  const items: ActivityRenderItem[] = [];
+  const seenGroups = new Set<string>();
+  for (const activity of activities) {
+    const groupId = activity.parallelGroupId;
+    if (!groupId) {
+      items.push({ kind: "single", activity });
+      continue;
+    }
+    if (seenGroups.has(groupId)) {
+      continue;
+    }
+    seenGroups.add(groupId);
+    const group = activities.filter((item) => item.parallelGroupId === groupId);
+    if (group.length <= 1) {
+      items.push({ kind: "single", activity: group[0] ?? activity });
+    } else {
+      items.push({ kind: "parallel", groupId, activities: group });
+    }
+  }
+  return items;
 }
 
 function ProcessStepRow({ step, defaultExpanded }: { step: ProcessStep; defaultExpanded: boolean }) {
@@ -198,14 +233,41 @@ function ProcessStepRow({ step, defaultExpanded }: { step: ProcessStep; defaultE
             ))}
             {step.activities.length > 0 ? (
               <div className="process-activities" aria-label={`${step.title}活动`}>
-                {step.activities.map((activity) => (
-                  <ActivityDetails
-                    key={activity.id}
-                    activity={activity}
-                    ownerTitle={activity.title}
-                    showHeader={step.activities.length > 1 || activity.title !== step.title}
-                  />
-                ))}
+                {groupActivitiesForRender(step.activities).map((item) => {
+                  if (item.kind === "parallel") {
+                    return (
+                      <div
+                        key={`parallel-${item.groupId}`}
+                        className="process-parallel-experts"
+                        aria-label="并行专家"
+                      >
+                        <div className="process-parallel-experts__label">
+                          并行专家 · {item.activities.length} 路
+                        </div>
+                        <div className="process-parallel-experts__grid">
+                          {item.activities.map((activity) => (
+                            <ActivityDetails
+                              key={activity.id}
+                              activity={activity}
+                              ownerTitle={activity.title}
+                              showHeader
+                              compact
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  }
+                  const activity = item.activity;
+                  return (
+                    <ActivityDetails
+                      key={activity.id}
+                      activity={activity}
+                      ownerTitle={activity.title}
+                      showHeader={step.activities.length > 1 || activity.title !== step.title}
+                    />
+                  );
+                })}
               </div>
             ) : null}
           </div>

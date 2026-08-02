@@ -10,9 +10,9 @@ from pathlib import Path
 from app.agent.context.operations import append_recent_turns, set_intent
 from app.agent.context.persistence import state_to_dict
 from app.agent.context.state import AgentContextState
-from app.services.context_snapshot_service import ContextSnapshotService
 from app.services.conversation_service import ConversationService
 from scripts import audit_context_storage as auditor
+from tests._context_db import initialize_context_db
 
 
 def _fingerprint(path: Path) -> tuple[int, int, str]:
@@ -20,9 +20,38 @@ def _fingerprint(path: Path) -> tuple[int, int, str]:
     return path.stat().st_mtime_ns, path.stat().st_size, hashlib.sha256(data).hexdigest()
 
 
+def _write_legacy_projection(db_path: Path, state: AgentContextState) -> None:
+    """Seed pre-repository data for audit compatibility tests only."""
+    timestamp = "2026-08-01T00:00:00Z"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO conversations (owner_key, session_id, title, created_at, updated_at)
+            VALUES (?, ?, '', ?, ?)
+            ON CONFLICT(owner_key, session_id) DO NOTHING
+            """,
+            (state.owner_key, state.session_id, timestamp, timestamp),
+        )
+        connection.execute(
+            """
+            UPDATE conversations
+            SET context_state_json = ?, context_state_version = ?,
+                context_state_updated_at = ?
+            WHERE owner_key = ? AND session_id = ?
+            """,
+            (
+                json.dumps(state_to_dict(state), ensure_ascii=False),
+                state.schema_version,
+                timestamp,
+                state.owner_key,
+                state.session_id,
+            ),
+        )
+
+
 def _seed_db(db_path: Path) -> None:
+    initialize_context_db(db_path)
     conversations = ConversationService(db_path=db_path)
-    snapshots = ContextSnapshotService(db_path=db_path)
 
     conversations.append_turn(
         owner_key="owner-a",
@@ -40,21 +69,13 @@ def _seed_db(db_path: Path) -> None:
         [{"role": "user", "text": "hello"}, {"role": "assistant", "text": "world"}],
         last_turn_index=1,
     )
-    snapshots.save_context_snapshot(
-        owner_key="owner-a",
-        session_id="sess-aligned",
-        state=state,
-    )
+    _write_legacy_projection(db_path, state)
 
     # Snapshot-only ahead session (no turns).
     ahead = AgentContextState(owner_key="owner-b", session_id="sess-ahead")
     set_intent(ahead, current_question="ghost", current_goal="ghost")
     append_recent_turns(ahead, [{"role": "user", "text": "ghost"}], last_turn_index=5)
-    snapshots.save_context_snapshot(
-        owner_key="owner-b",
-        session_id="sess-ahead",
-        state=ahead,
-    )
+    _write_legacy_projection(db_path, ahead)
 
     # Turn-only session.
     conversations.append_turn(

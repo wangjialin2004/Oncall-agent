@@ -21,7 +21,7 @@ class FakeRouter:
         self.route = route
         self.aux_routes = aux_routes
 
-    async def _resolve_route(self, message: str) -> RouteDecision:
+    async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
         return RouteDecision(
             route=self.route,
             reason="fake_focus",

@@ -67,10 +67,14 @@ function normalizeTimelineEvents(events: TimelineEvent[]): TimelineEvent[] {
   const seen = new Set<string>();
   const normalized: TimelineEvent[] = [];
   for (const event of events) {
+    const activityId = String(event.payload?.tool_call_id ?? "");
+    const parentActivityId = String(event.payload?.parent_tool_call_id ?? "");
     const key = [
       event.type,
       event.span_id,
       event.evidence_id,
+      activityId,
+      parentActivityId,
       event.agent,
       event.tool,
       event.stage,
@@ -109,6 +113,12 @@ function weakAcceptIfNeeded(prev: AgentRun | undefined): void {
 type AuthState = { token: string; username: string } | null;
 
 export default function App() {
+  const inlineActivityEnabled =
+    import.meta.env.VITE_INLINE_AGENT_ACTIVITY_ENABLED !== "false" &&
+    import.meta.env.VITE_INLINE_AGENT_ACTIVITY_ENABLED !== "0";
+  const granularActivityEnabled =
+    import.meta.env.VITE_GRANULAR_AGENT_ACTIVITY_ENABLED !== "false" &&
+    import.meta.env.VITE_GRANULAR_AGENT_ACTIVITY_ENABLED !== "0";
   const saved = loadAuth();
   const [auth, setAuth] = useState<AuthState>(saved);
   const [authBootstrapping, setAuthBootstrapping] = useState<boolean>(Boolean(saved));
@@ -219,6 +229,9 @@ export default function App() {
           content: turn.assistant_answer,
           status: "completed",
         });
+        const suggestedActions = (turn.events ?? []).find(
+          (event) => event.type === "decision_event" && event.stage === "suggested_actions",
+        )?.actions;
         restoredRuns[assistantId] = makeRun({
           runId: assistantId,
           sessionId: sid,
@@ -228,6 +241,7 @@ export default function App() {
           answer: turn.assistant_answer,
           caseId: turn.case_id ?? "",
           userMessage: turn.user_message,
+          suggestedActions,
         });
         lastAssistantId = assistantId;
       }
@@ -538,12 +552,16 @@ export default function App() {
     }
   }
 
-  async function handleFeedback(kind: "adopted" | "corrected", actualRootCause = "") {
-    const current = runs[selectedId];
+  async function handleFeedback(
+    runId: string,
+    kind: "adopted" | "corrected",
+    actualRootCause = "",
+  ) {
+    const current = runs[runId];
     if (!current || !current.answer || !current.userMessage || current.feedback !== "") {
       return;
     }
-    setRuns((c) => ({ ...c, [selectedId]: { ...c[selectedId], feedback: kind } }));
+    setRuns((c) => ({ ...c, [runId]: { ...c[runId], feedback: kind } }));
     try {
       // Prefer confirming an existing auto-distill draft when present.
       const draftId = current.distillDraft?.experience_id;
@@ -551,7 +569,7 @@ export default function App() {
         await confirmDistillDraft(draftId, "panel-adopt");
         setRuns((c) => ({
           ...c,
-          [selectedId]: { ...c[selectedId], distillStatus: "confirmed" },
+          [runId]: { ...c[runId], distillStatus: "confirmed" },
         }));
         return;
       }
@@ -568,18 +586,18 @@ export default function App() {
     }
   }
 
-  async function handleDistill(action: "confirm" | "reject") {
-    const current = runs[selectedId];
+  async function handleDistill(runId: string, action: "confirm" | "reject") {
+    const current = runs[runId];
     const draftId = current?.distillDraft?.experience_id;
     if (!current || !draftId || current.distillStatus) {
       return;
     }
     setRuns((c) => ({
       ...c,
-      [selectedId]: {
-        ...c[selectedId],
+      [runId]: {
+        ...c[runId],
         distillStatus: action === "confirm" ? "confirmed" : "rejected",
-        feedback: action === "confirm" ? "adopted" : c[selectedId].feedback,
+        feedback: action === "confirm" ? "adopted" : c[runId].feedback,
       },
     }));
     try {
@@ -593,8 +611,8 @@ export default function App() {
     }
   }
 
-  async function handleConfirmSuggestion(actionId: string) {
-    const current = runs[selectedId];
+  async function handleConfirmSuggestion(runId: string, actionId: string) {
+    const current = runs[runId];
     if (!current || !actionId) {
       return;
     }
@@ -605,9 +623,9 @@ export default function App() {
     // Optimistic mark — confirm is audit-only and should feel instant.
     setRuns((c) => ({
       ...c,
-      [selectedId]: {
-        ...c[selectedId],
-        confirmedActionIds: [...(c[selectedId].confirmedActionIds ?? []), actionId],
+      [runId]: {
+        ...c[runId],
+        confirmedActionIds: [...(c[runId].confirmedActionIds ?? []), actionId],
       },
     }));
     try {
@@ -620,9 +638,9 @@ export default function App() {
       // Roll back only this action id so other confirms stay.
       setRuns((c) => ({
         ...c,
-        [selectedId]: {
-          ...c[selectedId],
-          confirmedActionIds: (c[selectedId].confirmedActionIds ?? []).filter((id) => id !== actionId),
+        [runId]: {
+          ...c[runId],
+          confirmedActionIds: (c[runId].confirmedActionIds ?? []).filter((id) => id !== actionId),
         },
       }));
     }
@@ -765,6 +783,9 @@ export default function App() {
           <ChatWorkspace
             mode={mode}
             messages={messages}
+            runs={runs}
+            inlineActivityEnabled={inlineActivityEnabled}
+            granularActivityEnabled={granularActivityEnabled}
             runStatus={isStreaming ? "running" : "idle"}
             pendingAttachments={pendingAttachments}
             selectedId={selectedId}
@@ -776,6 +797,9 @@ export default function App() {
             onRemoveAttachment={handleRemoveAttachment}
             onUploadFile={handleUploadFile}
             onSelectMessage={setSelectedId}
+            onRunFeedback={handleFeedback}
+            onRunDistill={handleDistill}
+            onRunConfirmSuggestion={handleConfirmSuggestion}
             onStop={handleStop}
           />
         )
@@ -789,12 +813,16 @@ export default function App() {
               指标/日志结果中，帮助区分噪声与真实异常。
             </p>
           </div>
-        ) : (
+        ) : inlineActivityEnabled ? undefined : (
           <AgentProcessPanel
             run={panelRun}
-            onFeedback={handleFeedback}
-            onDistill={handleDistill}
-            onConfirmSuggestion={handleConfirmSuggestion}
+            onFeedback={(kind, actualRootCause) =>
+              handleFeedback(selectedId, kind, actualRootCause)
+            }
+            onDistill={(action) => handleDistill(selectedId, action)}
+            onConfirmSuggestion={(actionId) =>
+              handleConfirmSuggestion(selectedId, actionId)
+            }
           />
         )
       }

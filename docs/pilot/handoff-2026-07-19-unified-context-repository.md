@@ -2,10 +2,9 @@
 
 > **交接日期**：2026-07-19  
 > **工作树**：`codex/publish-current-worktree`  
-> **当前 HEAD**：`634851f`；本棒实现仍在 dirty worktree，尚未提交  
+> **当前状态（2026-07-23 更新）**：live schema v3 + compact apply + `.env` canary 已完成；**请改读最新交接**  
+> **最新交接**：[统一上下文 live canary 与运行时收口（2026-07-23）](./handoff-2026-07-23-unified-context-runtime-canary.md)  
 > **本棒主题**：合并 structured / legacy 上下文加载与保存生命周期，建立 single repository、dual renderer 和原子 turn/projection commit  
-> **产品状态**：L3 Conditional 不变；本棒只完成 gated 数据面能力，尚未完成 live rollout  
-> **目标读者**：接手 live schema v3、projection migration、Redis 审计和 canary 的工程同学  
 > **本棒计划**：[上下文加载与持久化合并](../../plan/2026-07-19-unified-context-repository.md)  
 > **实施进度**：[进度与验证证据](../../plan/2026-07-19-unified-context-repository-progress.md)  
 > **最新复审**：[统一上下文仓储修复复审](../reviews/completion-review-2026-07-19-unified-context-repository-2.md)
@@ -22,14 +21,14 @@
 | Compact projection v2 | ✅ live apply 完成；去掉 identity scope、recent-turn 文本和 durable `patch_tail` |
 | Redis committed / inflight | ✅ 代码语义已分离；live 只读聚合完成；旧 v1 cache 可 miss 回源 |
 | 首次 completion review | ✅ 6 个 P1、2 个 P2 与 scoped Ruff 问题均关闭 |
-| 本地门禁 | ✅ 115 focused（2026-07-19）；2026-07-23 rollout 后 41 focused 再验证通过 |
-| Live SQLite | ✅ schema **v3**；projection apply 完成；62 会话 / 57 turns |
-| Redis 实例审计 | ✅ ping_ok；8 context keys；schema v1 旧 cache；未做删除 |
+| 本地门禁 | ✅ 115 focused（2026-07-19）；2026-07-23 rollout 后 focused / E2E 再验证通过 |
+| Live SQLite | ✅ schema **v3**；projection apply 完成 |
+| Redis 实例审计 | ✅ ping_ok；未做删除 |
 | Canary | ✅ `.env` 已设 `HARNESS_UNIFIED_CONTEXT_REPOSITORY_ENABLED=true` |
 | 代码 / example 默认值 | 🔒 仍为 `false`；默认 true 与 live P50/P95 对照仍待单独批准 |
-| 工作树 | ⚠️ 包含本棒和用户/前序未提交改动；禁止 reset、checkout 或整树 `git add -A` |
+| 后续运行时收口 | ➡️ 见 [2026-07-23 交接](./handoff-2026-07-23-unified-context-runtime-canary.md)（动态 plan、白板工具、E2E 规则） |
 
-**接手人一句话**：live schema v3 与 compact projection 已落地，`.env` canary 已打开统一路径；代码默认仍是 false，可随时回滚。下一步是新会话 two-turn / 写放大 / P50-P95 对照，以及是否把默认改 true。
+**接手人一句话**：架构与 live 数据面以 2026-07-19 本文 + 进度文档为准；**当前运行 canary / 工具 / plan / E2E 状态以 2026-07-23 交接为准**。
 
 ## 1. 必读文档
 

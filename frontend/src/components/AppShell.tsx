@@ -5,7 +5,7 @@ import { ResizableSplitter } from "./ResizableSplitter";
 type AppShellProps = {
   sidebar: ReactNode;
   main: ReactNode;
-  panel: ReactNode;
+  panel?: ReactNode;
 };
 
 const PROCESS_PANEL_MIN = 320;
@@ -45,17 +45,21 @@ export function AppShell({ sidebar, main, panel }: AppShellProps) {
   }, []);
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${panel ? "" : " has-no-process-panel"}`}>
       <aside className="sidebar">{sidebar}</aside>
       <main className="workspace">{main}</main>
-      <ResizableSplitter
-        min={PROCESS_PANEL_MIN}
-        max={PROCESS_PANEL_MAX}
-        defaultWidth={computeDefaultPanelWidth()}
-        storageKey={PROCESS_PANEL_STORAGE_KEY}
-        targetSelector=".process-panel"
-      />
-      <aside className="process-panel" ref={panelRef}>{panel}</aside>
+      {panel ? (
+        <>
+          <ResizableSplitter
+            min={PROCESS_PANEL_MIN}
+            max={PROCESS_PANEL_MAX}
+            defaultWidth={computeDefaultPanelWidth()}
+            storageKey={PROCESS_PANEL_STORAGE_KEY}
+            targetSelector=".process-panel"
+          />
+          <aside className="process-panel" ref={panelRef}>{panel}</aside>
+        </>
+      ) : null}
     </div>
   );
 }

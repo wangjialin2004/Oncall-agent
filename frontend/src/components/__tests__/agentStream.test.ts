@@ -104,6 +104,74 @@ describe("translateBackendEvent", () => {
     expect(translateBackendEvent(ev, "auto")).toBe(ev);
   });
 
+  it("drops private tool payload fields defensively", () => {
+    const result = translateBackendEvent(
+      {
+        type: "tool_event",
+        agent: "harness",
+        tool: "search_app_logs",
+        status: "completed",
+        trace_id: "secret-trace",
+        evidence_id: "secret-call",
+        payload: {
+          arguments: { keyword: "SECRET_ARGUMENT" },
+          result: "SECRET_RESULT",
+          tool_call_id: "activity-1",
+          delegated_expert: "log",
+        },
+      },
+      "auto",
+    );
+
+    expect(result).toMatchObject({
+      type: "tool_event",
+      tool: "search_app_logs",
+      payload: { tool_call_id: "activity-1", delegated_expert: "log" },
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("secret-trace");
+    expect(serialized).not.toContain("secret-call");
+    expect(serialized).not.toContain("SECRET_ARGUMENT");
+    expect(serialized).not.toContain("SECRET_RESULT");
+  });
+
+  it("keeps safe public progress details and redacts their display values", () => {
+    const result = translateBackendEvent(
+      {
+        type: "tool_event",
+        tool: "query_metrics",
+        status: "completed",
+        payload: {
+          tool_call_id: "activity-1",
+          result_preview: "status=success token=SECRET email=a@example.com",
+          result_fields: [
+            { label: "status", value: "success" },
+            { label: "memory.total_bytes", value: "16353755136" },
+          ],
+          result_items: ["CPU 91%", "手机号 13800138000"],
+        },
+      },
+      "auto",
+    );
+
+    expect(result).toMatchObject({
+      type: "tool_event",
+      payload: {
+        tool_call_id: "activity-1",
+        result_fields: [
+          { label: "status", value: "success" },
+          { label: "memory.total_bytes", value: "16353755136" },
+        ],
+      },
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).toContain("status=success token=[REDACTED]");
+    expect(serialized).not.toContain("SECRET");
+    expect(serialized).not.toContain("a@example.com");
+    expect(serialized).not.toContain("13800138000");
+    expect(serialized).toContain("16353755136");
+  });
+
   it("translates checkpoint_resume agent_event to a banner event", () => {
     const payload = {
       type: "agent_event",

@@ -50,12 +50,15 @@ from app.services.attachment_reference_service import (
 
 from app.services.conversation_service import ConversationService
 
+from app.services.context_repository import ContextRepository, ContextRepositorySettings
+
 from app.services.harness_checkpoint import HarnessCheckpointStore
 
 from app.services.router_service import RouteDecision, RouterService
 from app.services.session_scope_service import AuthenticatedPrincipal
 
 from tests._fake_redis import FakeRedis
+from tests._context_db import initialize_context_db
 
 
 
@@ -95,7 +98,7 @@ class FakeRouter:
 
 
 
-    async def _resolve_route(self, message: str) -> RouteDecision:
+    async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
 
         return RouteDecision(route=self.route, reason="fake_focus", confidence=0.8)
 
@@ -202,6 +205,7 @@ def _disable_extra_harness_loops(monkeypatch) -> None:
         ("long_term_memory_distill_enabled", False),
         ("harness_anti_pattern_capture_enabled", False),
         ("hitl_suggested_actions_enabled", False),
+        ("harness_llm_planning_enabled", False),
     ):
         monkeypatch.setattr(f"app.agent.harness.loop.config.{attr}", value, raising=False)
         monkeypatch.setattr(f"app.config.config.{attr}", value, raising=False)
@@ -800,6 +804,25 @@ def _test_principal(owner_key: str = "owner-1") -> AuthenticatedPrincipal:
     )
 
 
+def _configure_unified_conversation(monkeypatch, tmp_path, filename: str):
+    from app.agent.context import unified as unified_mod
+
+    db_path = initialize_context_db(tmp_path / filename)
+    conversations = ConversationService(db_path)
+    repository = ContextRepository(
+        db_path=db_path,
+        settings=ContextRepositorySettings(redis_enabled=False, db_snapshot_enabled=True),
+    )
+    real_build = unified_mod.build_completion_committer
+
+    def build_committer(**kwargs):
+        kwargs["repository"] = repository
+        return real_build(**kwargs)
+
+    monkeypatch.setattr("app.api.assistant.build_completion_committer", build_committer)
+    return conversations, repository
+
+
 
 
 
@@ -810,8 +833,6 @@ async def test_assistant_stream_uses_raw_session_id_for_harness(monkeypatch):
     fake_harness = FakeStreamService()
 
     monkeypatch.setattr("app.api.assistant.harness_service", fake_harness)
-
-    monkeypatch.setattr("app.api.assistant._persist_turn", lambda *args, **kwargs: None)
 
 
 
@@ -843,8 +864,6 @@ async def test_assistant_stream_always_uses_harness_when_flag_is_false(monkeypat
 
     monkeypatch.setattr("app.api.assistant.harness_service", fake_harness)
 
-    monkeypatch.setattr("app.api.assistant._persist_turn", lambda *args, **kwargs: None)
-
 
 
     response = await assistant(
@@ -874,8 +893,6 @@ async def test_assistant_stream_injects_attachment_context_into_message(monkeypa
     fake_harness = FakeStreamService()
 
     monkeypatch.setattr("app.api.assistant.harness_service", fake_harness)
-
-    monkeypatch.setattr("app.api.assistant._persist_turn", lambda *args, **kwargs: None)
 
     monkeypatch.setattr(
 
@@ -925,7 +942,9 @@ async def test_assistant_history_keeps_attachment_context_for_follow_up(tmp_path
 
     _disable_extra_harness_loops(monkeypatch)
 
-    conversation_service = ConversationService(tmp_path / "conversation.db")
+    conversation_service, repository = _configure_unified_conversation(
+        monkeypatch, tmp_path, "conversation.db"
+    )
 
     first_answer = "Attachment content is software architecture review material."
 
@@ -955,6 +974,7 @@ async def test_assistant_history_keeps_attachment_context_for_follow_up(tmp_path
 
         limits=HarnessLimits(max_steps=3, token_budget=1000, timeout_seconds=5),
         checkpoint_store=None,
+        context_repository=repository,
 
     )
 
@@ -1051,7 +1071,7 @@ async def test_harness_error_falls_back_to_knowledge_expert():
 
     class FailingRouter:
 
-        async def _resolve_route(self, message: str) -> RouteDecision:
+        async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
 
             raise RuntimeError("router down")
 
@@ -1113,7 +1133,7 @@ async def test_harness_fallback_uses_raw_vector_when_knowledge_is_empty():
 
     class FailingRouter:
 
-        async def _resolve_route(self, message: str) -> RouteDecision:
+        async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
 
             raise RuntimeError("router down")
 
@@ -1182,7 +1202,9 @@ async def test_assistant_harness_two_turn_flow_persists_and_reloads_history(
 ):
     _disable_extra_harness_loops(monkeypatch)
 
-    conversation_service = ConversationService(tmp_path / "conversation.db")
+    conversation_service, repository = _configure_unified_conversation(
+        monkeypatch, tmp_path, "conversation.db"
+    )
 
     first_answer = "first persisted answer at 10:03"
 
@@ -1216,6 +1238,7 @@ async def test_assistant_harness_two_turn_flow_persists_and_reloads_history(
 
         limits=HarnessLimits(max_steps=3, token_budget=1000, timeout_seconds=5),
         checkpoint_store=None,
+        context_repository=repository,
 
     )
 
@@ -1611,7 +1634,11 @@ def _checkpoint_messages(tool_name: str) -> list[ChatMessage]:
 
 @pytest.mark.asyncio
 
-async def test_harness_checkpoint_resume_replays_from_next_step_without_skipping():
+async def test_harness_checkpoint_resume_replays_from_next_step_without_skipping(monkeypatch):
+
+    monkeypatch.setattr(
+        "app.agent.harness.loop.config.harness_llm_planning_enabled", False
+    )
 
     fake_redis = FakeRedis()
 
@@ -1802,8 +1829,11 @@ async def test_harness_checkpoint_resume_continues_despite_non_whitelisted_histo
 
 
 @pytest.mark.asyncio
-async def test_harness_checkpoint_resume_close_only_when_override_false():
+async def test_harness_checkpoint_resume_close_only_when_override_false(monkeypatch):
     """Explicit checkpoint_replay=False still forces close-only finalization."""
+    monkeypatch.setattr(
+        "app.agent.harness.loop.config.harness_llm_planning_enabled", False
+    )
     fake_redis = FakeRedis()
     store = HarnessCheckpointStore(
         namespace="test",
@@ -1942,6 +1972,7 @@ async def test_harness_verify_marks_answer_without_tool_evidence_as_degraded(mon
 @pytest.mark.asyncio
 
 async def test_harness_asks_for_missing_metric_subject_after_plan(monkeypatch):
+    _disable_extra_harness_loops(monkeypatch)
     monkeypatch.setattr(
         "app.agent.harness.loop.stateful_context_enabled",
         lambda: False,
@@ -2015,7 +2046,9 @@ async def test_harness_asks_for_missing_metric_subject_after_plan(monkeypatch):
 
 @pytest.mark.asyncio
 
-async def test_harness_delays_missing_param_clarification_until_after_tool_attempt():
+async def test_harness_delays_missing_param_clarification_until_after_tool_attempt(monkeypatch):
+
+    _disable_extra_harness_loops(monkeypatch)
 
     def handler(arguments):
 
@@ -2229,6 +2262,7 @@ async def test_harness_stream_soft_delegation_lets_model_decide(monkeypatch):
 
     from app.config import config as app_config
 
+    _disable_extra_harness_loops(monkeypatch)
 
 
     monkeypatch.setattr(app_config, "harness_force_expert_delegation", False)
@@ -3894,7 +3928,9 @@ async def test_harness_stream_stops_on_no_progress(monkeypatch):
 
 @pytest.mark.asyncio
 
-async def test_harness_stream_runs_log_pipeline_for_large_log_output():
+async def test_harness_stream_runs_log_pipeline_for_large_log_output(monkeypatch):
+
+    _disable_extra_harness_loops(monkeypatch)
 
     log_lines = [f"2026-06-20 10:00:0{i % 10} ERROR upstream timeout id={i}" for i in range(60)]
 
@@ -5273,7 +5309,7 @@ async def test_harness_fallback_timeout_returns_report():
 
     class FailingRouter:
 
-        async def _resolve_route(self, message: str) -> RouteDecision:
+        async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
 
             raise RuntimeError("router down")
 
@@ -5353,7 +5389,7 @@ async def test_harness_outer_timeout_uses_configured_limit(monkeypatch):
 
     class HangingRouter:
 
-        async def _resolve_route(self, message: str) -> RouteDecision:
+        async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
 
             await asyncio.sleep(5)
 
@@ -5498,3 +5534,63 @@ async def test_harness_tool_event_includes_tool_latency_ms(monkeypatch):
     assert "tool_latency_ms" in tool_events[0]["payload"]
 
     assert tool_events[0]["payload"]["tool_latency_ms"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_harness_emits_ordinary_tool_start_before_terminal_event(monkeypatch):
+    _disable_extra_harness_loops(monkeypatch)
+    tool = RuntimeTool(
+        name="visible_probe",
+        description="A probe used to verify lifecycle ordering.",
+        handler=lambda arguments: f"ok:{arguments.get('target', '')}",
+    )
+    fake_llm = FakeLLM(
+        [
+            LLMResponse(
+                content="",
+                raw={},
+                tool_calls=[
+                    ToolCall(
+                        id="call-visible-probe",
+                        name="visible_probe",
+                        arguments={"target": "private-target"},
+                    )
+                ],
+                usage={"total_tokens": 2},
+            ),
+            LLMResponse(content="done", raw={}, usage={"total_tokens": 1}),
+        ]
+    )
+    service = HarnessService(
+        router=FakeRouter(),
+        llm_client=fake_llm,
+        tools=[tool],
+        limits=HarnessLimits(max_steps=3, token_budget=1000, timeout_seconds=5),
+        checkpoint_store=None,
+    )
+
+    events = [
+        event
+        async for event in service.stream(
+            "run the visible probe", session_id="trace-tool-start", owner_key="user-1"
+        )
+    ]
+
+    start_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "agent_event" and event.get("stage") == "tool_start"
+    )
+    terminal_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "tool_event" and event.get("tool") == "visible_probe"
+    )
+    start = events[start_index]
+    assert start_index < terminal_index
+    assert start["status"] == "in_progress"
+    assert start["payload"] == {
+        "tool": "visible_probe",
+        "tool_call_id": "call-visible-probe",
+    }
+    assert "private-target" not in json.dumps(start)

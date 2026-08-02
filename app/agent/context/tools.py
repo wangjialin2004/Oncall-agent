@@ -1,12 +1,16 @@
-"""LLM-exposed context tools.
+"""LLM-exposed whiteboard tools.
 
-Per plan ``plan/2026-07-08-stateful-agent-context.md`` §7 the first version of
-the whiteboard exposes only two tools to the model:
+These tools bind to the current :class:`AgentContextState` whiteboard whether
+it came from the unified repository or the legacy stateful store. They are not
+a separate "stateful storage" path.
 
-- ``context_read`` — read a section (or the full rendered view).
+- ``context_read`` — optional re-read of a section / rendered view. When the
+  harness has already injected the whiteboard and turn history into the model
+  prompt, ``context_read`` is omitted by default to avoid redundant calls.
 - ``context_note`` — append a model-only note (``model_notes``,
   ``pending_hypotheses``, etc.). LLM is **not** allowed to write
   ``observed_facts``, ``identity``, or anything else.
+- ``read_attachment`` — bounded attachment extract for active file refs.
 
 We deliberately do NOT expose ``context_patch`` or ``context_rollback`` — those
 are framework-only debugging affordances.
@@ -290,10 +294,35 @@ def list_advertised_tools() -> list[str]:
     return [td["name"] for td in get_tool_definitions()]
 
 
-def build_runtime_tools(state: AgentContextState) -> list[RuntimeTool]:
-    """Wrap safe context tools as ``RuntimeTool`` instances for the harness."""
+def build_runtime_tools(
+    state: AgentContextState,
+    *,
+    whiteboard_injected: bool = False,
+    include_read: bool | None = None,
+) -> list[RuntimeTool]:
+    """Wrap safe whiteboard tools as ``RuntimeTool`` instances for the harness.
+
+    Parameters
+    ----------
+    whiteboard_injected:
+        True when the harness already put the whiteboard view and turn history
+        into the model prompt. In that case ``context_read`` is redundant and
+        omitted unless ``include_read`` / config force it back on.
+    include_read:
+        Explicit override. ``None`` follows
+        ``harness_context_read_when_view_injected`` when the view is injected,
+        otherwise includes read.
+    """
     if not bool(getattr(config, "harness_context_tools_enabled", True)):
         return []
+
+    if include_read is None:
+        if whiteboard_injected:
+            include_read = bool(
+                getattr(config, "harness_context_read_when_view_injected", False)
+            )
+        else:
+            include_read = True
 
     async def _read(arguments: dict[str, Any]) -> dict[str, Any]:
         return read_context(
@@ -320,26 +349,41 @@ def build_runtime_tools(state: AgentContextState) -> list[RuntimeTool]:
         )
 
     definitions = {td["name"]: td for td in get_tool_definitions()}
-    return [
-        RuntimeTool(
-            name=CONTEXT_READ_NAME,
-            description=str(definitions[CONTEXT_READ_NAME]["description"]),
-            parameters=dict(definitions[CONTEXT_READ_NAME]["parameters"]),
-            handler=_read,
-        ),
-        RuntimeTool(
-            name=CONTEXT_NOTE_NAME,
-            description=str(definitions[CONTEXT_NOTE_NAME]["description"]),
-            parameters=dict(definitions[CONTEXT_NOTE_NAME]["parameters"]),
-            handler=_note,
-        ),
-        RuntimeTool(
-            name=READ_ATTACHMENT_NAME,
-            description=str(definitions[READ_ATTACHMENT_NAME]["description"]),
-            parameters=dict(definitions[READ_ATTACHMENT_NAME]["parameters"]),
-            handler=_read_attachment,
-        ),
-    ]
+    tools: list[RuntimeTool] = []
+    if include_read:
+        read_description = str(definitions[CONTEXT_READ_NAME]["description"])
+        if whiteboard_injected:
+            read_description = (
+                "Re-read a whiteboard section only when the already-injected "
+                "system whiteboard / history is insufficient. Prefer the "
+                "messages already in the prompt. Pass `section` for one of: "
+                "intent, working, evidence, conversation, output."
+            )
+        tools.append(
+            RuntimeTool(
+                name=CONTEXT_READ_NAME,
+                description=read_description,
+                parameters=dict(definitions[CONTEXT_READ_NAME]["parameters"]),
+                handler=_read,
+            )
+        )
+    tools.extend(
+        [
+            RuntimeTool(
+                name=CONTEXT_NOTE_NAME,
+                description=str(definitions[CONTEXT_NOTE_NAME]["description"]),
+                parameters=dict(definitions[CONTEXT_NOTE_NAME]["parameters"]),
+                handler=_note,
+            ),
+            RuntimeTool(
+                name=READ_ATTACHMENT_NAME,
+                description=str(definitions[READ_ATTACHMENT_NAME]["description"]),
+                parameters=dict(definitions[READ_ATTACHMENT_NAME]["parameters"]),
+                handler=_read_attachment,
+            ),
+        ]
+    )
+    return tools
 
 
 def _block_to_jsonable(block: Any) -> dict[str, Any]:

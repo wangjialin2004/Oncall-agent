@@ -60,7 +60,7 @@ _CURRENT_VERSION = 2  # bumped: meta now carries context_version/context_snapsho
 #: Schema version stored in ``CheckpointResume.context_snapshot_version`` to
 #: signal that the checkpoint intentionally does NOT carry the full context
 #: body. The harness should recover context via
-#: :class:`app.agent.context.store.ContextStateStore` instead.
+#: :class:`app.services.context_repository.ContextRepository` instead.
 _CHECKPOINT_CONTEXT_BODY_DROPPED_VERSION = 2
 
 
@@ -93,8 +93,8 @@ class CheckpointResume:
 
     Per plan ``plan/2026-07-08-stateful-agent-context.md`` §9, ``messages``
     remains for the migration window — new code still writes them for replay,
-    but :class:`app.agent.context.store.ContextStateStore` is the canonical
-    source of context. ``context_version`` and ``context_snapshot_ref`` are
+    but :class:`app.services.context_repository.ContextRepository` is the
+    canonical source of context. ``context_version`` and ``context_snapshot_ref`` are
     the only authoritative pointers the harness needs to resume correctly.
     """
 
@@ -187,7 +187,7 @@ class HarnessCheckpointStore:
         context path: callers should pass ``persist_messages=False`` once the
         whiteboard is the canonical source. ``context_version`` /
         ``context_snapshot_ref`` are recorded in the meta so resume can ask
-        :class:`ContextStateStore` to rehydrate instead of replaying messages.
+        :class:`ContextRepository` to rehydrate instead of replaying messages.
         """
         try:
             async with self._lock:

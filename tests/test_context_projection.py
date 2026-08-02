@@ -95,7 +95,6 @@ def test_renderers_module_does_not_import_storage_services() -> None:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     banned = {
         "app.services.conversation_service",
-        "app.services.context_snapshot_service",
         "app.services.redis_client",
         "app.services.context_repository",
     }

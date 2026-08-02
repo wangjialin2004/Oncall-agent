@@ -21,6 +21,173 @@ export type StreamAgentArgs = {
   checkpointReplay?: boolean;
 };
 
+const SAFE_TIMELINE_PAYLOAD_KEYS = new Set([
+  "experts",
+  "delegated_expert",
+  "parallel",
+  "wall_ms",
+  "step",
+  "results",
+  "tool_call_id",
+  "parent_tool_call_id",
+  "tool",
+  "resumed_from_step",
+  "replayed_steps",
+  "started_at",
+  "conservative",
+  "replay_override",
+  "todos",
+  "required_evidence",
+  "gaps",
+  "failed_tools",
+  "trigger",
+  "focus_route",
+  "evidence_count",
+  "failed_evidence_count",
+  "confidence",
+  "result_preview",
+  "result_fields",
+  "result_items",
+  "metric_name",
+  "retrieval_type",
+  "interval",
+  "series_count",
+  "duration_ms",
+  "data_points_count",
+  "note",
+]);
+
+const SECRET_PATTERN = /\b(token|api[_-]?key|secret|password|authorization|cookie|access[_-]?key)\b\s*[:=]\s*([^\s,;]+)/gi;
+const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+const PHONE_PATTERN = /\b1[3-9]\d{9}\b/g;
+const NUMERIC_RESULT_FIELD_LABELS = new Set([
+  "count",
+  "total",
+  "series_count",
+  "data_points_count",
+  "duration_ms",
+  "statistics.avg",
+  "statistics.max",
+  "statistics.min",
+  "statistics.p95",
+  "alert_info.threshold",
+  "cpu.usage_percent",
+  "cpu.count",
+  "memory.usage_percent",
+  "memory.total_bytes",
+  "memory.used_bytes",
+  "memory.available_bytes",
+  "disk.usage_percent",
+  "disk.total_bytes",
+  "disk.used_bytes",
+  "disk.free_bytes",
+]);
+
+function safeDetailText(value: unknown, limit = 640): string {
+  if (typeof value !== "string") return "";
+  return value
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " ")
+    .replace(SECRET_PATTERN, (_whole, name: string) => `${name}=[REDACTED]`)
+    .replace(EMAIL_PATTERN, "[REDACTED_EMAIL]")
+    .replace(PHONE_PATTERN, "[REDACTED_PHONE]")
+    .trim()
+    .slice(0, limit);
+}
+
+function safeDetailList(value: unknown, limit = 8, itemLimit = 280): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, limit)
+    .map((item) => safeDetailText(item, itemLimit))
+    .filter(Boolean);
+}
+
+function safeResultFieldValue(label: string, value: unknown): string {
+  if (NUMERIC_RESULT_FIELD_LABELS.has(label) && typeof value === "string") {
+    const numeric = value.trim().slice(0, 280);
+    if (/^-?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?$/i.test(numeric)) {
+      return numeric;
+    }
+  }
+  return safeDetailText(value, 280);
+}
+
+function sanitizePublicDetailPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const sanitized = { ...payload };
+  for (const key of ["todos", "required_evidence", "gaps", "failed_tools", "result_items"] as const) {
+    if (key in sanitized) {
+      sanitized[key] = safeDetailList(sanitized[key]);
+    }
+  }
+  for (const key of ["trigger", "focus_route", "confidence", "result_preview", "metric_name", "retrieval_type", "interval", "note"] as const) {
+    if (key in sanitized) {
+      sanitized[key] = safeDetailText(sanitized[key]);
+    }
+  }
+  for (const key of ["evidence_count", "failed_evidence_count", "series_count", "duration_ms", "data_points_count"] as const) {
+    if (typeof sanitized[key] !== "number" || !Number.isFinite(sanitized[key])) {
+      delete sanitized[key];
+    }
+  }
+  if (Array.isArray(sanitized.result_fields)) {
+    sanitized.result_fields = sanitized.result_fields
+      .slice(0, 12)
+      .flatMap((item) => {
+        if (!item || typeof item !== "object") return [];
+        const row = item as Record<string, unknown>;
+        const label = safeDetailText(row.label, 60);
+        const value = safeResultFieldValue(label, row.value);
+        return label && value ? [{ label, value }] : [];
+      });
+  }
+  return sanitized;
+}
+
+function sanitizeTimelineEvent(payload: Record<string, unknown>): TimelineEvent {
+  const privateTopLevel = ["evidence_id", "trace_id", "span_id", "usage"];
+  const inner = payload.payload;
+  const hasPrivateTopLevel = privateTopLevel.some((key) => key in payload);
+  const hasPublicDetails =
+    Boolean(inner) &&
+    typeof inner === "object" &&
+    Object.keys(inner as Record<string, unknown>).some((key) =>
+      [
+        "todos",
+        "required_evidence",
+        "gaps",
+        "failed_tools",
+        "trigger",
+        "focus_route",
+        "evidence_count",
+        "failed_evidence_count",
+        "confidence",
+        "result_preview",
+        "result_fields",
+        "result_items",
+      ].includes(key),
+    );
+  const hasUnsafePayload =
+    Boolean(inner) &&
+    typeof inner === "object" &&
+    Object.keys(inner as Record<string, unknown>).some(
+      (key) => !SAFE_TIMELINE_PAYLOAD_KEYS.has(key),
+    );
+  if (!hasPrivateTopLevel && !hasUnsafePayload && !hasPublicDetails) {
+    return payload as unknown as TimelineEvent;
+  }
+
+  const sanitized = { ...payload };
+  for (const key of privateTopLevel) delete sanitized[key];
+  if (inner && typeof inner === "object") {
+    sanitized.payload = sanitizePublicDetailPayload(Object.fromEntries(
+      Object.entries(inner as Record<string, unknown>).filter(([key]) =>
+        SAFE_TIMELINE_PAYLOAD_KEYS.has(key),
+      ),
+    ));
+  }
+  return sanitized as unknown as TimelineEvent;
+}
+
 /** Translate one backend SSE payload into the frontend event union. */
 export function translateBackendEvent(
   payload: Record<string, unknown>,
@@ -30,18 +197,19 @@ export function translateBackendEvent(
   const route = (payload.route ? String(payload.route) : "unknown") as AgentRoute;
   switch (type) {
     case "route_event":
+      const timelineEvent = sanitizeTimelineEvent(payload);
       return {
         type: "route_selected",
         route,
-        reason: String(payload.summary ?? ""),
+        reason: String(timelineEvent.summary ?? ""),
         mode,
-        timelineEvent: payload as unknown as TimelineEvent,
+        timelineEvent,
       };
     case "agent_event":
-      return translateAgentEvent(payload) ?? (payload as unknown as TimelineEvent);
+      return translateAgentEvent(payload) ?? sanitizeTimelineEvent(payload);
     case "tool_event":
     case "decision_event":
-      return payload as unknown as TimelineEvent;
+      return sanitizeTimelineEvent(payload);
     case "content":
       return { type: "content", data: String(payload.data ?? "") };
     case "report":
@@ -74,7 +242,14 @@ export function translateBackendEvent(
         answer: String(payload.answer ?? ""),
         ...(replacementMarker ? { replace_streamed_answer: true } : {}),
         case_id: String(payload.case_id ?? ""),
-        events: (payload.events as TimelineEvent[]) ?? [],
+        events: Array.isArray(payload.events)
+          ? payload.events
+              .filter(
+                (item): item is Record<string, unknown> =>
+                  Boolean(item) && typeof item === "object",
+              )
+              .map(sanitizeTimelineEvent)
+          : [],
         distill_draft: distill
           ? {
               experience_id: String(distill.experience_id ?? ""),

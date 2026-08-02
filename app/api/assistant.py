@@ -11,6 +11,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.agent.context.unified import build_completion_committer
 from app.agent.harness import harness_service
+from app.agent.public_events import PublicEventProjector
 from app.config import config
 from app.core.request_context import bind_request_context, build_request_context
 from app.models.request import ChatRequest
@@ -21,7 +22,6 @@ from app.services.attachment_reference_service import (
     attachment_reference_service,
     normalize_attachment_prompt_mode,
 )
-from app.services.context_repository import unified_context_repository_enabled
 from app.services.conversation_service import conversation_service
 from app.services.session_scope_service import (
     AuthenticatedPrincipal,
@@ -38,53 +38,13 @@ class AttachmentTurnPayload:
     attachment_refs: list[dict[str, object]] = field(default_factory=list)
 
 
-def _persist_turn(
-    owner_key: str,
-    request: ChatRequest,
-    event: dict,
-    *,
-    attachment_context: str = "",
-    attachment_refs: list[dict[str, object]] | None = None,
-) -> None:
-    """Best-effort: store the completed turn for multi-turn history. Never raises."""
-    try:
-        persisted_events = list(event.get("events") or [])
-        suggested_actions = [
-            action
-            for action in (event.get("suggested_actions") or [])
-            if isinstance(action, dict) and str(action.get("id") or "").strip()
-        ]
-        if suggested_actions:
-            persisted_events.append(
-                {
-                    "type": "decision_event",
-                    "stage": "suggested_actions",
-                    "actions": suggested_actions,
-                }
-            )
-        conversation_service.append_turn(
-            owner_key=owner_key,
-            session_id=request.id,
-            user_message=request.question,
-            user_context=attachment_context,
-            attachment_refs=attachment_refs or [],
-            assistant_answer=str(event.get("answer") or ""),
-            route=str(event.get("route") or ""),
-            case_id=str(event.get("case_id") or ""),
-            events=persisted_events,
-        )
-    except Exception as exc:  # pragma: no cover - persistence must not break the stream
-        logger.warning(f"[会话 {request.id}] 会话持久化失败（已忽略）: {exc}")
-
-
 async def _load_attachment_payload(
     owner_key: str,
     request: ChatRequest,
 ) -> AttachmentTurnPayload:
     prompt_mode = normalize_attachment_prompt_mode()
-    # The legacy rollback path does not expose ``read_attachment``.  An index
-    # alone would therefore hide the upload, so degrade to the summary mode
-    # when stateful context tools are disabled.
+    # A compatibility renderer without ``read_attachment`` would hide an
+    # index-only upload, so use its summary when context tools are disabled.
     if prompt_mode == "index" and (
         not bool(getattr(config, "harness_stateful_context_enabled", True))
         or not bool(getattr(config, "harness_context_tools_enabled", True))
@@ -288,6 +248,7 @@ async def assistant(
     logger.info(f"[会话 {request.id}] 收到统一助手请求 trace_id={context.trace_id}")
 
     async def event_generator() -> AsyncGenerator[dict[str, str], None]:
+        public_projector = PublicEventProjector()
         try:
             # Runtime tools are global objects; bind the authenticated scope to
             # this task so RAG cannot silently fall back to global retrieval.
@@ -321,45 +282,34 @@ async def assistant(
                     stream_kwargs["simulate"] = str(request.simulate)
                 if request.prefer_parallel is not None and "prefer_parallel" in stream_params:
                     stream_kwargs["prefer_parallel"] = bool(request.prefer_parallel)
-                # Unified repository: harness stream intercepts complete and
-                # atomically commits turn+projection. Legacy _persist_turn is
-                # skipped when that commit succeeds.
-                if unified_context_repository_enabled() and (
-                    "completion_committer" in stream_params or accepts_kwargs
-                ):
-                    stream_kwargs["completion_committer"] = build_completion_committer(
-                        owner_key=owner_key,
-                        session_id=request.id,
-                        commit_id=str(context.trace_id or request.id),
-                        user_message=request.question,
-                        user_context=attachment_payload.persistent_context,
-                        attachment_refs=attachment_payload.attachment_refs,
-                        run_id=str(context.trace_id or request.id),
-                    )
+                completion_committer = build_completion_committer(
+                    owner_key=owner_key,
+                    session_id=request.id,
+                    commit_id=str(context.trace_id or request.id),
+                    user_message=request.question,
+                    user_context=attachment_payload.persistent_context,
+                    attachment_refs=attachment_payload.attachment_refs,
+                    run_id=str(context.trace_id or request.id),
+                )
+                if "completion_committer" in stream_params or accepts_kwargs:
+                    stream_kwargs["completion_committer"] = completion_committer
                 async for event in stream_service.stream(composed_message, **stream_kwargs):
-                    # Strip internal commit markers before SSE serialization.
-                    public_event = {
-                        key: value
-                        for key, value in event.items()
-                        if not str(key).startswith("_unified_context_")
-                    }
+                    if (
+                        event.get("type") == "complete"
+                        and not event.get("_unified_context_commit_attempted")
+                    ):
+                        await completion_committer(event, None)
+                        event = dict(event)
+                        event["_unified_context_commit_attempted"] = True
+                        event["_unified_context_committed"] = True
+                    # Persist the full internal event, but expose only the
+                    # display-safe contract to the browser.
+                    public_event = public_projector.project_stream(event)
                     yield {
                         "event": "message",
                         "data": json.dumps(public_event, ensure_ascii=False, default=str),
                     }
                     event_type = event.get("type")
-                    if event_type == "complete":
-                        # A failed unified commit owns its rollback. Falling
-                        # through to the legacy append would recreate split
-                        # persistence and hide the degraded commit outcome.
-                        if not event.get("_unified_context_commit_attempted"):
-                            _persist_turn(
-                                owner_key,
-                                request,
-                                event,
-                                attachment_context=attachment_payload.persistent_context,
-                                attachment_refs=attachment_payload.attachment_refs,
-                            )
                     if event_type in {"complete", "error"}:
                         break
         except Exception as exc:
@@ -367,13 +317,15 @@ async def assistant(
             yield {
                 "event": "message",
                 "data": json.dumps(
-                    {
-                        "type": "error",
-                        "route": "error",
-                        "message": "internal_error",
-                        "code": "internal_error",
-                        "trace_id": context.trace_id,
-                    },
+                    public_projector.project_stream(
+                        {
+                            "type": "error",
+                            "route": "error",
+                            "message": "internal_error",
+                            "code": "internal_error",
+                            "trace_id": context.trace_id,
+                        }
+                    ),
                     ensure_ascii=False,
                 ),
             }

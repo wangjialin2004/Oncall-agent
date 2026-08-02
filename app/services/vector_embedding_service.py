@@ -210,7 +210,13 @@ class LocalBgeM3Embeddings:
                 self.model_name,
                 device or "auto",
             )
-            kwargs: dict[str, Any] = {"use_fp16": self.use_fp16}
+            # FP16 is a CUDA-oriented optimization.  Some FlagEmbedding/
+            # PyTorch combinations still probe CUDA while handling FP16 even
+            # when the requested device is CPU; avoid that unsafe path.
+            use_fp16 = self.use_fp16 and device != "cpu"
+            if self.use_fp16 and not use_fp16:
+                logger.info("CPU embedding selected; disabling FP16")
+            kwargs: dict[str, Any] = {"use_fp16": use_fp16}
             if device:
                 # FlagEmbedding accepts device as constructor kw on recent versions;
                 # older versions ignore unknown kwargs — fall back silently.

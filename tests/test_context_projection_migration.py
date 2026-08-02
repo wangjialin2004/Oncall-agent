@@ -8,18 +8,45 @@ import sqlite3
 from pathlib import Path
 
 from app.agent.context.operations import append_recent_turns, set_intent
+from app.agent.context.persistence import state_to_dict
 from app.agent.context.projection import is_compact_projection
 from app.agent.context.state import AgentContextState
-from app.services.context_snapshot_service import ContextSnapshotService
 from app.services.conversation_service import ConversationService
 from scripts.migrate_context_projection import apply, dry_run
 from tests._context_db import create_verified_backup, initialize_context_db
 
 
+def _write_legacy_projection(db_path: Path, state: AgentContextState) -> None:
+    timestamp = "2026-08-01T00:00:00Z"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO conversations (owner_key, session_id, title, created_at, updated_at)
+            VALUES (?, ?, '', ?, ?)
+            ON CONFLICT(owner_key, session_id) DO NOTHING
+            """,
+            (state.owner_key, state.session_id, timestamp, timestamp),
+        )
+        connection.execute(
+            """
+            UPDATE conversations
+            SET context_state_json = ?, context_state_version = ?,
+                context_state_updated_at = ?
+            WHERE owner_key = ? AND session_id = ?
+            """,
+            (
+                json.dumps(state_to_dict(state), ensure_ascii=False),
+                state.schema_version,
+                timestamp,
+                state.owner_key,
+                state.session_id,
+            ),
+        )
+
+
 def _seed(db_path: Path) -> None:
     initialize_context_db(db_path)
     conversations = ConversationService(db_path=db_path)
-    snapshots = ContextSnapshotService(db_path=db_path)
 
     conversations.append_turn(
         owner_key="o1",
@@ -31,12 +58,12 @@ def _seed(db_path: Path) -> None:
     set_intent(state, current_question="u1", current_goal="u1")
     append_recent_turns(state, [{"role": "user", "text": "u1"}], last_turn_index=1)
     state.patch_tail.append({"op": "x"})
-    snapshots.save_context_snapshot(owner_key="o1", session_id="aligned", state=state)
+    _write_legacy_projection(db_path, state)
 
     # snapshot-only ahead
     ahead = AgentContextState(owner_key="o2", session_id="ahead")
     append_recent_turns(ahead, [{"role": "user", "text": "ghost"}], last_turn_index=9)
-    snapshots.save_context_snapshot(owner_key="o2", session_id="ahead", state=ahead)
+    _write_legacy_projection(db_path, ahead)
 
     # turn-only
     conversations.append_turn(
@@ -56,7 +83,7 @@ def _seed(db_path: Path) -> None:
     behind = AgentContextState(owner_key="o4", session_id="behind")
     set_intent(behind, current_question="old question", current_goal="root goal")
     append_recent_turns(behind, [], last_turn_index=1)
-    snapshots.save_context_snapshot(owner_key="o4", session_id="behind", state=behind)
+    _write_legacy_projection(db_path, behind)
     conversations.append_turn(
         owner_key="o4",
         session_id="behind",
@@ -74,7 +101,7 @@ def _seed(db_path: Path) -> None:
     turn_ahead = AgentContextState(owner_key="o5", session_id="turn-ahead")
     set_intent(turn_ahead, current_question="ghost", current_goal="ghost")
     append_recent_turns(turn_ahead, [], last_turn_index=9)
-    snapshots.save_context_snapshot(owner_key="o5", session_id="turn-ahead", state=turn_ahead)
+    _write_legacy_projection(db_path, turn_ahead)
 
 
 def test_dry_run_classifies_without_mutation(tmp_path: Path) -> None:

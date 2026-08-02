@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from typing import Any
 
@@ -83,33 +84,59 @@ class FixedRouter:
 
 
 class FinalOnlyLlm:
-    def __init__(self) -> None:
+    def __init__(self, answers: list[str] | None = None) -> None:
+        self.answers = list(answers or ["done"])
         self.calls: list[list[Any]] = []
+
+    def _next(self) -> str:
+        if self.answers:
+            return self.answers.pop(0)
+        return "done"
 
     async def complete(self, messages, **kwargs):
         self.calls.append(list(messages))
-        return LLMResponse(content="done", raw={})
+        return LLMResponse(content=self._next(), raw={})
 
     async def stream_chat(self, messages, **kwargs):
         self.calls.append(list(messages))
-        response = LLMResponse(content="done", raw={})
-        yield LLMStreamChunk(content="done")
+        content = self._next()
+        response = LLMResponse(content=content, raw={})
+        yield LLMStreamChunk(content=content)
         yield LLMStreamChunk(response=response)
 
     async def stream_complete(self, messages, **kwargs):
         self.calls.append(list(messages))
-        yield "done"
+        yield self._next()
+
+
+def test_production_modules_do_not_import_retired_snapshot_service() -> None:
+    retired_module = "app.services.context_snapshot_service"
+    for path in Path("app").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imported = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+        assert retired_module not in imported, path
+
+
+def test_production_context_path_has_no_legacy_builder_or_flag_branch() -> None:
+    source = Path("app/agent/harness/stream_inner.py").read_text(encoding="utf-8")
+    assert ".abuild(" not in source
+    assert "unified_context_repository_enabled" not in source
+
+
+def test_assistant_api_has_no_legacy_terminal_persistence_fallback() -> None:
+    source = Path("app/api/assistant.py").read_text(encoding="utf-8")
+    assert "def _persist_turn" not in source
+    assert "conversation_service.append_turn" not in source
 
 
 @pytest.mark.asyncio
 async def test_completion_committer_writes_one_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "app.services.context_repository.config.harness_unified_context_repository_enabled",
-        True,
-        raising=False,
-    )
     redis = FakeRedis()
     db_path = initialize_context_db(tmp_path / "memory.db")
     repository = ContextRepository(
@@ -148,11 +175,6 @@ async def test_completion_committer_writes_one_turn(
 async def test_stream_invokes_committer_before_yielding_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "app.services.context_repository.config.harness_unified_context_repository_enabled",
-        True,
-        raising=False,
-    )
     calls: list[dict[str, Any]] = []
 
     async def fake_inner(self, *args, **kwargs):
@@ -247,7 +269,7 @@ async def test_real_harness_uses_one_repository_load_for_both_renderers(
     monkeypatch: pytest.MonkeyPatch,
     stateful: bool,
 ) -> None:
-    monkeypatch.setattr(config, "harness_unified_context_repository_enabled", True)
+    monkeypatch.setattr(config, "harness_llm_planning_enabled", False)
     monkeypatch.setattr(config, "harness_stateful_context_enabled", stateful)
     monkeypatch.setattr(config, "harness_context_tools_enabled", False)
     monkeypatch.setattr(config, "harness_checkpoint_enabled", False)
@@ -294,7 +316,7 @@ async def test_checkpoint_resume_reads_inflight_but_normal_load_does_not(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(config, "harness_unified_context_repository_enabled", True)
+    monkeypatch.setattr(config, "harness_llm_planning_enabled", False)
     db_path = initialize_context_db(tmp_path / "inflight-resume.db")
     redis = FakeRedis()
     repository = ContextRepository(
@@ -354,11 +376,48 @@ async def test_checkpoint_resume_reads_inflight_but_normal_load_does_not(
 
 
 @pytest.mark.asyncio
+async def test_legacy_checkpoint_ref_uses_committed_context_with_warning(
+    tmp_path: Path,
+) -> None:
+    db_path = initialize_context_db(tmp_path / "legacy-ref.db")
+    repository = ContextRepository(
+        db_path=db_path,
+        redis_get_set=FakeRedis(),
+        settings=ContextRepositorySettings(redis_enabled=True, db_snapshot_enabled=True),
+    )
+    committed = AgentContextState(owner_key="o", session_id="s")
+    set_intent(committed, current_question="saved", current_goal="saved")
+    await repository.commit_completed_turn(
+        CompletedTurnCommit(
+            owner_key="o",
+            session_id="s",
+            commit_id="legacy-base",
+            user_message="saved",
+            assistant_answer="answer",
+            projection=committed,
+        )
+    )
+
+    resumed = await prepare_unified_context(
+        owner_key="o",
+        session_id="s",
+        current_question="resume",
+        current_goal="resume",
+        repository=repository,
+        resume_context_ref="owner:s:v7",
+        resume_context_version=7,
+    )
+
+    assert resumed.envelope.source in {"redis_committed", "sqlite_projection"}
+    assert "legacy_checkpoint_context_ref" in resumed.envelope.warnings
+
+
+@pytest.mark.asyncio
 async def test_completion_commit_deletes_matching_inflight(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(config, "harness_unified_context_repository_enabled", True)
+    monkeypatch.setattr(config, "harness_llm_planning_enabled", False)
     db_path = initialize_context_db(tmp_path / "inflight-delete.db")
     redis = FakeRedis()
     repository = ContextRepository(
@@ -396,7 +455,7 @@ async def test_api_does_not_legacy_append_after_unified_commit_failure(
 ) -> None:
     from app.api.assistant import assistant
 
-    monkeypatch.setattr(config, "harness_unified_context_repository_enabled", True)
+    monkeypatch.setattr(config, "harness_llm_planning_enabled", False)
     persisted: list[dict[str, Any]] = []
 
     class FailedUnifiedStream:
@@ -411,10 +470,6 @@ async def test_api_does_not_legacy_append_after_unified_commit_failure(
             }
 
     monkeypatch.setattr("app.api.assistant.harness_service", FailedUnifiedStream())
-    monkeypatch.setattr(
-        "app.api.assistant._persist_turn",
-        lambda *args, **kwargs: persisted.append({"args": args, "kwargs": kwargs}),
-    )
     principal = AuthenticatedPrincipal(
         username="test",
         owner_key="stable-owner",
@@ -429,3 +484,184 @@ async def test_api_does_not_legacy_append_after_unified_commit_failure(
     chunks = [chunk async for chunk in response.body_iterator]
     assert chunks
     assert persisted == []
+    assert not hasattr(__import__("app.api.assistant", fromlist=["_persist_turn"]), "_persist_turn")
+
+
+@pytest.mark.asyncio
+async def test_assistant_two_turn_unified_e2e_persists_compact_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: API → harness → atomic turn/projection commit → reload history.
+
+    Uses a scripted LLM so the suite does not depend on the live model gateway.
+    """
+
+    import json
+    import sqlite3
+
+    from app.agent.context import unified as unified_mod
+    from app.agent.context.projection import is_compact_projection
+    from app.agent.harness.state import HarnessLimits
+    from app.api.assistant import assistant
+
+    monkeypatch.setattr(config, "harness_llm_planning_enabled", False)
+    monkeypatch.setattr(config, "harness_stateful_context_enabled", True)
+    monkeypatch.setattr(config, "harness_context_tools_enabled", False)
+    monkeypatch.setattr(config, "harness_checkpoint_enabled", False)
+    monkeypatch.setattr(config, "harness_anti_pattern_capture_enabled", False)
+    monkeypatch.setattr(config, "long_term_memory_distill_enabled", False)
+    monkeypatch.setattr(config, "harness_investigation_evidence_early_close", False)
+    monkeypatch.setattr(config, "harness_knowledge_early_close", False)
+    monkeypatch.setattr(config, "harness_re_evidence_enabled", False)
+    monkeypatch.setattr(config, "harness_replan_enabled", False)
+    monkeypatch.setattr(config, "harness_timeout_soft_close_enabled", False)
+    monkeypatch.setattr(config, "harness_corrective_verify_enabled", False)
+    monkeypatch.setattr(config, "hitl_suggested_actions_enabled", False)
+
+    db_path = initialize_context_db(tmp_path / "unified-e2e.db")
+    redis = FakeRedis()
+    repository = SpyRepository(
+        db_path=db_path,
+        redis_get_set=redis,
+        settings=ContextRepositorySettings(
+            redis_enabled=True,
+            db_snapshot_enabled=True,
+            history_max_turns=6,
+        ),
+    )
+
+    first_answer = "CPU runbook says check load average first."
+    second_answer = "Previously you asked about Redis memory pressure."
+    llm = FinalOnlyLlm([first_answer, second_answer])
+    service = HarnessService(
+        context_builder=ExplodingLegacyBuilder(),
+        router=FixedRouter(),
+        llm_client=llm,
+        tools=[],
+        context_store=ExplodingLegacyStore(),
+        context_repository=repository,
+        limits=HarnessLimits(max_steps=3, token_budget=4000, timeout_seconds=10),
+        checkpoint_store=None,
+    )
+
+    # Assistant builds the committer without an injected repository; force ours.
+    real_build = unified_mod.build_completion_committer
+
+    def _build_committer(**kwargs):
+        kwargs["repository"] = repository
+        return real_build(**kwargs)
+
+    monkeypatch.setattr("app.api.assistant.harness_service", service)
+    monkeypatch.setattr("app.api.assistant.build_completion_committer", _build_committer)
+    monkeypatch.setattr(
+        "app.services.context_repository.build_default_context_repository",
+        lambda: repository,
+    )
+
+    principal = AuthenticatedPrincipal(
+        username="e2e-user",
+        owner_key="owner-e2e",
+        storage_owner_key="owner-e2e",
+        project_id="default",
+        role="operator",
+    )
+    session_id = "unified-e2e-session"
+
+    first_response = await assistant(
+        ChatRequest(id=session_id, question="How do I diagnose high Redis memory?"),
+        principal=principal,
+    )
+    first_chunks = [chunk async for chunk in first_response.body_iterator]
+    assert first_chunks
+
+    second_response = await assistant(
+        ChatRequest(id=session_id, question="What did I ask just now?"),
+        principal=principal,
+    )
+    second_chunks = [chunk async for chunk in second_response.body_iterator]
+    assert second_chunks
+
+    # Parse public SSE payloads (internal commit markers stripped).
+    # EventSourceResponse yields dicts: {"event": "...", "data": "<json>"}.
+    completes: list[dict[str, Any]] = []
+    for chunk in first_chunks + second_chunks:
+        payload: Any
+        if isinstance(chunk, dict):
+            payload = chunk.get("data", chunk)
+        elif isinstance(chunk, (bytes, bytearray)):
+            payload = chunk.decode("utf-8", errors="replace")
+        else:
+            payload = chunk
+        if isinstance(payload, str):
+            text = payload.strip()
+            if text.startswith("data:"):
+                text = text[5:].strip()
+            if not text:
+                continue
+            event = json.loads(text)
+        elif isinstance(payload, dict):
+            event = payload
+        else:
+            continue
+        if event.get("type") == "complete":
+            completes.append(event)
+    assert len(completes) == 2
+    assert completes[0].get("answer") == first_answer
+    assert completes[1].get("answer") == second_answer
+    assert not hasattr(__import__("app.api.assistant", fromlist=["_persist_turn"]), "_persist_turn")
+
+    # Second turn must have reloaded history from repository turn window.
+    assert repository.load_calls >= 2
+    assert len(llm.calls) >= 2
+    second_messages = llm.calls[1]
+    roles = [getattr(m, "role", None) or (m.get("role") if isinstance(m, dict) else None) for m in second_messages]
+    contents = [
+        str(getattr(m, "content", None) or (m.get("content") if isinstance(m, dict) else "") or "")
+        for m in second_messages
+    ]
+    assert "user" in roles and "assistant" in roles
+    assert any("Redis memory" in c for c in contents)
+    assert any(first_answer in c for c in contents)
+    assert any("当前会话白板" in c for c in contents)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        turns = conn.execute(
+            """
+            SELECT turn_index, user_message, assistant_answer, commit_id
+            FROM conversation_turns
+            WHERE owner_key=? AND session_id=?
+            ORDER BY turn_index
+            """,
+            ("owner-e2e", session_id),
+        ).fetchall()
+        conv = conn.execute(
+            """
+            SELECT context_projection_status, context_projection_version,
+                   context_last_applied_turn_index, context_state_json
+            FROM conversations
+            WHERE owner_key=? AND session_id=?
+            """,
+            ("owner-e2e", session_id),
+        ).fetchone()
+
+    assert len(turns) == 2
+    assert turns[0]["user_message"] == "How do I diagnose high Redis memory?"
+    assert turns[0]["assistant_answer"] == first_answer
+    assert turns[1]["user_message"] == "What did I ask just now?"
+    assert turns[1]["assistant_answer"] == second_answer
+    assert turns[0]["commit_id"] and turns[1]["commit_id"]
+    assert turns[0]["commit_id"] != turns[1]["commit_id"]
+
+    assert conv is not None
+    assert conv["context_projection_status"] == "ready"
+    assert int(conv["context_projection_version"]) >= 2
+    assert int(conv["context_last_applied_turn_index"]) == 1
+    payload = json.loads(conv["context_state_json"])
+    assert is_compact_projection(payload)
+    assert payload.get("schema_version") == 2
+    assert (payload.get("conversation") or {}).get("recent_turns") == []
+    assert payload.get("patch_tail") == []
+    assert "owner_key" not in payload
+    assert "owner_key" not in (payload.get("identity") or {})

@@ -18,6 +18,9 @@ class ToolExecutionResult:
     success: bool
     raw: Any = None
     latency_ms: int = 0
+    # Meaningful only for failed calls. Policy uses this internal state to avoid
+    # re-offering permanently unavailable tools in the same harness run.
+    retryable: bool = False
 
 
 def tool_to_definition(tool: RuntimeTool) -> ToolDefinition:

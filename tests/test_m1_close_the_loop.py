@@ -19,7 +19,7 @@ class FakeRouter:
     def __init__(self, route: str = "diagnosis") -> None:
         self.route = route
 
-    async def _resolve_route(self, message: str) -> RouteDecision:
+    async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
         return RouteDecision(route=self.route, reason="fake_focus", confidence=0.8)
 
 

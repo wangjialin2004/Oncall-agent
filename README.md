@@ -156,7 +156,8 @@ docker compose -f vector-database.yml up -d
 监控专家走 PromQL 路径时使用。需后端在 9900 端口暴露 `/metrics`。
 
 ```bash
-docker compose -f monitoring.yml up -d     # 或 make start-prometheus
+docker compose -f vector-database.yml --profile monitoring up -d prometheus
+# 或 make start-prometheus
 ```
 
 - Prometheus: http://localhost:9090
@@ -224,11 +225,21 @@ python3 -m venv .venv
 # 首次运行时安装前端依赖；之后可跳过。
 npm --prefix frontend install
 
-# 启动 Milvus、FastAPI 和两个 MCP 服务。
+# 推荐：用一个 WSL 原生脚本启动依赖、FastAPI/MCP 和后台 Vite。
+bash scripts/start_wsl.sh
+```
+
+该脚本会从仓库路径定位运行目录，加载 WSL 的 NVM Node/npm（如需要），复用 `make up` 和 `make start`，并在 HTTP 检查通过后输出地址。默认情况下 readiness degraded 会失败退出；仅排障时可显式允许降级后端：
+
+```bash
+WSL_START_SKIP_FRONTEND=true WSL_START_ALLOW_DEGRADED=true bash scripts/start_wsl.sh
+```
+
+脚本不会终止已有的 `5173` 端口进程：若端口已监听但应用根路径不健康，会报告冲突并退出。手动排障时，以下是等价的启动顺序：
+
+```bash
 make up
 make start
-
-# 在后台启动 Vite 前端并保存 PID。
 nohup npm --prefix frontend run dev -- --host 0.0.0.0 > frontend-vite.log 2>&1 &
 echo $! > frontend.pid
 ```
@@ -242,7 +253,9 @@ echo $! > frontend.pid
 确认服务状态：
 
 ```bash
-curl -fsS http://127.0.0.1:9900/health
+curl --noproxy '*' -fsS http://127.0.0.1:9900/health/readiness
+curl --noproxy '*' -fsS http://127.0.0.1:5173/
+make status-mcp
 docker compose -f vector-database.yml ps
 tail -n 80 frontend-vite.log
 ```
@@ -255,7 +268,7 @@ test -f frontend.pid && kill "$(cat frontend.pid)" && rm -f frontend.pid
 docker compose -f vector-database.yml down
 ```
 
-> `make start` 只管理 FastAPI 与 MCP 服务；Vite 是独立进程，因此需要按上面的 `frontend.pid` 单独停止。`make up` 和 `docker compose ... down` 会管理 Milvus 数据库容器。
+> `make start` 只管理 FastAPI 与 MCP 服务；Vite 是独立进程。上面的 `frontend.pid` 停止命令适用于手动回退命令启动的 Vite；启动脚本检测到已有健康 Vite 时不会接管或终止它。`make up` 和 `docker compose ... down` 会管理 Milvus 数据库容器。
 
 ### Make 管理命令（Linux/macOS 或已安装 make 的环境）
 
@@ -383,7 +396,6 @@ SSE `message` 数据包含不同类型事件：`route_selected`、`agent_event`�
 ├── plan/ · prd/             # 历史计划与 PRD
 ├── .env.example             # 注释模板，不含真实密钥
 ├── vector-database.yml      # Milvus docker compose
-├── monitoring.yml           # Prometheus docker compose
 ├── Makefile                 # 管理命令
 └── pyproject.toml
 ```

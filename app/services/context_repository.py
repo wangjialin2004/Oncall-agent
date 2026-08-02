@@ -38,10 +38,6 @@ from app.utils.time import utc_now
 RedisGetSet = Callable[[str, str, Any, int | None], Awaitable[Any]]
 
 
-def unified_context_repository_enabled() -> bool:
-    return bool(getattr(config, "harness_unified_context_repository_enabled", False))
-
-
 def _committed_redis_key(namespace: str, owner_key: str, session_id: str) -> str:
     return f"{namespace}:context:committed:{owner_key}:{session_id}"
 
@@ -803,5 +799,4 @@ __all__ = [
     "ContextRepositorySettings",
     "build_default_context_repository",
     "context_repository",
-    "unified_context_repository_enabled",
 ]

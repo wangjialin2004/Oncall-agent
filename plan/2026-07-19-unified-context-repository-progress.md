@@ -18,7 +18,8 @@
 `docs/reviews/completion-review-2026-07-19-unified-context-repository-2.md`。
 
 交接入口：
-`docs/pilot/handoff-2026-07-19-unified-context-repository.md`。
+`docs/pilot/handoff-2026-07-23-unified-context-runtime-canary.md`
+（架构细节仍见 `docs/pilot/handoff-2026-07-19-unified-context-repository.md`）。
 
 ## Approvals
 
@@ -272,6 +273,17 @@ PYTHONPATH=. .venv/bin/pytest -o addopts='' \
 Context audit 与 projection dry-run 均 exit 0、`mutated=false`，分类仍为
 21 aligned / 3 behind / 17 snapshot-only-zero / 12 snapshot-only-ahead /
 7 turn-only（合计 60），DB 文件 before/after hash 一致。
+
+## Supersession Note (2026-08-01)
+
+This historical progress record is superseded for current runtime status by
+`plan/2026-08-01-remove-context-snapshot-service-progress.md`. The current
+worktree defaults unified context to `true`, uses `ContextRepository` as the
+runtime persistence owner, and retains stateful rendering as a compatibility
+layer. The operator has explicitly chosen not to rebuild or clear the
+historical projection drift reported by the current read-only dry-run; no
+database mutation was performed. The older `false` defaults and open rollout
+gates below are historical evidence only.
 
 ## Remaining Authorized Gates
 

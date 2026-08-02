@@ -1,7 +1,7 @@
 # 上下文加载与持久化合并实施计划
 
 > 日期：2026-07-19
-> 状态：**live schema v3 + projection apply 已完成；`.env` canary 已开；代码默认仍 false；two-turn/P50-P95 与默认 true 仍待** · 进度见 [progress](./2026-07-19-unified-context-repository-progress.md) · [最新复审](../docs/reviews/completion-review-2026-07-19-unified-context-repository-2.md) · [交接](../docs/pilot/handoff-2026-07-19-unified-context-repository.md)
+> 状态：**live schema v3 + projection apply 已完成；`.env` canary 已开；代码默认仍 false；two-turn/P50-P95 与默认 true 仍待** · 进度见 [progress](./2026-07-19-unified-context-repository-progress.md) · [最新复审](../docs/reviews/completion-review-2026-07-19-unified-context-repository-2.md) · [当前交接 2026-07-23](../docs/pilot/handoff-2026-07-23-unified-context-runtime-canary.md) · [架构交接 2026-07-19](../docs/pilot/handoff-2026-07-19-unified-context-repository.md)
 > 关联：`plan/2026-07-08-stateful-agent-context.md`、
 > `plan/2026-07-19-context-dedup-reduction.md`、
 > `docs/pilot/context-dual-path.md`

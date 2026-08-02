@@ -103,7 +103,16 @@ describe("multi-turn conversation UI", () => {
               assistant_answer: "旧的回答",
               route: "metric",
               case_id: "",
-              events: [],
+              events: [
+                { type: "route_event", route: "metric", status: "completed" },
+                {
+                  type: "tool_event",
+                  tool: "query_metrics",
+                  status: "completed",
+                  duration_ms: 840,
+                  payload: { tool_call_id: "history-activity-1" },
+                },
+              ],
               created_at: "2026-06-18T00:00:00Z",
             },
           ]
@@ -119,6 +128,13 @@ describe("multi-turn conversation UI", () => {
 
     expect(await screen.findByText("旧的问题")).toBeInTheDocument();
     expect((await screen.findAllByText("旧的回答")).length).toBeGreaterThan(0);
+    expect(screen.getByRole("heading", { name: "执行轨迹" })).toBeInTheDocument();
+    const historyActivity = screen.getByText("查询指标").closest("[data-agent-activity-message]");
+    const answerBubble = screen.getByText("旧的回答").closest(".message-bubble");
+    expect(historyActivity).not.toBeNull();
+    expect(answerBubble).not.toBeNull();
+    if (!historyActivity || !answerBubble) throw new Error("history activity and answer should render");
+    expect(answerBubble.contains(historyActivity)).toBe(false);
   });
 
   it("deletes a conversation from the sidebar", async () => {

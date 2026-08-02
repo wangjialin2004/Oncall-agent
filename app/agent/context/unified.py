@@ -6,18 +6,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.agent.context.envelope import CompletedTurnCommit, ContextEnvelope
-from app.agent.context.integration import StatefulContext, build_default_store
+from app.agent.context.integration import StatefulContext
 from app.agent.context.operations import merge_active_attachment_refs, set_intent
 from app.agent.context.renderers import RenderedContext, select_render_policy
 from app.agent.context.state import AgentContextState
 from app.agent.context.views import DEFAULT_VIEW_TOKEN_BUDGET
 from app.config import config
 from app.services.attachment_reference_service import strip_attachment_wrapper
-from app.services.context_repository import (
-    ContextRepository,
-    build_default_context_repository,
-    unified_context_repository_enabled,
-)
+from app.services.context_repository import ContextRepository, build_default_context_repository
 
 _INFLIGHT_REF_PREFIX = "context-inflight:"
 
@@ -186,8 +182,6 @@ def build_completion_committer(
     recovery_run_id = run_id or commit_id
 
     async def _commit(event: dict[str, Any], context_state: AgentContextState | None):
-        if not unified_context_repository_enabled():
-            return None
         events = list(event.get("events") or [])
         suggested_actions = [
             action
@@ -245,16 +239,6 @@ async def persist_runtime_state(
 ) -> tuple[list[str], int | None]:
     """Persist a stage to inflight Redis only, coalesced by state version."""
 
-    if not unified_context_repository_enabled():
-        from app.agent.context.integration import persist_stateful_context
-
-        warnings = await persist_stateful_context(
-            state,
-            store=store or build_default_store(),
-            persist_snapshot=True,
-        )
-        return warnings, int(state.version or 0)
-
     version = int(state.version or 0)
     if last_flushed_version is not None and version <= last_flushed_version:
         return [], last_flushed_version
@@ -285,5 +269,4 @@ __all__ = [
     "persist_runtime_state",
     "prepare_unified_context",
     "render_unified_envelope",
-    "unified_context_repository_enabled",
 ]

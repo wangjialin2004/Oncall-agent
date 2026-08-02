@@ -1,11 +1,124 @@
 import "@testing-library/jest-dom/vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { AgentRun } from "../../types/events";
 import { ChatWorkspace } from "../ChatWorkspace";
 
+afterEach(cleanup);
+
+function activityRun(): AgentRun {
+  return {
+    runId: "assistant-activity",
+    sessionId: "session-1",
+    mode: "auto",
+    route: "diagnosis",
+    status: "completed",
+    events: [
+      { type: "route_event", route: "diagnosis", status: "completed" },
+      {
+        type: "agent_event",
+        stage: "tool_start",
+        status: "in_progress",
+        payload: { tool: "query_metrics", tool_call_id: "activity-1" },
+      },
+      {
+        type: "tool_event",
+        tool: "query_metrics",
+        status: "completed",
+        duration_ms: 900,
+        payload: { tool_call_id: "activity-1" },
+      },
+    ],
+    answer: "最终结论",
+    caseId: "",
+    error: "",
+    userMessage: "check cpu",
+    feedback: "",
+  };
+}
+
 describe("ChatWorkspace", () => {
+  it("renders granular activities before a separate final answer bubble", () => {
+    const run = activityRun();
+    const { container } = render(
+      <ChatWorkspace
+        mode="auto"
+        messages={[{ id: run.runId, role: "assistant", content: "## 最终结论" }]}
+        runs={{ [run.runId]: run }}
+        runStatus="idle"
+        pendingAttachments={[]}
+        checkpointReplay={false}
+        onCheckpointReplayChange={vi.fn()}
+        onModeChange={vi.fn()}
+        onSend={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onUploadFile={vi.fn(async () => ({ fileId: "file_1", fileName: "runbook.md", deduplicated: false }))}
+        onStop={vi.fn()}
+      />,
+    );
+
+    const activity = container.querySelector("[data-agent-activity-message]");
+    const answerBubble = container.querySelector(".message.assistant .message-bubble");
+    expect(activity).not.toBeNull();
+    expect(answerBubble).not.toBeNull();
+    if (!activity || !answerBubble) throw new Error("activity and answer should both render");
+    expect(answerBubble.contains(activity)).toBe(false);
+    expect(
+      activity.compareDocumentPosition(answerBubble) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "执行轨迹" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "最终结论" })).toBeInTheDocument();
+  });
+
+  it("does not render an empty final answer bubble while activities are running", () => {
+    const run = { ...activityRun(), status: "running" as const, answer: "" };
+    const { container } = render(
+      <ChatWorkspace
+        mode="auto"
+        messages={[{ id: run.runId, role: "assistant", content: "" }]}
+        runs={{ [run.runId]: run }}
+        runStatus="running"
+        pendingAttachments={[]}
+        checkpointReplay={false}
+        onCheckpointReplayChange={vi.fn()}
+        onModeChange={vi.fn()}
+        onSend={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onUploadFile={vi.fn(async () => ({ fileId: "file_1", fileName: "runbook.md", deduplicated: false }))}
+        onStop={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector("[data-agent-activity-message]")).not.toBeNull();
+    expect(container.querySelector(".message.assistant .message-bubble")).toBeNull();
+  });
+
+  it("restores the aggregate inline card when granular activities are disabled", () => {
+    const run = activityRun();
+    render(
+      <ChatWorkspace
+        mode="auto"
+        messages={[{ id: run.runId, role: "assistant", content: "最终结论" }]}
+        runs={{ [run.runId]: run }}
+        granularActivityEnabled={false}
+        runStatus="idle"
+        pendingAttachments={[]}
+        checkpointReplay={false}
+        onCheckpointReplayChange={vi.fn()}
+        onModeChange={vi.fn()}
+        onSend={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onUploadFile={vi.fn(async () => ({ fileId: "file_1", fileName: "runbook.md", deduplicated: false }))}
+        onStop={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /已完成/ })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "执行轨迹" })).not.toBeInTheDocument();
+  });
+
   it("renders assistant Markdown with GFM tables and code", () => {
     render(
       <ChatWorkspace
