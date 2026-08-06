@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from loguru import logger
 
+from app.agent.public_events import PublicEventProjector
 from app.services.conversation_service import conversation_service
 from app.services.session_scope_service import require_session_owner
 
@@ -24,7 +25,13 @@ async def get_conversation(
     owner_key: str = Depends(require_session_owner),
 ):
     """Return all turns of one conversation so the frontend can restore it."""
-    turns = conversation_service.get_turns(owner_key, session_id)
+    turns = []
+    for stored_turn in conversation_service.get_turns(owner_key, session_id):
+        turn = dict(stored_turn)
+        turn["events"] = PublicEventProjector().project_history_events(
+            stored_turn.get("events")
+        )
+        turns.append(turn)
     return {
         "code": 200,
         "message": "success",

@@ -89,6 +89,17 @@
 
 ## 快速开始
 
+### Docker 一键栈
+
+需要直接启动后端、前端、Redis 和 Milvus 时，参见 [Docker 部署说明](docs/docker-deployment.md)，或执行：
+
+```bash
+cp .env.example .env
+docker compose --profile monitoring --profile tools up -d --build
+```
+
+前端默认访问 <http://localhost:5173>；Prometheus 和 Attu 分别默认使用宿主机 `9091`、`8001` 端口。
+
 ### 0. 前置依赖
 
 - Python **3.11 – 3.13**
@@ -156,7 +167,8 @@ docker compose -f vector-database.yml up -d
 监控专家走 PromQL 路径时使用。需后端在 9900 端口暴露 `/metrics`。
 
 ```bash
-docker compose -f monitoring.yml up -d     # 或 make start-prometheus
+docker compose -f vector-database.yml --profile monitoring up -d prometheus
+# 或 make start-prometheus
 ```
 
 - Prometheus: http://localhost:9090
@@ -198,6 +210,76 @@ python mcp_servers/monitor_server.py    # 监控数据，默认 http://localhost
 ```
 
 > 脚本会在本地生成 `.log` 和 `.pid` 文件，这些文件已被 `.gitignore` 忽略。
+
+### WSL 全栈启动
+
+在 Windows Terminal 中进入 Ubuntu（或其他已配置 Docker Desktop WSL integration 的发行版）。首次运行前，确保 Docker Desktop 正在运行，并已为该发行版开启 WSL integration。
+
+先在 **同一个 WSL 发行版** 中确认 Python、Node.js/npm、Docker 与 make 都可用。若 `node` 或 `npm` 缺失，先按发行版的 Node.js 安装方式安装 Node.js 18+，然后重新打开 WSL 终端；不要混用 Windows 的 npm 与 WSL 的 Python/容器环境。
+
+```bash
+python3 --version
+node --version
+npm --version
+docker --version
+make --version
+```
+
+```bash
+wsl -d Ubuntu
+cd /home/wangjialin/projects/super_biz_agent_py
+
+# 首次运行时创建并安装 Python 环境；之后可跳过这两行。
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
+
+# 首次运行时安装前端依赖；之后可跳过。
+npm --prefix frontend install
+
+# 推荐：用一个 WSL 原生脚本启动依赖、FastAPI/MCP 和后台 Vite。
+bash scripts/start_wsl.sh
+```
+
+该脚本会从仓库路径定位运行目录，加载 WSL 的 NVM Node/npm（如需要），复用 `make up` 和 `make start`，并在 HTTP 检查通过后输出地址。默认情况下 readiness degraded 会失败退出；仅排障时可显式允许降级后端：
+
+```bash
+WSL_START_SKIP_FRONTEND=true WSL_START_ALLOW_DEGRADED=true bash scripts/start_wsl.sh
+```
+
+脚本不会终止已有的 `5173` 端口进程：若端口已监听但应用根路径不健康，会报告冲突并退出。手动排障时，以下是等价的启动顺序：
+
+```bash
+make up
+make start
+nohup npm --prefix frontend run dev -- --host 0.0.0.0 > frontend-vite.log 2>&1 &
+echo $! > frontend.pid
+```
+
+启动后访问：
+
+- 应用：<http://localhost:5173>
+- API 健康检查：<http://localhost:9900/health>
+- API 文档：<http://localhost:9900/docs>
+
+确认服务状态：
+
+```bash
+curl --noproxy '*' -fsS http://127.0.0.1:9900/health/readiness
+curl --noproxy '*' -fsS http://127.0.0.1:5173/
+make status-mcp
+docker compose -f vector-database.yml ps
+tail -n 80 frontend-vite.log
+```
+
+停止本项目启动的服务：
+
+```bash
+make stop
+test -f frontend.pid && kill "$(cat frontend.pid)" && rm -f frontend.pid
+docker compose -f vector-database.yml down
+```
+
+> `make start` 只管理 FastAPI 与 MCP 服务；Vite 是独立进程。上面的 `frontend.pid` 停止命令适用于手动回退命令启动的 Vite；启动脚本检测到已有健康 Vite 时不会接管或终止它。`make up` 和 `docker compose ... down` 会管理 Milvus 数据库容器。
 
 ### Make 管理命令（Linux/macOS 或已安装 make 的环境）
 
@@ -325,7 +407,6 @@ SSE `message` 数据包含不同类型事件：`route_selected`、`agent_event`�
 ├── plan/ · prd/             # 历史计划与 PRD
 ├── .env.example             # 注释模板，不含真实密钥
 ├── vector-database.yml      # Milvus docker compose
-├── monitoring.yml           # Prometheus docker compose
 ├── Makefile                 # 管理命令
 └── pyproject.toml
 ```

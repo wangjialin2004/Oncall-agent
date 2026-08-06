@@ -115,6 +115,28 @@ class RouterService:
         "延迟",
         "响应时间",
     )
+    # Exact-match short continuations that should inherit the previous turn route.
+    _CONTINUATION_PHRASES = frozenset(
+        {
+            "继续",
+            "接着",
+            "接着说",
+            "继续说",
+            "然后呢",
+            "还有呢",
+            "再说详细点",
+            "详细点",
+            "展开说说",
+            "再详细点",
+            "继续讲",
+            "go on",
+            "continue",
+            "more details",
+            "more detail",
+            "tell me more",
+        }
+    )
+    _OPERATIONAL_HINT_ROUTES = frozenset({"metric", "log", "change", "diagnosis"})
 
     # Strong keywords keep the low-latency fast path. Weak keywords only hint
     # semantic routing so generic how-to questions are not hijacked by one word.
@@ -364,7 +386,19 @@ class RouterService:
         payload = {**payload, "aux_routes": aux}
         return SemanticRouteResult.model_validate(payload)
 
-    async def _resolve_route(self, message: str) -> RouteDecision:
+    async def _resolve_route(
+        self,
+        message: str,
+        *,
+        previous_route: str | None = None,
+    ) -> RouteDecision:
+        # Short continuations ("继续") inherit the prior turn's route so low-
+        # confidence semantic classification cannot hijack chat follow-ups
+        # into diagnosis.
+        inherited = self._maybe_inherit_continuation_route(message, previous_route)
+        if inherited is not None:
+            return inherited
+
         decision = self.route_message(message)
         if decision.route == "clarify":
             return decision
@@ -384,11 +418,7 @@ class RouterService:
         if semantic.route not in EXPERT_ROUTES:
             return RouteDecision(route=DEFAULT_ROUTE, reason="semantic_unknown_route", confidence=0.0)
         if semantic.confidence < self.min_confidence:
-            return RouteDecision(
-                route=DEFAULT_ROUTE,
-                reason=f"low_confidence_{semantic.route}_default_diagnosis",
-                confidence=semantic.confidence,
-            )
+            return self._low_confidence_decision(message, semantic)
         if self._should_override_knowledge_for_incident(message, semantic):
             return RouteDecision(
                 route=DEFAULT_ROUTE,
@@ -399,6 +429,91 @@ class RouterService:
                 intent_relation=semantic.intent_relation,
             )
         return semantic
+
+    def _maybe_inherit_continuation_route(
+        self,
+        message: str,
+        previous_route: str | None,
+    ) -> RouteDecision | None:
+        if not bool(getattr(config, "router_continuation_inherit_enabled", True)):
+            return None
+        prev = str(previous_route or "").strip()
+        if prev not in EXPERT_ROUTES:
+            return None
+        if not self._is_continuation_message(message):
+            return None
+        return RouteDecision(
+            route=prev,
+            reason=f"continuation_inherit_{prev}",
+            confidence=0.85,
+            hints=(prev,),
+        )
+
+    @classmethod
+    def _is_continuation_message(cls, message: str) -> bool:
+        normalized = re.sub(r"\s+", " ", str(message or "").strip().lower())
+        normalized = normalized.strip("？?。.!！…~～")
+        if not normalized:
+            return False
+        return normalized in cls._CONTINUATION_PHRASES
+
+    def _low_confidence_decision(
+        self,
+        message: str,
+        semantic: RouteDecision,
+    ) -> RouteDecision:
+        """Choose a low-confidence fallback without always forcing diagnosis."""
+        keep_semantic = bool(
+            getattr(config, "router_low_confidence_keep_semantic_enabled", True)
+        )
+        if not keep_semantic:
+            return RouteDecision(
+                route=DEFAULT_ROUTE,
+                reason=f"low_confidence_{semantic.route}_default_diagnosis",
+                confidence=semantic.confidence,
+                hints=semantic.hints,
+                aux_routes=semantic.aux_routes,
+                intent_relation=semantic.intent_relation,
+            )
+
+        normalized = str(message or "").strip().lower()
+        has_incident = any(signal in normalized for signal in self._INCIDENT_SIGNALS)
+        has_concrete = bool(self._CONCRETE_OPERATIONAL_TARGET.search(normalized))
+        operational_hints = tuple(
+            hint
+            for hint in (semantic.hints or ())
+            if hint in self._OPERATIONAL_HINT_ROUTES
+        )
+
+        if semantic.route == "knowledge" and not (has_incident and has_concrete):
+            return RouteDecision(
+                route="knowledge",
+                reason="low_confidence_keep_knowledge",
+                confidence=semantic.confidence,
+                hints=semantic.hints,
+                aux_routes=(),
+                intent_relation="primary",
+            )
+
+        if has_incident or operational_hints or has_concrete:
+            return RouteDecision(
+                route=DEFAULT_ROUTE,
+                reason=f"low_confidence_{semantic.route}_operational_default_diagnosis",
+                confidence=semantic.confidence,
+                hints=semantic.hints,
+                aux_routes=semantic.aux_routes,
+                intent_relation=semantic.intent_relation,
+            )
+
+        kept = semantic.route if semantic.route in EXPERT_ROUTES else DEFAULT_ROUTE
+        return RouteDecision(
+            route=kept,
+            reason=f"low_confidence_keep_{kept}",
+            confidence=semantic.confidence,
+            hints=semantic.hints,
+            aux_routes=(),
+            intent_relation="primary",
+        )
 
     @classmethod
     def _should_override_knowledge_for_incident(
@@ -414,6 +529,40 @@ class RouterService:
         normalized = str(message or "").strip().lower()
         return bool(cls._CONCRETE_OPERATIONAL_TARGET.search(normalized)) and any(
             signal in normalized for signal in cls._INCIDENT_SIGNALS
+        )
+
+    @classmethod
+    def is_knowledge_light_message(cls, message: str) -> bool:
+        """True for greetings / identity / pure-explanation knowledge questions."""
+        normalized = str(message or "").strip().lower()
+        if not normalized:
+            return True
+        if any(signal in normalized for signal in cls._INCIDENT_SIGNALS):
+            # Still light if there is no concrete operational target.
+            if cls._CONCRETE_OPERATIONAL_TARGET.search(normalized):
+                return False
+        if cls._CONCRETE_OPERATIONAL_TARGET.search(normalized):
+            return False
+        light_markers = (
+            "你好",
+            "您好",
+            "hello",
+            "hi",
+            "你是谁",
+            "你是什么",
+            "什么模型",
+            "哪款模型",
+            "model",
+            "介绍一下你",
+            "谢谢",
+            "thanks",
+        )
+        if any(marker in normalized for marker in light_markers):
+            return True
+        # Short non-operational chat without concrete target.
+        return len(normalized) <= 24 and not any(
+            token in normalized
+            for token in ("告警", "日志", "变更", "发布", "排查", "故障", "prometheus")
         )
 
     # ------------------------------------------------------------------ streaming
@@ -444,9 +593,16 @@ class RouterService:
             return
 
         expert = get_expert(decision.route)
+        preference_mode = str(
+            getattr(config, "harness_preference_inject_mode", "router_and_harness")
+        ).strip().lower()
         preference_context = (
             user_preference_service.format_for_prompt(owner_key)
-            if owner_key and config.user_preferences_enabled
+            if (
+                preference_mode != "harness_only"
+                and owner_key
+                and config.user_preferences_enabled
+            )
             else ""
         )
         events: list[dict[str, Any]] = [route_event]

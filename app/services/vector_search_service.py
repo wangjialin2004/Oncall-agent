@@ -9,6 +9,8 @@ from pymilvus import AnnSearchRequest, Collection, RRFRanker, WeightedRanker
 
 from app.config import config
 from app.core.milvus_client import milvus_manager
+from app.core.request_context import RequestContext, get_request_context
+from app.services.rag_scope import build_scope_filter
 
 
 class SearchResult:
@@ -52,7 +54,13 @@ class VectorSearchService:
         """初始化向量检索服务"""
         logger.info("向量检索服务初始化完成")
 
-    def search(self, query: str, top_k: int = 3) -> list[SearchResult]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 3,
+        *,
+        context: RequestContext | None = None,
+    ) -> list[SearchResult]:
         """统一知识库检索入口。
 
         根据配置在 dense、BM25 和 hybrid 检索模式之间分流。
@@ -65,14 +73,20 @@ class VectorSearchService:
 
         mode = str(config.rag_retrieval_mode or "dense").strip().lower()
         if mode == "hybrid":
-            return self.search_hybrid_documents(query=query, top_k=top_k)
+            return self.search_hybrid_documents(query=query, top_k=top_k, context=context)
         if mode == "bm25":
-            return self.search_bm25_documents(query=query, top_k=top_k)
+            return self.search_bm25_documents(query=query, top_k=top_k, context=context)
         if mode != "dense":
             logger.warning(f"未知 RAG 检索模式: {mode}，回退到 dense")
-        return self.search_similar_documents(query=query, top_k=top_k)
+        return self.search_similar_documents(query=query, top_k=top_k, context=context)
 
-    def search_similar_documents(self, query: str, top_k: int = 3) -> list[SearchResult]:
+    def search_similar_documents(
+        self,
+        query: str,
+        top_k: int = 3,
+        *,
+        context: RequestContext | None = None,
+    ) -> list[SearchResult]:
         """
         搜索相似文档
 
@@ -88,6 +102,7 @@ class VectorSearchService:
         """
         try:
             logger.info(f"开始搜索相似文档, 查询: {query}, topK: {top_k}")
+            scope_filter = self._scope_filter(context)
 
             # 1. 将查询文本向量化
             query_vector = self._embed_query(query)
@@ -108,7 +123,8 @@ class VectorSearchService:
                 anns_field=config.rag_dense_vector_field,
                 param=search_params,
                 limit=top_k,
-                output_fields=["id", "content", "metadata"],
+                expr=scope_filter,
+                output_fields=["id", "content", "metadata", "scope_type", "scope_id"],
             )
 
             # 5. 解析搜索结果
@@ -121,18 +137,26 @@ class VectorSearchService:
             logger.error(f"搜索相似文档失败: {e}")
             raise RuntimeError(f"搜索失败: {e}") from e
 
-    def search_bm25_documents(self, query: str, top_k: int = 3) -> list[SearchResult]:
+    def search_bm25_documents(
+        self,
+        query: str,
+        top_k: int = 3,
+        *,
+        context: RequestContext | None = None,
+    ) -> list[SearchResult]:
         """使用 Milvus BM25 sparse vector 检索文档。"""
 
         try:
             logger.info(f"开始 BM25 搜索, 查询: {query}, topK: {top_k}")
+            scope_filter = self._scope_filter(context)
             collection: Collection = milvus_manager.get_collection()
             results = collection.search(
                 data=[query],
                 anns_field=config.rag_sparse_vector_field,
                 param=self._bm25_search_params(),
                 limit=top_k,
-                output_fields=["id", "content", "metadata"],
+                expr=scope_filter,
+                output_fields=["id", "content", "metadata", "scope_type", "scope_id"],
             )
             search_results = self._parse_results(results, retrieval_type="bm25")
             logger.info(f"BM25 搜索完成, 找到 {len(search_results)} 个文档")
@@ -141,7 +165,13 @@ class VectorSearchService:
             logger.error(f"BM25 搜索失败: {e}")
             raise RuntimeError(f"BM25 搜索失败: {e}") from e
 
-    def search_hybrid_documents(self, query: str, top_k: int = 3) -> list[SearchResult]:
+    def search_hybrid_documents(
+        self,
+        query: str,
+        top_k: int = 3,
+        *,
+        context: RequestContext | None = None,
+    ) -> list[SearchResult]:
         """使用 dense vector + BM25 sparse vector 混合检索文档。
 
         支持两种重排序策略：
@@ -151,6 +181,7 @@ class VectorSearchService:
 
         try:
             hybrid_ranker = str(config.rag_hybrid_ranker or "weighted").strip().lower()
+            scope_filter = self._scope_filter(context)
             rerank = self._build_hybrid_reranker(hybrid_ranker)
             retrieval_type = f"hybrid_{hybrid_ranker}"
 
@@ -175,7 +206,8 @@ class VectorSearchService:
                 reqs=[dense_request, sparse_request],
                 rerank=rerank,
                 limit=top_k,
-                output_fields=["id", "content", "metadata"],
+                expr=scope_filter,
+                output_fields=["id", "content", "metadata", "scope_type", "scope_id"],
             )
             search_results = self._parse_results(results, retrieval_type=retrieval_type)
             logger.info(f"hybrid 搜索完成, 找到 {len(search_results)} 个文档")
@@ -203,6 +235,10 @@ class VectorSearchService:
         from app.services.vector_embedding_service import vector_embedding_service
 
         return vector_embedding_service.embed_query(query)
+
+    @staticmethod
+    def _scope_filter(context: RequestContext | None) -> str | None:
+        return build_scope_filter(context or get_request_context())
 
     def _dense_search_params(self) -> dict[str, Any]:
         return {

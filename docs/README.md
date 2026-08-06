@@ -1,8 +1,9 @@
 # 文档索引（docs/）
 
-> 更新：2026-07-13 — 正式 L1 Go + **M1 W1/W2 演进交接**；文档分类见下。  
-> **接手请先看** → [`pilot/handoff-2026-07-13-l1-m1-w2.md`](./pilot/handoff-2026-07-13-l1-m1-w2.md)  
-> （仅运维拉起/账号仍可看 [`pilot/handoff-2026-07-12-l1-pilot.md`](./pilot/handoff-2026-07-12-l1-pilot.md)）
+> 更新：2026-07-26 — 对话内实时工具 / 专家过程流交接；产品状态仍为 L3 Conditional。
+> **当前前端 / 公开事件契约接手** → [`pilot/handoff-2026-07-26-inline-chat-agent-activity.md`](./pilot/handoff-2026-07-26-inline-chat-agent-activity.md)
+> **上下文/运行时接手** → [`pilot/handoff-2026-07-23-unified-context-runtime-canary.md`](./pilot/handoff-2026-07-23-unified-context-runtime-canary.md)
+> **产品主交接** → [`pilot/handoff-2026-07-15-m3-l3-conditional.md`](./pilot/handoff-2026-07-15-m3-l3-conditional.md)
 
 ---
 
@@ -43,7 +44,12 @@ docs/
 
 | 优先级 | 文档 | 说明 |
 |---|---|---|
-| **P0** | [handoff-2026-07-13-l1-m1-w2.md](./pilot/handoff-2026-07-13-l1-m1-w2.md) | **当前交接（L1 Go + M1 W1/W2）** |
+| **P0** | [handoff-2026-07-26-inline-chat-agent-activity.md](./pilot/handoff-2026-07-26-inline-chat-agent-activity.md) | **当前前端 / 公开事件契约交接**：对话内工具/专家过程、服务端脱敏、回滚开关、自动化/live 证据与待补 Browser QA |
+| **P0** | [handoff-2026-07-23-unified-context-runtime-canary.md](./pilot/handoff-2026-07-23-unified-context-runtime-canary.md) | **当前上下文/运行时交接**：live schema v3 + compact + canary + 动态 plan + 白板工具 + E2E；默认 true 仍待 |
+| **P0** | [handoff-2026-07-19-unified-context-repository.md](./pilot/handoff-2026-07-19-unified-context-repository.md) | 统一上下文架构与迁移细节；运行状态以 07-23 交接为准 |
+| **P0** | [handoff-2026-07-15-m3-l3-conditional.md](./pilot/handoff-2026-07-15-m3-l3-conditional.md) | **当前产品主交接**：L3 Conditional、full 21/23、H3 豁免 |
+| **P0** | [handoff-2026-07-18-security-tenant-reliability.md](./pilot/handoff-2026-07-18-security-tenant-reliability.md) | 安全、租户隔离、migration 与 deployment 工程交接 |
+| P1 | [handoff-2026-07-13-l1-m1-w2.md](./pilot/handoff-2026-07-13-l1-m1-w2.md) | 历史 L1 Go + M1 W1/W2 交接 |
 | **P0** | [handoff-2026-07-12-l1-pilot.md](./pilot/handoff-2026-07-12-l1-pilot.md) | L1 运维拉起 / 账号 / H1–H6（仍有效） |
 | **P0** | [go-nogo-20260712.md](./pilot/go-nogo-20260712.md) | **L1 决策与门禁表 / 签字栏** |
 | P0 | [2026-07-10-pilot-readiness-checklist-and-eval-suite.md](./pilot/2026-07-10-pilot-readiness-checklist-and-eval-suite.md) | 验收标准 + 23 题定义 |
@@ -60,6 +66,10 @@ docs/
 
 | 文档 | 说明 |
 |---|---|
+| [completion-review-2026-07-23-agent-basic-capabilities.md](./reviews/completion-review-2026-07-23-agent-basic-capabilities.md) | **Agent 基础能力审查：仅适合受控 L1 辅助试点；默认安装/初始化/上传索引、真实运维证据、MCP 降级、安全门禁、完整测试与部署主路径存在 P1 缺口** |
+| [completion-review-2026-07-19-unified-context-repository.md](./reviews/completion-review-2026-07-19-unified-context-repository.md) | **统一上下文仓储完成评审：默认关闭安全，但 6 个 P1 阻塞 canary；单一 loader、原子异常路径、migration reducer、schema gate、inflight resume 未完成** |
+| [completion-review-2026-07-19-unified-context-repository-2.md](./reviews/completion-review-2026-07-19-unified-context-repository-2.md) | **统一上下文仓储修复复审：首次 P1/P2 已关闭，115 focused + 23 soft-path + 49 ci-smoke 通过；代码可申请 schema v3，live apply/Redis/canary 仍受门控** |
+| [completion-review-2026-07-18-security-tenant-reliability.md](./reviews/completion-review-2026-07-18-security-tenant-reliability.md) | **系统安全/租户隔离/可靠性收尾审查；代码条件通过，live migration、readiness/metrics、WP-8 仍阻塞** |
 | [completion-review-2026-07-13-project-score.md](./reviews/completion-review-2026-07-13-project-score.md) | **07-13 全项目审查与综合打分（7.9/10）** |
 | [completion-review-2026-07-13-formal-l1-go.md](./reviews/completion-review-2026-07-13-formal-l1-go.md) | **07-13 正式 L1 Go 决策落档** |
 | [completion-review-2026-07-12-evening.md](./reviews/completion-review-2026-07-12-evening.md) | 07-12 晚间连续评测 + checkpoint |

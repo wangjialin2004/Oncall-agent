@@ -1,6 +1,27 @@
 from __future__ import annotations
 
+import asyncio
+import time
+from collections.abc import AsyncGenerator
+from typing import Any
+
+from loguru import logger
+
+from app.agent.agent_loop import tool_call_payload
+from app.agent.events import make_agent_event, make_route_event
+from app.agent.experts.registry import DEFAULT_ROUTE, EXPERT_ROUTES
+from app.agent.harness.context import HarnessContext
+from app.agent.harness.output_safety import (
+    contains_internal_tool_protocol,
+    sanitize_user_visible_answer,
+)
+from app.agent.harness.state import HarnessState
+from app.agent.stream_common import CLARIFY_TEXT
 from app.config import config
+from app.core.llm_client import ChatMessage
+from app.core.tool_calling import tool_to_definition
+from app.services.attachment_reference_service import strip_attachment_wrapper
+from app.services.harness_checkpoint import messages_from_dict
 
 
 def stateful_context_enabled(*args, **kwargs):
@@ -15,57 +36,52 @@ def stateful_context_enabled(*args, **kwargs):
 
 
 async def build_stateful_context(*args, **kwargs):
+    """Compatibility adapter that always loads the unified context envelope."""
     from app.agent.harness import loop as harness_loop
+    from app.agent.context.integration import build_stateful_context as _legacy_impl
 
     fn = getattr(harness_loop, "build_stateful_context", None)
-    if fn is not None and getattr(fn, "__module__", "") != __name__:
+    if (
+        fn is not None
+        and fn is not _legacy_impl
+        and getattr(fn, "__module__", "") != __name__
+    ):
         return await fn(*args, **kwargs)
-    from app.agent.context.integration import build_stateful_context as _impl
 
-    return await _impl(*args, **kwargs)
+    from app.agent.context.unified import load_unified_stateful_context
+
+    allowed = {
+        "owner_key",
+        "session_id",
+        "current_question",
+        "current_goal",
+        "repository",
+        "active_attachment_refs",
+        "token_budget",
+        "history_limit",
+    }
+    filtered = {key: value for key, value in kwargs.items() if key in allowed}
+    return await load_unified_stateful_context(*args, **filtered)
 
 
 async def persist_stateful_context(*args, **kwargs):
+    """Persist only recoverable in-flight unified context state."""
     from app.agent.harness import loop as harness_loop
+    from app.agent.context.integration import persist_stateful_context as _legacy_impl
 
     fn = getattr(harness_loop, "persist_stateful_context", None)
-    if fn is not None and getattr(fn, "__module__", "") != __name__:
+    if (
+        fn is not None
+        and fn is not _legacy_impl
+        and getattr(fn, "__module__", "") != __name__
+    ):
         return await fn(*args, **kwargs)
-    from app.agent.context.integration import persist_stateful_context as _impl
 
-    return await _impl(*args, **kwargs)
+    from app.agent.context.unified import persist_runtime_state
 
-
-import asyncio
-import time
-from collections.abc import AsyncGenerator
-from typing import Any
-
-from loguru import logger
-
-from app.agent.agent_loop import tool_call_payload
-from app.agent.context.operations import framework_patch
-from app.agent.context.state import SECTION_OUTPUT
-from app.agent.events import make_agent_event, make_route_event
-from app.agent.experts.registry import DEFAULT_ROUTE, EXPERT_ROUTES
-from app.agent.harness.context import HarnessContext
-from app.agent.harness.otel_export import maybe_export_otel_span
-from app.agent.harness.output_safety import (
-    contains_internal_tool_protocol,
-    sanitize_user_visible_answer,
-)
-from app.agent.harness.state import HarnessState
-from app.agent.harness.trace_export import maybe_export_harness_trace
-from app.agent.stream_common import CLARIFY_TEXT
-from app.core.llm_client import ChatMessage
-from app.core.metrics import (
-    observe_agent_run,
-    observe_agent_tokens,
-    observe_tool_calls_from_timeline,
-)
-from app.core.tool_calling import tool_to_definition
-from app.services.harness_checkpoint import messages_from_dict
-
+    state = args[0] if args else kwargs.get("state")
+    warnings, _ = await persist_runtime_state(state, store=kwargs.get("store"))
+    return warnings
 
 class HarnessStreamInnerMixin:
     """Owns ``_stream_inner`` — full harness turn orchestration."""
@@ -80,16 +96,21 @@ class HarnessStreamInnerMixin:
         runtime: dict[str, Any] | None = None,
         simulate: str | None = None,
         prefer_parallel: bool | None = None,
+        raw_question: str | None = None,
+        context_run_id: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         state = HarnessState(trace_id=session_id, session_id=session_id, owner_key=owner_key)
+        intent_question = strip_attachment_wrapper(raw_question or message)
         started = time.perf_counter()
         if runtime is not None:
             runtime["state"] = state
             runtime["messages"] = []
             runtime["context_state"] = None
             runtime["started"] = started
+            runtime["raw_question"] = intent_question
             runtime["simulate"] = (simulate or "").strip()
             runtime["prefer_parallel"] = prefer_parallel
+            runtime["context_run_id"] = context_run_id or session_id
         if self.llm_client is not None:
             client = self.llm_client
             owns_client = False
@@ -108,20 +129,27 @@ class HarnessStreamInnerMixin:
         stateful_ctx = None
         resume_context_version: int | None = None
         resume_context_ref: str | None = None
-        if self.checkpoint_store is not None and owner_key:
+        if (
+            self.checkpoint_store is not None
+            and self.checkpoint_store.is_enabled()
+            and owner_key
+        ):
             resume = await self.checkpoint_store.try_resume(owner_key, session_id)
             if resume is not None and not resume.completed:
                 restored_messages = messages_from_dict(resume.messages)
                 if restored_messages:
                     resume_messages = restored_messages
-                    state = self._restore_state_from_resume(resume, state)
-                    if runtime is not None:
-                        runtime["state"] = state
+                # Stateful checkpoints intentionally persist no messages. The
+                # state snapshot must still be restored before context rehydrate.
+                state = self._restore_state_from_resume(resume, state)
+                if runtime is not None:
+                    runtime["state"] = state
                 resume_context_version = getattr(resume, "context_version", None)
                 resume_context_ref = getattr(resume, "context_snapshot_ref", None)
                 if self._should_replay_resume(resume, replay_override=checkpoint_replay):
                     resume_from_step = max(0, int(resume.next_step) - 1)
                 else:
+                    # Explicit close-only (request checkpoint_replay=False).
                     resume_close_only = True
                 yield make_agent_event(
                     agent="harness",
@@ -134,9 +162,9 @@ class HarnessStreamInnerMixin:
                         "resumed_from_step": int(resume.next_step - 1),
                         "replayed_steps": len(resume.steps),
                         "started_at": resume.started_at,
-                        "conservative": not bool(
-                            getattr(config, "harness_checkpoint_replay", False)
-                        ),
+                        # True only when this resume will skip the tool loop.
+                        "conservative": bool(resume_close_only),
+                        "continue_from_next_step": not bool(resume_close_only),
                         "replay_override": (
                             True
                             if checkpoint_replay is True
@@ -160,7 +188,18 @@ class HarnessStreamInnerMixin:
             # has something to serialize even if the run explodes before the
             # main ``messages = [...]`` assignment further below.
             messages = []
-            route_decision = await self.router._resolve_route(message)
+            previous_route = None
+            if owner_key and session_id:
+                try:
+                    from app.services.conversation_service import conversation_service
+
+                    previous_route = conversation_service.get_last_route(owner_key, session_id)
+                except Exception:
+                    previous_route = None
+            route_decision = await self.router._resolve_route(
+                message,
+                previous_route=previous_route,
+            )
             state.route = (
                 route_decision.route if route_decision.route != "clarify" else DEFAULT_ROUTE
             )
@@ -170,7 +209,14 @@ class HarnessStreamInnerMixin:
                 reason=state.route_reason,
                 confidence=route_decision.confidence,
                 candidates=list(EXPERT_ROUTES),
-                payload={"mode": "harness", "focus_route": route_decision.route},
+                payload={
+                    "mode": "harness",
+                    "focus_route": route_decision.route,
+                    "previous_route": previous_route,
+                    "continuation_inherited": str(route_decision.reason or "").startswith(
+                        "continuation_inherit_"
+                    ),
+                },
                 trace_id=session_id,
             )
             state.timeline_events.append(route_event)
@@ -203,78 +249,82 @@ class HarnessStreamInnerMixin:
                 f"candidate route: {route_decision.route}; reason: {route_decision.reason}; "
                 f"置信度：{route_decision.confidence:.2f}"
             )
-            if stateful_context_enabled():
+            from app.agent.context.integration import StatefulContext
+            from app.agent.context.unified import (
+                prepare_unified_context,
+                render_unified_envelope,
+            )
 
-                async def _rebuild(owner: str, sid: str) -> AgentContextState | None:
-                    if not bool(
-                        getattr(config, "harness_context_rebuild_from_turns_enabled", True)
-                    ):
-                        return None
-                    return await self._rebuild_context_state_from_legacy(
-                        owner_key=owner,
-                        session_id=sid,
-                        message=message,
-                        tools=tools,
-                        focus_hint=focus_hint,
-                        llm_client=client,
-                    )
-
-                stateful_ctx = await build_stateful_context(
-                    owner_key=owner_key,
-                    session_id=session_id,
-                    current_question=message,
-                    current_goal=message,
-                    store=self.context_store,
-                    rebuild=_rebuild,
-                    active_attachment_refs=attachment_refs,
-                    token_budget=int(getattr(config, "harness_context_view_token_budget", 4000)),
-                    history_limit=int(getattr(config, "harness_context_patch_history_limit", 200)),
+            use_stateful_renderer = stateful_context_enabled()
+            base_prompt = self.context_builder._build_system_prompt(
+                owner_key=owner_key,
+                tools=tools,
+                focus_hint=focus_hint,
+            )
+            loaded = await prepare_unified_context(
+                owner_key=owner_key,
+                session_id=session_id,
+                current_question=intent_question,
+                current_goal=intent_question,
+                repository=self.context_repository,
+                active_attachment_refs=attachment_refs,
+                token_budget=int(
+                    getattr(config, "harness_context_view_token_budget", 4000)
+                ),
+                history_limit=int(
+                    getattr(config, "harness_context_patch_history_limit", 200)
+                ),
+                stateful=use_stateful_renderer,
+                base_prompt=base_prompt,
+                run_id=context_run_id or session_id,
+                resume_context_ref=resume_context_ref,
+                resume_context_version=resume_context_version,
+            )
+            if use_stateful_renderer:
+                context_tools = self.tool_registry.context_tools(
+                    loaded.state,
+                    whiteboard_injected=True,
                 )
-                context_tools = self.tool_registry.context_tools(stateful_ctx.state)
                 if context_tools:
                     tools = [*tools, *context_tools]
-                base_prompt = self.context_builder._build_system_prompt(
-                    owner_key=owner_key,
-                    tools=tools,
-                    focus_hint=focus_hint,
-                )
-                state_view = stateful_ctx.view.strip()
-                context = HarnessContext(
-                    system_prompt=(
-                        f"{base_prompt}\n\n"
-                        "当前会话状态白板（唯一上下文主来源；模型笔记均为未验证）：\n"
-                        f"{state_view}"
-                        if state_view
-                        else base_prompt
-                    ),
-                    history_messages=self._recent_dicts_to_messages(stateful_ctx.recent_messages),
-                )
-                await persist_stateful_context(
-                    stateful_ctx.state,
-                    store=self.context_store,
-                    persist_snapshot=False,
-                )
-                if runtime is not None:
-                    runtime["context_state"] = stateful_ctx.state
-                # When resuming with a snapshot ref, surface rehydrate outcome.
-                if resume_context_ref:
-                    async for event in self._emit_context_rehydrate_status(
-                        state=state,
-                        stateful_ctx=stateful_ctx,
-                        resume_context_ref=resume_context_ref,
+                    base_prompt = self.context_builder._build_system_prompt(
                         owner_key=owner_key,
-                        session_id=session_id,
-                    ):
-                        yield event
-            else:
-                context = await self.context_builder.abuild(
-                    message=message,
+                        tools=tools,
+                        focus_hint=focus_hint,
+                    )
+                    loaded.rendered = render_unified_envelope(
+                        loaded.envelope,
+                        message=intent_question,
+                        stateful=True,
+                        base_prompt=base_prompt,
+                    )
+            stateful_ctx = StatefulContext(
+                state=loaded.state,
+                view=loaded.rendered.view,
+                recent_messages=[item.to_dict() for item in loaded.rendered.history_messages],
+                source=str(loaded.envelope.source),
+                warnings=list(loaded.envelope.warnings),
+            )
+            context = HarnessContext(
+                system_prompt=loaded.rendered.system_prompt,
+                history_messages=list(loaded.rendered.history_messages),
+            )
+            await persist_stateful_context(
+                stateful_ctx.state,
+                store=self.context_store,
+                persist_snapshot=False,
+            )
+            if runtime is not None:
+                runtime["context_state"] = stateful_ctx.state
+            if resume_context_ref:
+                async for event in self._emit_context_rehydrate_status(
+                    state=state,
+                    stateful_ctx=stateful_ctx,
+                    resume_context_ref=resume_context_ref,
                     owner_key=owner_key,
                     session_id=session_id,
-                    tools=tools,
-                    focus_hint=focus_hint,
-                    llm_client=client,
-                )
+                ):
+                    yield event
             context_ref["value"] = context.system_prompt
             state.add_text_budget(context.system_prompt)
             for history_message in context.history_messages:
@@ -345,6 +395,15 @@ class HarnessStreamInnerMixin:
                 ]
             )
             if runtime is not None:
+                if bool(getattr(config, "harness_context_size_metrics_enabled", False)):
+                    runtime["context_metrics"] = {
+                        "system_chars": len(context.system_prompt or ""),
+                        "history_chars": sum(
+                            len(item.content or "") for item in context.history_messages
+                        ),
+                        "user_chars": len(message or ""),
+                        "view_chars": len(getattr(stateful_ctx, "view", "") or ""),
+                    }
                 runtime["messages"] = messages
                 runtime["state"] = state
                 if stateful_ctx is not None:
@@ -379,8 +438,8 @@ class HarnessStreamInnerMixin:
                     state=state,
                     stage="checkpoint_conservative_close",
                     summary=(
-                        "Resumed from checkpoint with non-replayable tools; "
-                        "closing from saved evidence without replay."
+                        "Resumed from checkpoint in close-only mode; "
+                        "finalizing from saved evidence without further tools."
                     ),
                     payload={"step": state.step, "checkpoint_resume": True},
                 )
@@ -473,6 +532,7 @@ class HarnessStreamInnerMixin:
                     verification_gaps=None,
                     force_after_re_evidence=False,
                     aux_routes=aux_routes,
+                    plan=plan,
                 ):
                     plan, replan_event = self._apply_replan(
                         plan=plan,

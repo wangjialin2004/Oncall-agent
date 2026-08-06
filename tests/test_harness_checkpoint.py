@@ -132,17 +132,17 @@ async def test_resume_skips_to_next_step(store: HarnessCheckpointStore) -> None:
     resume = await store.try_resume("o", "s")
     assert resume is not None
     assert resume.next_step == 3
-    # Conservative: only one tool used (delegate_to_expert, in whitelist).
+    # Default resume continues from next_step (interrupt recovery).
     assert HarnessService._should_replay_resume(resume) is True
 
 
 @pytest.mark.asyncio
-async def test_aggressive_replay_replays_verbatim(
+async def test_resume_continues_with_non_whitelisted_history(
     store: HarnessCheckpointStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("app.config.config.harness_checkpoint_replay", True, raising=False)
+    """Historical non-whitelist tools must not block interrupt recovery."""
+    monkeypatch.setattr("app.config.config.harness_checkpoint_replay", False, raising=False)
     state = _state(step=2)
-    # Step uses a non-whitelisted tool — conservative would refuse to replay.
     await store.save_step(
         owner_key="o",
         session_id="s",
@@ -164,15 +164,10 @@ async def test_aggressive_replay_replays_verbatim(
 
 
 @pytest.mark.asyncio
-async def test_request_replay_override_forces_replay(
+async def test_request_replay_override_true_continues(
     store: HarnessCheckpointStore,
 ) -> None:
-    """Per-request ``replay_override=True`` overrides config default and forces replay.
-
-    Config stays at the conservative default (False); the checkpoint step uses a
-    non-whitelisted tool. Without override, conservative would refuse. The
-    explicit True from the HTTP layer must win.
-    """
+    """``replay_override=True`` continues from next_step (same as default)."""
     state = _state(step=2)
     await store.save_step(
         owner_key="o",
@@ -191,22 +186,15 @@ async def test_request_replay_override_forces_replay(
     )
     resume = await store.try_resume("o", "s")
     assert resume is not None
-    # Conservative (no override): non-whitelist → no replay.
-    assert HarnessService._should_replay_resume(resume) is False
-    # Override True forces replay regardless of whitelist.
+    assert HarnessService._should_replay_resume(resume) is True
     assert HarnessService._should_replay_resume(resume, replay_override=True) is True
 
 
 @pytest.mark.asyncio
-async def test_request_replay_override_forces_conservative(
+async def test_request_replay_override_forces_close_only(
     store: HarnessCheckpointStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Per-request ``replay_override=False`` overrides config aggressive flag.
-
-    Config is flipped to ``harness_checkpoint_replay=True`` so the default would
-    replay verbatim. Override False must make the whitelist re-check happen,
-    so a non-whitelisted step still triggers conservative close.
-    """
+    """Only explicit ``replay_override=False`` forces close-only finalization."""
     monkeypatch.setattr("app.config.config.harness_checkpoint_replay", True, raising=False)
     state = _state(step=2)
     await store.save_step(
@@ -226,14 +214,12 @@ async def test_request_replay_override_forces_conservative(
     )
     resume = await store.try_resume("o", "s")
     assert resume is not None
-    # Config aggressive → replay.
     assert HarnessService._should_replay_resume(resume) is True
-    # Override False forces conservative: non-whitelist step → no replay.
     assert HarnessService._should_replay_resume(resume, replay_override=False) is False
 
 
 @pytest.mark.asyncio
-async def test_conservative_skips_non_idempotent_step(
+async def test_default_resume_allows_non_idempotent_history(
     store: HarnessCheckpointStore,
 ) -> None:
     state = _state(step=2)
@@ -254,7 +240,7 @@ async def test_conservative_skips_non_idempotent_step(
     )
     resume = await store.try_resume("o", "s")
     assert resume is not None
-    assert HarnessService._should_replay_resume(resume) is False
+    assert HarnessService._should_replay_resume(resume) is True
 
 
 # ---------------------------------------------------------------------------

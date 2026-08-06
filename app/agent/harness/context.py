@@ -7,6 +7,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from loguru import logger
+
 from app.agent.agent_loop import estimate_tokens
 from app.config import config
 from app.core.llm_client import ChatMessage

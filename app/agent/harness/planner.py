@@ -65,21 +65,31 @@ class LightweightPlanner:
             for tool in tools
             if tool.name not in {"context_read", "context_note", "read_attachment"}
         ]
-        required_evidence = _required_evidence_for_route(route)
+        light_path = _is_knowledge_light_path(route=route, message=message)
+        required_evidence = (
+            [] if light_path else _required_evidence_for_route(route)
+        )
         required_params = _required_params_for_route(route)
 
-        todos = ["理解当前请求、只读边界和可用历史上下文"]
-        if history_turns:
-            todos.append(f"回顾最近 {history_turns} 轮上下文，避免重复取证")
-        if tool_names:
-            todos.append(
-                f"优先围绕 {route} 焦点选择最相关工具取证：{', '.join(tool_names[:4])}"
-            )
+        if light_path:
+            todos = [
+                "识别为轻量 knowledge 问题（问候/身份/纯解释），允许直接回答",
+                "无需强制知识库取证；仅在有把握时可选检索",
+                "回答简洁，不编造未验证的平台元数据",
+            ]
         else:
-            todos.append("当前无可用工具，回答中必须显式说明证据缺口")
-        if required_evidence:
-            todos.append(f"核对关键证据类型：{'、'.join(required_evidence)}")
-        todos.append("定稿前自检：结论是否由工具证据或历史上下文支撑")
+            todos = ["理解当前请求、只读边界和可用历史上下文"]
+            if history_turns:
+                todos.append(f"回顾最近 {history_turns} 轮上下文，避免重复取证")
+            if tool_names:
+                todos.append(
+                    f"优先围绕 {route} 焦点选择最相关工具取证：{', '.join(tool_names[:4])}"
+                )
+            else:
+                todos.append("当前无可用工具，回答中必须显式说明证据缺口")
+            if required_evidence:
+                todos.append(f"核对关键证据类型：{'、'.join(required_evidence)}")
+            todos.append("定稿前自检：结论是否由工具证据或历史上下文支撑")
 
         return HarnessPlan(
             todos=todos,
@@ -186,6 +196,22 @@ def _required_evidence_for_route(route: str) -> list[str]:
     if route == "knowledge":
         return ["知识库检索结果", "适用前提"]
     return ["指标/日志/变更至少一种证据", "证据缺口说明"]
+
+
+def _is_knowledge_light_path(*, route: str, message: str) -> bool:
+    """Whether this request should skip hard knowledge evidence requirements."""
+    if not bool(getattr(config, "harness_knowledge_light_path_enabled", True)):
+        return False
+    if str(route or "").strip() != "knowledge":
+        return False
+    try:
+        from app.services.router_service import RouterService
+
+        return RouterService.is_knowledge_light_message(message)
+    except Exception:
+        # Fail open to light path only for very short non-empty messages.
+        text = str(message or "").strip()
+        return bool(text) and len(text) <= 24
 
 
 def rule_replan(

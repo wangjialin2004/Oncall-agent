@@ -17,6 +17,7 @@ from app.config import config
 from app.core.llm_client import close_default_llm_client, get_default_llm_client
 from app.core.metrics import setup_metrics
 from app.core.milvus_client import milvus_manager
+from app.services.redis_client import redis_lifespan
 
 _DEFAULT_AUTH_TOKEN_SECRET = "dev-auth-token-secret"
 
@@ -56,6 +57,8 @@ async def lifespan(app: FastAPI):
     logger.info(f"📚 API 文档: http://{config.host}:{config.port}/docs")
 
     _log_auth_startup_checks()
+    redis_context = redis_lifespan()
+    await redis_context.__aenter__()
 
     # 连接 Milvus
     logger.info("🔌 正在连接 Milvus...")
@@ -75,14 +78,47 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("LLMClient 预热失败（按需懒加载）：{}", e)
 
-    # 预热 MCP 客户端（避免首次 expert 启动时再冷启 5~8s）
-    try:
-        from app.agent.mcp_client import get_mcp_client_with_retry
+    # 只有启用 MCP 能力时才预热并将其视为 readiness 依赖。
+    if config.harness_mcp_enabled:
+        try:
+            from app.agent.mcp_client import get_mcp_client_with_retry
 
-        await get_mcp_client_with_retry()
-        logger.info("✅ MCP 客户端预热完成")
+            await get_mcp_client_with_retry()
+            logger.info("✅ MCP 客户端预热完成")
+        except Exception as e:
+            logger.warning("MCP 客户端预热失败（按需懒加载）：{}", e)
+    else:
+        logger.info("MCP disabled; skip client prewarm")
+
+    # Local BGE-M3 first-load is multi-second and has crashed under WSL+CUDA.
+    # Warm the model off the request path so the first RAG call does not
+    # block the harness SSE stream (or silently die mid-tool).
+    try:
+        provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
+        if provider in {"", "local_bge_m3", "bge", "bge3", "bge_m3", "local", "local_bge", "flagembedding"}:
+            import asyncio
+
+            from app.services.vector_embedding_service import get_vector_embedding_service
+
+            def _warm_embedding() -> int:
+                service = get_vector_embedding_service()
+                # Prefer an explicit load hook if present; otherwise a tiny encode.
+                load = getattr(service, "_load_model", None)
+                if callable(load):
+                    load()
+                    return int(getattr(service, "dimensions", 0) or 0)
+                vector = service.embed_query("embedding warmup")
+                return len(vector)
+
+            dims = await asyncio.to_thread(_warm_embedding)
+            logger.info(
+                "✅ 本地 embedding 预热完成 (provider={}, device={}, dims={})",
+                provider or "local_bge_m3",
+                getattr(config, "embedding_device", "") or "auto",
+                dims,
+            )
     except Exception as e:
-        logger.warning("MCP 客户端预热失败（按需懒加载）：{}", e)
+        logger.warning("本地 embedding 预热失败（按需懒加载）：{}", e)
 
     logger.info("=" * 60)
 
@@ -99,15 +135,13 @@ async def lifespan(app: FastAPI):
         milvus_manager.close()
     except Exception as e:
         logger.warning("Milvus close failed during shutdown: {}", e)
+    await redis_context.__aexit__(None, None, None)
     logger.info(f"👋 {config.app_name} 关闭")
 
 
 # 创建 FastAPI 应用
 app = FastAPI(
-    title=config.app_name,
-    version=config.app_version,
-    description="智能运维系统",
-    lifespan=lifespan
+    title=config.app_name, version=config.app_version, description="智能运维系统", lifespan=lifespan
 )
 
 # 配置 CORS
@@ -134,18 +168,22 @@ app.include_router(checkpoint.router, prefix="/api", tags=["harness-checkpoint"]
 
 # 挂载静态文件
 static_dir = "static"
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
+if config.static_serve_enabled:
+    if not os.path.isdir(static_dir):
+        raise RuntimeError("STATIC_SERVE_ENABLED=true but static directory is missing")
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
 
 @app.get("/")
 async def root():
     """返回首页"""
     index_path = os.path.join(static_dir, "index.html")
-    if os.path.exists(index_path):
+    if config.static_serve_enabled and os.path.exists(index_path):
         return FileResponse(index_path)
     return {
         "message": f"Welcome to {config.app_name} API",
         "version": config.app_version,
-        "docs": "/docs"
+        "docs": "/docs",
     }
 
 
@@ -153,9 +191,5 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(
-        "app.main:app",
-        host=config.host,
-        port=config.port,
-        reload=config.debug,
-        log_level="info"
+        "app.main:app", host=config.host, port=config.port, reload=config.debug, log_level="info"
     )

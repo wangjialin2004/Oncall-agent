@@ -103,7 +103,16 @@ describe("multi-turn conversation UI", () => {
               assistant_answer: "旧的回答",
               route: "metric",
               case_id: "",
-              events: [],
+              events: [
+                { type: "route_event", route: "metric", status: "completed" },
+                {
+                  type: "tool_event",
+                  tool: "query_metrics",
+                  status: "completed",
+                  duration_ms: 840,
+                  payload: { tool_call_id: "history-activity-1" },
+                },
+              ],
               created_at: "2026-06-18T00:00:00Z",
             },
           ]
@@ -119,9 +128,47 @@ describe("multi-turn conversation UI", () => {
 
     expect(await screen.findByText("旧的问题")).toBeInTheDocument();
     expect((await screen.findAllByText("旧的回答")).length).toBeGreaterThan(0);
+    expect(screen.getByRole("heading", { name: "执行轨迹" })).toBeInTheDocument();
+    const historyActivity = screen.getByText("查询指标").closest("[data-agent-activity-message]");
+    const answerBubble = screen.getByText("旧的回答").closest(".message-bubble");
+    expect(historyActivity).not.toBeNull();
+    expect(answerBubble).not.toBeNull();
+    if (!historyActivity || !answerBubble) throw new Error("history activity and answer should render");
+    expect(answerBubble.contains(historyActivity)).toBe(false);
   });
 
   it("deletes a conversation from the sidebar", async () => {
+    const sessions = [
+      {
+        session_id: "s-old",
+        title: "历史问题",
+        created_at: "2026-06-18T00:00:00Z",
+        updated_at: "2026-06-18T00:00:00Z",
+        turn_count: 1,
+      },
+    ];
+    mockListConversations
+      .mockResolvedValueOnce(sessions)
+      // Post-delete reconciliation may fail; the row must still disappear.
+      .mockRejectedValueOnce(new Error("refresh failed"));
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByTitle("历史问题");
+    await user.click(screen.getByRole("button", { name: "删除会话 历史问题" }));
+
+    // Exit animation plays first; the row is marked busy while collapsing.
+    const row = screen.getByTitle("历史问题").closest("li");
+    expect(row).toHaveClass("is-exiting");
+    expect(row).toHaveAttribute("aria-busy", "true");
+
+    // API fires only after the exit animation finishes.
+    await waitFor(() => expect(mockDeleteConversation).toHaveBeenCalledWith("s-old"));
+    await waitFor(() => expect(screen.queryByTitle("历史问题")).not.toBeInTheDocument());
+  });
+
+  it("restores the sidebar row when delete API fails", async () => {
     mockListConversations.mockResolvedValue([
       {
         session_id: "s-old",
@@ -131,6 +178,7 @@ describe("multi-turn conversation UI", () => {
         turn_count: 1,
       },
     ]);
+    mockDeleteConversation.mockRejectedValueOnce(new Error("Delete conversation failed (HTTP 500)"));
 
     const user = userEvent.setup();
     render(<App />);
@@ -138,6 +186,8 @@ describe("multi-turn conversation UI", () => {
     await screen.findByTitle("历史问题");
     await user.click(screen.getByRole("button", { name: "删除会话 历史问题" }));
 
-    expect(mockDeleteConversation).toHaveBeenCalledWith("s-old");
+    await waitFor(() => expect(mockDeleteConversation).toHaveBeenCalledWith("s-old"));
+    // Optimistic removal must roll back when the server rejects the delete.
+    expect(await screen.findByTitle("历史问题")).toBeInTheDocument();
   });
 });

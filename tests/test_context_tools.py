@@ -13,6 +13,7 @@ from app.agent.context.tools import (
     CONTEXT_NOTE_NAME,
     CONTEXT_READ_NAME,
     READ_ATTACHMENT_NAME,
+    build_runtime_tools,
     get_tool_definitions,
     list_advertised_tools,
     note_context,
@@ -126,6 +127,30 @@ def test_list_advertised_tools_matches_definitions() -> None:
     assert sorted(list_advertised_tools()) == sorted(
         {CONTEXT_READ_NAME, CONTEXT_NOTE_NAME, READ_ATTACHMENT_NAME}
     )
+
+
+def test_build_runtime_tools_omits_read_when_whiteboard_already_injected() -> None:
+    state = _state()
+    names = {tool.name for tool in build_runtime_tools(state, whiteboard_injected=True)}
+    assert CONTEXT_READ_NAME not in names
+    assert {CONTEXT_NOTE_NAME, READ_ATTACHMENT_NAME}.issubset(names)
+
+
+def test_build_runtime_tools_includes_read_when_forced(monkeypatch) -> None:
+    from app.config import config
+
+    monkeypatch.setattr(config, "harness_context_tools_enabled", True)
+    monkeypatch.setattr(config, "harness_context_read_when_view_injected", True)
+    state = _state()
+    names = {tool.name for tool in build_runtime_tools(state, whiteboard_injected=True)}
+    assert CONTEXT_READ_NAME in names
+    assert CONTEXT_NOTE_NAME in names
+
+
+def test_build_runtime_tools_includes_read_when_view_not_injected() -> None:
+    state = _state()
+    names = {tool.name for tool in build_runtime_tools(state, whiteboard_injected=False)}
+    assert {CONTEXT_READ_NAME, CONTEXT_NOTE_NAME, READ_ATTACHMENT_NAME} == names
 
 
 def test_tool_definitions_have_required_fields() -> None:

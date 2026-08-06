@@ -33,6 +33,13 @@ export type TimelineEvent = {
   span_id?: string;
   started_at?: number;
   payload?: Record<string, unknown>;
+  actions?: SuggestedAction[];
+};
+
+/** Bounded, display-safe tool-result field emitted by the public SSE projector. */
+export type PublicResultField = {
+  label: string;
+  value: string;
 };
 
 export type ContentEvent = {
@@ -60,15 +67,26 @@ export type ClarificationInfo = {
   question?: string;
 };
 
+/** Read-only HITL suggestion emitted on complete (M3 W9). Confirm = audit only. */
+export type SuggestedAction = {
+  id: string;
+  title: string;
+  risk: "low" | "medium" | "high" | string;
+  requires_confirm: boolean;
+};
+
 export type CompleteEvent = {
   type: "complete";
   route: AgentRoute;
   answer: string;
+  /** True when the server verified/replaced already streamed draft prose. */
+  replace_streamed_answer?: boolean;
   case_id: string;
   events: TimelineEvent[];
   distill_draft?: DistillDraftInfo | null;
   missing_params?: string[];
   clarification?: ClarificationInfo | null;
+  suggested_actions?: SuggestedAction[];
 };
 
 export type ErrorEvent = {
@@ -145,6 +163,10 @@ export type AgentRun = {
   /** Structured clarification slots for quick-fill chips (W10). */
   missingParams?: string[];
   clarification?: ClarificationInfo | null;
+  /** Read-only follow-up suggestions from harness complete (W9). */
+  suggestedActions?: SuggestedAction[];
+  /** Action ids the operator has confirmed this session (audit-only). */
+  confirmedActionIds?: string[];
   /** Set when this run picked up a saved checkpoint from Redis. */
   checkpointResume?: CheckpointResumeEvent;
   /** Set when the resumed run closed without re-running non-whitelisted tools. */

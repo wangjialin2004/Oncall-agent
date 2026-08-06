@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, Response
+from loguru import logger
 
 from app.services.file_storage_service import file_storage_service
 from app.services.session_scope_service import require_session_owner
@@ -67,7 +68,15 @@ async def upload_file(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"upload failed: {exc}") from exc
+        logger.error("file upload failed: {}", exc)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "internal_error",
+                "message": "internal_error",
+                "detail": "upload_failed",
+            },
+        ) from exc
 
     return _ok({"file": metadata, "deduplicated": dedup})
 
@@ -110,13 +119,9 @@ async def download_file(
     owner_key: str = Depends(require_session_owner),
 ):
     _validate_file_id(file_id)
-    data, meta, original_name = await file_storage_service.download(
-        owner_key, file_id
-    )
+    data, meta, original_name = await file_storage_service.download(owner_key, file_id)
     headers = {
-        "Content-Disposition": (
-            f'attachment; filename="{safe_storage_name(original_name)}"'
-        ),
+        "Content-Disposition": (f'attachment; filename="{safe_storage_name(original_name)}"'),
         "X-File-Id": meta["file_id"],
         "X-File-Hash": meta["file_hash"],
     }

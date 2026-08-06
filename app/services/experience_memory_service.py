@@ -51,8 +51,14 @@ def _key_get(db_path: Path, experience_id: str) -> str:
     return f"{_cache_prefix(db_path)}get:{experience_id}"
 
 
-def _key_list(db_path: Path, project_id: str, enabled: str, limit: int) -> str:
-    return f"{_cache_prefix(db_path)}list:{project_id}:{enabled}:{limit}"
+def _key_list(
+    db_path: Path,
+    project_id: str,
+    enabled: str,
+    limit: int,
+    owner_key: str = "",
+) -> str:
+    return f"{_cache_prefix(db_path)}list:{project_id}:{owner_key or '-'}:{enabled}:{limit}"
 
 
 class ExperienceMemoryService:
@@ -77,6 +83,7 @@ class ExperienceMemoryService:
         service_name: str = "",
         events: list[dict[str, Any]] | None = None,
         source_feedback_id: str = "",
+        owner_key: str = "",
     ) -> str:
         if not user_accepted:
             return ""
@@ -95,6 +102,8 @@ class ExperienceMemoryService:
             confidence=float(config.experience_memory_high_confidence),
             status="active",
             enabled=True,
+            owner_key=owner_key,
+            visibility="user" if owner_key else "project",
         )
 
     def create_weak_acceptance(
@@ -107,6 +116,7 @@ class ExperienceMemoryService:
         environment: str = "",
         service_name: str = "",
         events: list[dict[str, Any]] | None = None,
+        owner_key: str = "",
     ) -> str:
         return self._create_memory(
             project_id=project_id,
@@ -123,6 +133,8 @@ class ExperienceMemoryService:
             confidence=float(config.experience_memory_weak_confidence),
             status="active",
             enabled=True,
+            owner_key=owner_key,
+            visibility="user" if owner_key else "project",
         )
 
     def create_manual(
@@ -152,6 +164,7 @@ class ExperienceMemoryService:
             confidence=confidence,
             status="active",
             enabled=True,
+            visibility="project",
         )
 
     def create_draft_from_run(
@@ -170,9 +183,7 @@ class ExperienceMemoryService:
     ) -> str:
         """Create a success-run draft (pending) or active experience when auto_activate."""
         conf = float(
-            confidence
-            if confidence is not None
-            else config.experience_memory_high_confidence
+            confidence if confidence is not None else config.experience_memory_high_confidence
         )
         status = "active" if auto_activate else "pending"
         enabled = bool(auto_activate)
@@ -186,12 +197,16 @@ class ExperienceMemoryService:
             evidence_summary=_distill_events(events or []),
             source_type="auto_distill",
             source_session_id=session_id,
-            source_feedback_id=f"distill:{owner_key}:{session_id}" if owner_key else f"distill:{session_id}",
+            source_feedback_id=f"distill:{owner_key}:{session_id}"
+            if owner_key
+            else f"distill:{session_id}",
             source_event_ids=_event_ids(events or []),
             confidence=conf,
             status=status,
             enabled=enabled,
             allow_merge=auto_activate,
+            owner_key=owner_key,
+            visibility="project" if auto_activate else "user",
         )
 
     def create_anti_pattern(
@@ -212,8 +227,7 @@ class ExperienceMemoryService:
         symptoms = _build_symptoms(user_message, "")
         root_cause = f"无效排查路径：{tool_line}"
         resolution = (
-            "反模式：勿重复此无效工具序列；应换工具、声明证据缺口，"
-            "不得用知识库冒充实时指标。"
+            "反模式：勿重复此无效工具序列；应换工具、声明证据缺口，不得用知识库冒充实时指标。"
         )
         evidence = f"failed_tools: {tool_line}"
         if assistant_answer:
@@ -228,34 +242,58 @@ class ExperienceMemoryService:
             evidence_summary=evidence,
             source_type="anti_pattern",
             source_session_id=session_id,
-            source_feedback_id=f"anti:{owner_key}:{session_id}" if owner_key else f"anti:{session_id}",
+            source_feedback_id=f"anti:{owner_key}:{session_id}"
+            if owner_key
+            else f"anti:{session_id}",
             source_event_ids=[],
             confidence=float(config.experience_memory_weak_confidence),
             status="active",
             enabled=True,
             allow_merge=False,
+            owner_key=owner_key,
+            visibility="user" if owner_key else "project",
         )
 
-    def confirm_draft(self, experience_id: str, *, owner_key: str = "") -> dict[str, Any] | None:
-        memory = self.get(experience_id)
-        if memory is None:
-            return None
-        if str(memory.get("status") or "active") not in {"pending", "rejected"}:
-            # Already active: treat as success for idempotency.
-            if memory.get("enabled") and str(memory.get("status") or "") == "active":
+    def confirm_draft(
+        self,
+        experience_id: str,
+        *,
+        owner_key: str = "",
+        project_id: str = "",
+        approved_by: str = "",
+    ) -> dict[str, Any] | None:
+        now = _utc_now()
+        clauses = ["experience_id = ?", "status IN ('pending', 'rejected')"]
+        params: list[Any] = [
+            float(config.experience_memory_high_confidence),
+            approved_by or owner_key,
+            now,
+            now,
+            experience_id,
+        ]
+        if project_id:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if owner_key:
+            clauses.append("(owner_key = ? OR owner_key = '')")
+            params.append(owner_key)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE experience_memories
+                SET enabled = 1, status = 'active', visibility = 'project',
+                    confidence = MAX(confidence, ?), approved_by = ?, approved_at = ?,
+                    updated_at = ?
+                WHERE {" AND ".join(clauses)}
+                """,
+                params,
+            )
+        if cursor.rowcount == 0:
+            memory = self.get(experience_id)
+            if memory and memory.get("enabled") and memory.get("status") == "active":
                 return memory
             return None
-        ok = self.update(
-            experience_id,
-            enabled=True,
-            status="active",
-            confidence=max(
-                float(memory.get("confidence") or 0),
-                float(config.experience_memory_high_confidence),
-            ),
-        )
-        if not ok:
-            return None
+        self._invalidate_after_update(experience_id)
         logger.info(
             "distill draft confirmed experience_id={} owner={}",
             experience_id,
@@ -263,16 +301,29 @@ class ExperienceMemoryService:
         )
         return self.get(experience_id)
 
-    def reject_draft(self, experience_id: str, *, owner_key: str = "") -> dict[str, Any] | None:
-        memory = self.get(experience_id)
-        if memory is None:
+    def reject_draft(
+        self,
+        experience_id: str,
+        *,
+        owner_key: str = "",
+        project_id: str = "",
+    ) -> dict[str, Any] | None:
+        clauses = ["experience_id = ?", "status = 'pending'"]
+        params: list[Any] = [_utc_now(), experience_id]
+        if project_id:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if owner_key:
+            clauses.append("(owner_key = ? OR owner_key = '')")
+            params.append(owner_key)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                f"UPDATE experience_memories SET enabled = 0, status = 'rejected', updated_at = ? WHERE {' AND '.join(clauses)}",
+                params,
+            )
+        if cursor.rowcount == 0:
             return None
-        if str(memory.get("status") or "") not in {"pending", "active"} and memory.get("enabled"):
-            # allow reject of pending primarily
-            pass
-        ok = self.update(experience_id, enabled=False, status="rejected")
-        if not ok:
-            return None
+        self._invalidate_after_update(experience_id)
         logger.info(
             "distill draft rejected experience_id={} owner={}",
             experience_id,
@@ -286,12 +337,14 @@ class ExperienceMemoryService:
         project_id: str,
         limit: int = 50,
         session_id: str = "",
+        owner_key: str = "",
     ) -> list[dict[str, Any]]:
         rows = self.list(
             project_id=project_id,
             enabled=False,
             status="pending",
             limit=limit,
+            owner_key=owner_key,
         )
         if session_id:
             rows = [m for m in rows if m.get("source_session_id") == session_id]
@@ -306,7 +359,9 @@ class ExperienceMemoryService:
         session_id: str = "",
     ) -> list[dict[str, Any]]:
         if not self.index_service:
-            return self._recall_from_sqlite(query=query, project_id=project_id, top_k=top_k, session_id=session_id)
+            return self._recall_from_sqlite(
+                query=query, project_id=project_id, top_k=top_k, session_id=session_id
+            )
         try:
             candidates = self.index_service.recall(
                 query=query, project_id=project_id, top_k=top_k, session_id=session_id
@@ -315,9 +370,13 @@ class ExperienceMemoryService:
             candidates = self.index_service.recall(query=query, project_id=project_id, top_k=top_k)
         except Exception as exc:
             logger.warning(f"experience recall skipped: {exc}")
-            return self._recall_from_sqlite(query=query, project_id=project_id, top_k=top_k, session_id=session_id)
+            return self._recall_from_sqlite(
+                query=query, project_id=project_id, top_k=top_k, session_id=session_id
+            )
         if not candidates:
-            return self._recall_from_sqlite(query=query, project_id=project_id, top_k=top_k, session_id=session_id)
+            return self._recall_from_sqlite(
+                query=query, project_id=project_id, top_k=top_k, session_id=session_id
+            )
 
         memories: list[dict[str, Any]] = []
         for item in candidates:
@@ -333,7 +392,9 @@ class ExperienceMemoryService:
             memories.append(memory)
             self._increment_hit(memory["experience_id"], session_id=session_id)
         if not memories:
-            return self._recall_from_sqlite(query=query, project_id=project_id, top_k=top_k, session_id=session_id)
+            return self._recall_from_sqlite(
+                query=query, project_id=project_id, top_k=top_k, session_id=session_id
+            )
         # Prefer successful experiences over anti-patterns when ranking.
         memories.sort(
             key=lambda item: (
@@ -385,10 +446,17 @@ class ExperienceMemoryService:
         enabled: bool | None = None,
         status: str | None = None,
         limit: int = 50,
+        owner_key: str = "",
     ) -> list[dict[str, Any]]:
         enabled_marker = "*" if enabled is None else ("1" if enabled else "0")
         status_marker = status or "*"
-        key = _key_list(self.db_path, project_id, f"{enabled_marker}:{status_marker}", limit)
+        key = _key_list(
+            self.db_path,
+            project_id,
+            f"{enabled_marker}:{status_marker}",
+            limit,
+            owner_key,
+        )
         cache = get_default_cache()
         try:
             cached = cache.get(key)
@@ -399,6 +467,14 @@ class ExperienceMemoryService:
             return cached
         clauses = ["project_id = ?"]
         params: list[Any] = [project_id]
+        if owner_key:
+            clauses.append(
+                "((visibility = 'project' AND NOT (status = 'pending' AND owner_key = '')) "
+                "OR (visibility = 'user' AND owner_key = ?))"
+            )
+            params.append(owner_key)
+        else:
+            clauses.append("visibility = 'project' AND NOT (status = 'pending' AND owner_key = '')")
         if enabled is not None:
             clauses.append("enabled = ?")
             params.append(1 if enabled else 0)
@@ -410,7 +486,7 @@ class ExperienceMemoryService:
             rows = connection.execute(
                 f"""
                 SELECT * FROM experience_memories
-                WHERE {' AND '.join(clauses)}
+                WHERE {" AND ".join(clauses)}
                 ORDER BY updated_at DESC
                 LIMIT ?
                 """,
@@ -469,6 +545,15 @@ class ExperienceMemoryService:
             self._sync_index_after_update(experience_id, enabled=enabled)
         return updated
 
+    def _invalidate_after_update(self, experience_id: str) -> None:
+        cache = get_default_cache()
+        try:
+            cache.invalidate(_key_get(self.db_path, experience_id))
+            cache.invalidate_prefix(f"{_cache_prefix(self.db_path)}list:")
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"experience_memory cache invalidate failed: {exc}")
+        self._sync_index_after_update(experience_id)
+
     def rebuild_index(self, *, project_id: str | None = None) -> int:
         if not self.index_service:
             return 0
@@ -499,6 +584,8 @@ class ExperienceMemoryService:
         status: str = "active",
         enabled: bool = True,
         allow_merge: bool = True,
+        owner_key: str = "",
+        visibility: str = "project",
     ) -> str:
         if allow_merge and status == "active" and enabled and source_type != "anti_pattern":
             target = self._find_merge_target(
@@ -517,6 +604,8 @@ class ExperienceMemoryService:
         memory = {
             "experience_id": f"exp-{uuid.uuid4().hex}",
             "project_id": project_id,
+            "owner_key": owner_key,
+            "visibility": visibility if visibility in {"user", "project"} else "project",
             "environment": environment or "",
             "service_name": service_name or "",
             "symptoms": symptoms.strip(),
@@ -537,17 +626,20 @@ class ExperienceMemoryService:
             connection.execute(
                 """
                 INSERT INTO experience_memories (
-                    experience_id, project_id, environment, service_name,
+                    experience_id, project_id, owner_key, visibility, approved_by, approved_at,
+                    environment, service_name,
                     symptoms, root_cause, resolution, evidence_summary,
                     source_type, source_session_id, source_feedback_id,
                     source_event_ids_json, confidence, hit_count, success_count,
                     enabled, status, milvus_pk, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
                 """,
                 (
                     memory["experience_id"],
                     memory["project_id"],
+                    memory["owner_key"],
+                    memory["visibility"],
                     memory["environment"],
                     memory["service_name"],
                     memory["symptoms"],
@@ -598,7 +690,9 @@ class ExperienceMemoryService:
         best_score = 0.0
         # ``list`` is now cached, so this scan does not always hit SQLite —
         # that's the §R4 hot-spot fix.
-        for candidate in self.list(project_id=project_id, enabled=True, status="active", limit=1000):
+        for candidate in self.list(
+            project_id=project_id, enabled=True, status="active", limit=1000
+        ):
             if str(candidate.get("source_type") or "") == "anti_pattern":
                 continue
             score = _text_similarity(new_symptoms, _normalize(candidate["symptoms"]))
@@ -765,6 +859,12 @@ class ExperienceMemoryService:
     def _ensure_database(self) -> None:
         if self._initialized:
             return
+        if bool(getattr(config, "db_schema_enforcement_enabled", False)):
+            from app.services.database_migration_service import DatabaseMigrationService
+
+            DatabaseMigrationService(self.db_path).require_current()
+            self._initialized = True
+            return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(str(self.db_path))
         try:
@@ -773,6 +873,10 @@ class ExperienceMemoryService:
                 CREATE TABLE IF NOT EXISTS experience_memories (
                     experience_id TEXT PRIMARY KEY,
                     project_id TEXT NOT NULL,
+                    owner_key TEXT NOT NULL DEFAULT '',
+                    visibility TEXT NOT NULL DEFAULT 'project',
+                    approved_by TEXT NOT NULL DEFAULT '',
+                    approved_at TEXT NOT NULL DEFAULT '',
                     environment TEXT NOT NULL DEFAULT '',
                     service_name TEXT NOT NULL DEFAULT '',
                     symptoms TEXT NOT NULL,
@@ -803,6 +907,16 @@ class ExperienceMemoryService:
                 connection.execute(
                     "ALTER TABLE experience_memories ADD COLUMN status TEXT NOT NULL DEFAULT 'active'"
                 )
+            for column, definition in (
+                ("owner_key", "TEXT NOT NULL DEFAULT ''"),
+                ("visibility", "TEXT NOT NULL DEFAULT 'project'"),
+                ("approved_by", "TEXT NOT NULL DEFAULT ''"),
+                ("approved_at", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if column not in columns:
+                    connection.execute(
+                        f"ALTER TABLE experience_memories ADD COLUMN {column} {definition}"
+                    )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_experience_project_enabled
@@ -835,7 +949,9 @@ def _root_cause_compatible(new_root_cause: str, existing_root_cause: str, thresh
 
     left = _normalize(new_root_cause)
     right = _normalize(existing_root_cause)
-    if _is_placeholder_root_cause(new_root_cause) or _is_placeholder_root_cause(existing_root_cause):
+    if _is_placeholder_root_cause(new_root_cause) or _is_placeholder_root_cause(
+        existing_root_cause
+    ):
         return True
     if _text_similarity(left, right) >= threshold:
         return True
@@ -899,6 +1015,10 @@ def _memory_from_row(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "experience_id": row["experience_id"],
         "project_id": row["project_id"],
+        "owner_key": row["owner_key"] if "owner_key" in keys else "",
+        "visibility": row["visibility"] if "visibility" in keys else "project",
+        "approved_by": row["approved_by"] if "approved_by" in keys else "",
+        "approved_at": row["approved_at"] if "approved_at" in keys else "",
         "environment": row["environment"],
         "service_name": row["service_name"],
         "symptoms": row["symptoms"],

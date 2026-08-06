@@ -26,7 +26,7 @@ class FakeRouter:
     def __init__(self, route: str = "metric") -> None:
         self.route = route
 
-    async def _resolve_route(self, message: str) -> RouteDecision:
+    async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
         return RouteDecision(route=self.route, reason="fake", confidence=0.9)
 
 
@@ -129,6 +129,7 @@ def test_checkpoint_default_idempotent_tools_include_readonly_queries():
     assert store.is_step_idempotent(["query_prometheus_alerts"]) is True
     assert store.is_step_idempotent(["retrieve_knowledge", "recall_experience"]) is True
     assert store.is_step_idempotent(["delegate_to_expert"]) is True
+    assert store.is_step_idempotent(["delegate_parallel"]) is True
     assert store.is_step_idempotent(["dangerous_write_tool"]) is False
 
 
@@ -181,7 +182,7 @@ async def test_harness_stamps_recent_turns_on_complete(monkeypatch):
     # Avoid real context tools / registry complexity
     monkeypatch.setattr(
         "app.agent.harness.loop.HarnessToolRegistry.context_tools",
-        lambda self, state: [],
+        lambda self, state, **kwargs: [],
     )
 
     class _FakeContextStore:

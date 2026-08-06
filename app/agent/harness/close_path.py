@@ -7,7 +7,6 @@ from typing import Any
 from loguru import logger
 
 from app.agent.agent_loop import tool_call_payload
-from app.agent.context.integration import persist_stateful_context
 from app.agent.context.operations import framework_patch
 from app.agent.context.state import SECTION_OUTPUT
 from app.agent.events import make_agent_event
@@ -27,6 +26,26 @@ from app.core.metrics import (
     observe_agent_tokens,
     observe_tool_calls_from_timeline,
 )
+
+
+async def persist_stateful_context(*args, **kwargs):
+    """Route unified stage persistence to the inflight recovery key."""
+    from app.agent.harness import loop as harness_loop
+    from app.agent.context.integration import persist_stateful_context as _legacy_impl
+
+    fn = getattr(harness_loop, "persist_stateful_context", None)
+    if (
+        fn is not None
+        and fn is not _legacy_impl
+        and getattr(fn, "__module__", "") != __name__
+    ):
+        return await fn(*args, **kwargs)
+
+    from app.agent.context.unified import persist_runtime_state
+
+    state = args[0] if args else kwargs.get("state")
+    warnings, _ = await persist_runtime_state(state, store=kwargs.get("store"))
+    return warnings
 
 
 class HarnessClosePathMixin:
@@ -106,7 +125,6 @@ class HarnessClosePathMixin:
                 if event.get("type") in TIMELINE_EVENT_TYPES
             ],
             "suggested_actions": self._build_suggested_actions(state, answer),
-            "escalation": self._build_escalation_block(),
         }
         return {"_yield_events": yield_events, "complete": complete}
 
@@ -138,34 +156,6 @@ class HarnessClosePathMixin:
                 }
             )
         return actions
-
-    def _build_escalation_block(self) -> dict[str, Any]:
-        raw = str(getattr(config, "oncall_escalation_contacts", "") or "").strip()
-        contacts: list[dict[str, str]] = []
-        if raw:
-            for part in raw.replace("；", ";").split(";"):
-                part = part.strip()
-                if not part:
-                    continue
-                if "|" in part:
-                    name, channel = part.split("|", 1)
-                elif ":" in part:
-                    name, channel = part.split(":", 1)
-                else:
-                    name, channel = part, ""
-                contacts.append({"name": name.strip(), "channel": channel.strip()})
-        if not contacts:
-            return {
-                "configured": False,
-                "text": "未配置值班联系人（ONCALL_ESCALATION_CONTACTS），请走现有 OnCall 升级流程。",
-                "contacts": [],
-            }
-        lines = [f"- {c['name']}" + (f"：{c['channel']}" if c["channel"] else "") for c in contacts]
-        return {
-            "configured": True,
-            "text": "升级联系人：\n" + "\n".join(lines),
-            "contacts": contacts,
-        }
 
     # ------------------------------------------------------------------ M3 W10 learn
     _INVESTIGATION_TOOL_HINTS = (
@@ -349,6 +339,8 @@ class HarnessClosePathMixin:
     ):
         """Verify / re-evidence / replan-once / HITL footer / complete."""
 
+        replacement_content_suppressed = False
+
         # When investigation tools all failed (e.g. RE2 simulate) and the model
         # returned no prose, still emit a gap notice so complete.answer is usable
         # and evaluators can score require_replan + gap wording.
@@ -394,6 +386,7 @@ class HarnessClosePathMixin:
                     re_enabled
                     and re_evidence_rounds_used < max_re_rounds
                     and not resume_close_only
+                    and not self._is_knowledge_light_plan(plan)
                     and verification.status in {"degraded", "failed"}
                     and bool(verification.gaps)
                     and bool(tool_defs)
@@ -441,6 +434,12 @@ class HarnessClosePathMixin:
 
                 re_answer = ""
                 re_streamed = False
+                emit_replacement_content = not (
+                    answer_streamed
+                    and bool(
+                        getattr(config, "harness_final_answer_replacement_enabled", True)
+                    )
+                )
                 re_response = None
                 re_decision_text = ""
                 re_decision_parts: tuple[str, ...] = ()
@@ -524,12 +523,13 @@ class HarnessClosePathMixin:
                         model=self._reasoner_model(),
                     ):
                         re_answer += chunk
-                        re_streamed = True
-                        yield {
-                            "type": "content",
-                            "data": chunk,
-                            "agent": "harness",
-                        }
+                        if emit_replacement_content:
+                            re_streamed = True
+                            yield {
+                                "type": "content",
+                                "data": chunk,
+                                "agent": "harness",
+                            }
                 else:
                     candidate = str(re_response.content or re_decision_text or "")
                     if contains_internal_tool_protocol(candidate):
@@ -547,15 +547,16 @@ class HarnessClosePathMixin:
                             model=self._reasoner_model(),
                         ):
                             re_answer += chunk
-                            re_streamed = True
-                            yield {
-                                "type": "content",
-                                "data": chunk,
-                                "agent": "harness",
-                            }
+                            if emit_replacement_content:
+                                re_streamed = True
+                                yield {
+                                    "type": "content",
+                                    "data": chunk,
+                                    "agent": "harness",
+                                }
                     else:
                         re_answer = sanitize_user_visible_answer(candidate or final_answer)
-                        if re_answer:
+                        if re_answer and emit_replacement_content:
                             re_streamed = True
                             if re_decision_parts and re_answer == candidate.strip():
                                 for part in re_decision_parts:
@@ -572,6 +573,9 @@ class HarnessClosePathMixin:
                                 }
 
                 if re_answer.strip():
+                    replacement_content_suppressed = (
+                        replacement_content_suppressed or not emit_replacement_content
+                    )
                     final_answer = re_answer
                     answer = re_answer
                     answer_streamed = answer_streamed or re_streamed
@@ -594,6 +598,7 @@ class HarnessClosePathMixin:
                     verification_gaps=list(verification.gaps),
                     force_after_re_evidence=True,
                     aux_routes=aux_routes,
+                    plan=plan,
                 )
                 and bool(tool_defs)
                 and self._has_investigation_tools(tools)
@@ -613,6 +618,12 @@ class HarnessClosePathMixin:
 
                 replan_answer = ""
                 replan_streamed = False
+                emit_replacement_content = not (
+                    answer_streamed
+                    and bool(
+                        getattr(config, "harness_final_answer_replacement_enabled", True)
+                    )
+                )
                 replan_response = None
                 replan_decision_text = ""
                 replan_decision_parts: tuple[str, ...] = ()
@@ -690,12 +701,13 @@ class HarnessClosePathMixin:
                             model=self._reasoner_model(),
                         ):
                             replan_answer += chunk
-                            replan_streamed = True
-                            yield {
-                                "type": "content",
-                                "data": chunk,
-                                "agent": "harness",
-                            }
+                            if emit_replacement_content:
+                                replan_streamed = True
+                                yield {
+                                    "type": "content",
+                                    "data": chunk,
+                                    "agent": "harness",
+                                }
                     else:
                         candidate = str(replan_response.content or replan_decision_text or "")
                         if contains_internal_tool_protocol(candidate):
@@ -713,15 +725,16 @@ class HarnessClosePathMixin:
                                 model=self._reasoner_model(),
                             ):
                                 replan_answer += chunk
-                                replan_streamed = True
-                                yield {
-                                    "type": "content",
-                                    "data": chunk,
-                                    "agent": "harness",
-                                }
+                                if emit_replacement_content:
+                                    replan_streamed = True
+                                    yield {
+                                        "type": "content",
+                                        "data": chunk,
+                                        "agent": "harness",
+                                    }
                         else:
                             replan_answer = sanitize_user_visible_answer(candidate or final_answer)
-                            if replan_answer:
+                            if replan_answer and emit_replacement_content:
                                 replan_streamed = True
                                 if replan_decision_parts and replan_answer == candidate.strip():
                                     for part in replan_decision_parts:
@@ -738,6 +751,9 @@ class HarnessClosePathMixin:
                                     }
 
                     if replan_answer.strip():
+                        replacement_content_suppressed = (
+                            replacement_content_suppressed or not emit_replacement_content
+                        )
                         final_answer = replan_answer
                         answer = replan_answer
                         answer_streamed = answer_streamed or replan_streamed
@@ -789,20 +805,17 @@ class HarnessClosePathMixin:
                     "answer_chars": len(final_answer),
                     "re_evidence_rounds_used": re_evidence_rounds_used,
                     "replan_times_used": replan_times_used,
+                    **(
+                        {"context_chars": dict(runtime.get("context_metrics") or {})}
+                        if runtime is not None
+                        and bool(getattr(config, "harness_context_size_metrics_enabled", False))
+                        else {}
+                    ),
                 },
             )
             yield report_progress
             if not answer_streamed:
                 yield {"type": "content", "data": final_answer, "agent": "harness"}
-
-        # Optional escalation footer on the final answer (read-only product surface).
-        escalation = self._build_escalation_block()
-        if escalation.get("text") and escalation["text"] not in (state.answer or ""):
-            footer = "\n\n---\n" + str(escalation["text"])
-            state.append_answer(footer)
-            if not answer_streamed:
-                # content already streamed earlier; footer still lands in complete.answer
-                pass
 
         suggested_actions = self._build_suggested_actions(state, state.answer or "")
         parallel_count = sum(
@@ -844,9 +857,14 @@ class HarnessClosePathMixin:
                 "re_evidence_rounds_used": re_evidence_rounds_used,
                 "replan_times_used": replan_times_used,
                 "suggested_actions": suggested_actions,
-                "escalation": escalation,
                 "distill_draft": distill_draft,
                 "anti_pattern": anti_pattern,
+                **(
+                    {"context_chars": dict(runtime.get("context_metrics") or {})}
+                    if runtime is not None
+                    and bool(getattr(config, "harness_context_size_metrics_enabled", False))
+                    else {}
+                ),
             },
             trace_id=session_id,
             span_id=f"harness:{session_id}",
@@ -887,8 +905,13 @@ class HarnessClosePathMixin:
             usage=state.usage_total,
         )
         complete_payload = self._complete_event(state)
+        # A re-evidence/replan pass can replace prose that was already visible
+        # through ``content`` events. Keep the SSE type stable and mark only
+        # an answer whose replacement content was actually suppressed. This
+        # leaves ordinary streaming and the rollback flag on their old path.
+        if replacement_content_suppressed:
+            complete_payload["replace_streamed_answer"] = True
         complete_payload["suggested_actions"] = suggested_actions
-        complete_payload["escalation"] = escalation
         complete_payload["distill_draft"] = distill_draft
         complete_payload["anti_pattern"] = anti_pattern
         yield complete_payload

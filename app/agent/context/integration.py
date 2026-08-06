@@ -1,42 +1,33 @@
 """Harness integration layer for the stateful whiteboard.
 
-Per plan ``plan/2026-07-08-stateful-agent-context.md`` §6 / §8.1 the harness
-must use :class:`AgentContextState` as its primary context source when the
-flag ``harness_stateful_context_enabled`` is on. When the flag is off, the
-:class:`ContextBuilder` from :mod:`app.agent.harness.context` keeps behaving
-exactly as before (this module is a thin facade — it does not monkey-patch
-the legacy code path).
+Per plan ``plan/2026-07-08-stateful-agent-context.md`` §6 / §8.1, the
+production harness loads and persists state through ``ContextRepository``.
+``harness_stateful_context_enabled`` selects only the LLM-facing render policy;
+it does not restore a ``ContextBuilder`` storage or loading path.
 
-This module is the *only* place the harness should:
+This compatibility module keeps state primitives available to isolated tests.
+Production harness callers use ``app.agent.context.unified`` to:
 
 1. Construct / fetch :class:`AgentContextState` for a turn.
 2. Render the LLM-facing view (``system_prompt`` + recent message slice).
 3. Apply controlled patches after each step / tool call.
 
-The harness loop integration code (callers) should call :func:`build_stateful_context`
-and :func:`persist_stateful_context` rather than reading/writing the dataclass
-directly — that way audit + version bumps stay in one place.
+``build_stateful_context`` and ``persist_stateful_context`` are retained only
+for explicit compatibility fixtures, not as default runtime entry points.
 """
 
 from __future__ import annotations
 
-import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from app.agent.context.operations import (
-    append_evidence_gap,
-    append_observed_fact,
     append_recent_turns,
-    framework_patch,
     merge_active_attachment_refs,
     set_intent,
 )
-from app.agent.context.persistence import state_from_dict, state_to_dict
 from app.agent.context.state import (
-    SCHEMA_VERSION,
-    SECTION_CONVERSATION,
-    SECTION_INTENT,
     AgentContextState,
 )
 from app.agent.context.store import (
@@ -54,11 +45,12 @@ from app.agent.context.views import (
     render_recent_message_view,
 )
 from app.config import config
+from app.services.attachment_reference_service import strip_attachment_wrapper
 
 
 def stateful_context_enabled() -> bool:
-    """Read the feature flag from config — defaults to False until rolled out."""
-    return bool(getattr(config, "harness_stateful_context_enabled", False))
+    """Read the LLM-view rendering policy flag; it defaults to enabled."""
+    return bool(getattr(config, "harness_stateful_context_enabled", True))
 
 
 def build_store_settings() -> ContextStateStoreSettings:
@@ -83,15 +75,15 @@ def build_default_store(
     snapshot_service: Any | None = None,
     redis_get_set: Callable[..., Awaitable[Any]] | None = None,
 ) -> ContextStateStore:
-    """Wire the default store to ``ContextSnapshotService`` + Redis client.
+    """Build an explicitly injected compatibility store for isolated tests.
 
-    ``snapshot_service`` defaults to the module-level singleton in
-    :mod:`app.services.context_snapshot_service`. ``redis_get_set`` defaults
-    to a thin adapter around ``app.services.redis_client.get_redis_client``.
+    Production runtime context is owned by :class:`ContextRepository`; callers
+    must provide both callbacks when exercising the retired store in tests.
     """
     if snapshot_service is None:
-        from app.services.context_snapshot_service import context_snapshot_service
-        snapshot_service = context_snapshot_service
+        raise RuntimeError(
+            "build_default_store is retired; use ContextRepository for runtime context"
+        )
 
     if redis_get_set is None:
         async def _redis_get_set(op: str, key: str, value: Any, ttl: Any) -> Any:
@@ -117,10 +109,9 @@ def build_default_store(
 class StatefulContext:
     """Bundle returned to the harness per turn.
 
-    The legacy :class:`ContextBuilder` returns a ``HarnessContext`` — the
-    harness loop can adapt by mapping ``system_prompt`` to ``view`` and
-    ``history_messages`` to ``recent_messages``. When the flag is off, callers
-    keep using the legacy path untouched.
+    ``ContextRepository`` owns the persisted state. ``view`` and
+    ``recent_messages`` are rendering products, regardless of the selected
+    compatibility view policy.
     """
 
     state: AgentContextState
@@ -148,6 +139,11 @@ async def build_stateful_context(
     so the rendered view always reflects what the user is asking right now.
     They are framework-only writes (plan §3.3).
     """
+    # Intent is a compact framework field.  API callers may pass the composed
+    # attachment message for compatibility, so normalize it at this boundary
+    # before writing the whiteboard.
+    current_question = strip_attachment_wrapper(current_question)
+    current_goal = strip_attachment_wrapper(current_goal)
     store = store or build_default_store()
     result = await store.get_or_rebuild(owner_key, session_id, rebuild=rebuild)
 

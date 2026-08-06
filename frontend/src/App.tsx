@@ -11,6 +11,7 @@ import {
 } from "./api/conversationApi";
 import { uploadFile } from "./api/fileApi";
 import { subscribeAuthExpired } from "./api/httpClient";
+import { confirmSuggestion } from "./api/hitlApi";
 import { confirmDistillDraft, rejectDistillDraft, submitFeedback } from "./api/memoryApi";
 import { AgentProcessPanel } from "./components/AgentProcessPanel";
 import { AppShell } from "./components/AppShell";
@@ -66,10 +67,14 @@ function normalizeTimelineEvents(events: TimelineEvent[]): TimelineEvent[] {
   const seen = new Set<string>();
   const normalized: TimelineEvent[] = [];
   for (const event of events) {
+    const activityId = String(event.payload?.tool_call_id ?? "");
+    const parentActivityId = String(event.payload?.parent_tool_call_id ?? "");
     const key = [
       event.type,
       event.span_id,
       event.evidence_id,
+      activityId,
+      parentActivityId,
       event.agent,
       event.tool,
       event.stage,
@@ -108,6 +113,12 @@ function weakAcceptIfNeeded(prev: AgentRun | undefined): void {
 type AuthState = { token: string; username: string } | null;
 
 export default function App() {
+  const inlineActivityEnabled =
+    import.meta.env.VITE_INLINE_AGENT_ACTIVITY_ENABLED !== "false" &&
+    import.meta.env.VITE_INLINE_AGENT_ACTIVITY_ENABLED !== "0";
+  const granularActivityEnabled =
+    import.meta.env.VITE_GRANULAR_AGENT_ACTIVITY_ENABLED !== "false" &&
+    import.meta.env.VITE_GRANULAR_AGENT_ACTIVITY_ENABLED !== "0";
   const saved = loadAuth();
   const [auth, setAuth] = useState<AuthState>(saved);
   const [authBootstrapping, setAuthBootstrapping] = useState<boolean>(Boolean(saved));
@@ -218,6 +229,9 @@ export default function App() {
           content: turn.assistant_answer,
           status: "completed",
         });
+        const suggestedActions = (turn.events ?? []).find(
+          (event) => event.type === "decision_event" && event.stage === "suggested_actions",
+        )?.actions;
         restoredRuns[assistantId] = makeRun({
           runId: assistantId,
           sessionId: sid,
@@ -227,6 +241,7 @@ export default function App() {
           answer: turn.assistant_answer,
           caseId: turn.case_id ?? "",
           userMessage: turn.user_message,
+          suggestedActions,
         });
         lastAssistantId = assistantId;
       }
@@ -350,7 +365,13 @@ export default function App() {
           item.id === assistantId
             ? {
                 ...item,
-                content: item.content || event.answer || "",
+                // Only replace provisional streamed prose when the server
+                // explicitly marks its final answer as authoritative. Older
+                // servers and the rollback flag retain legacy append output.
+                content:
+                  event.replace_streamed_answer && event.answer
+                    ? event.answer
+                    : item.content || event.answer || "",
                 status: "completed",
               }
             : item,
@@ -425,6 +446,7 @@ export default function App() {
           distillDraft: event.distill_draft ?? null,
           missingParams: event.missing_params ?? event.clarification?.missing_params ?? prev.missingParams,
           clarification: event.clarification ?? prev.clarification ?? null,
+          suggestedActions: event.suggested_actions ?? prev.suggestedActions ?? [],
         };
       } else if (event.type === "error") {
         next = {
@@ -530,12 +552,16 @@ export default function App() {
     }
   }
 
-  async function handleFeedback(kind: "adopted" | "corrected", actualRootCause = "") {
-    const current = runs[selectedId];
+  async function handleFeedback(
+    runId: string,
+    kind: "adopted" | "corrected",
+    actualRootCause = "",
+  ) {
+    const current = runs[runId];
     if (!current || !current.answer || !current.userMessage || current.feedback !== "") {
       return;
     }
-    setRuns((c) => ({ ...c, [selectedId]: { ...c[selectedId], feedback: kind } }));
+    setRuns((c) => ({ ...c, [runId]: { ...c[runId], feedback: kind } }));
     try {
       // Prefer confirming an existing auto-distill draft when present.
       const draftId = current.distillDraft?.experience_id;
@@ -543,7 +569,7 @@ export default function App() {
         await confirmDistillDraft(draftId, "panel-adopt");
         setRuns((c) => ({
           ...c,
-          [selectedId]: { ...c[selectedId], distillStatus: "confirmed" },
+          [runId]: { ...c[runId], distillStatus: "confirmed" },
         }));
         return;
       }
@@ -560,18 +586,18 @@ export default function App() {
     }
   }
 
-  async function handleDistill(action: "confirm" | "reject") {
-    const current = runs[selectedId];
+  async function handleDistill(runId: string, action: "confirm" | "reject") {
+    const current = runs[runId];
     const draftId = current?.distillDraft?.experience_id;
     if (!current || !draftId || current.distillStatus) {
       return;
     }
     setRuns((c) => ({
       ...c,
-      [selectedId]: {
-        ...c[selectedId],
+      [runId]: {
+        ...c[runId],
         distillStatus: action === "confirm" ? "confirmed" : "rejected",
-        feedback: action === "confirm" ? "adopted" : c[selectedId].feedback,
+        feedback: action === "confirm" ? "adopted" : c[runId].feedback,
       },
     }));
     try {
@@ -582,6 +608,41 @@ export default function App() {
       }
     } catch {
       // optimistic UI retained
+    }
+  }
+
+  async function handleConfirmSuggestion(runId: string, actionId: string) {
+    const current = runs[runId];
+    if (!current || !actionId) {
+      return;
+    }
+    const already = current.confirmedActionIds ?? [];
+    if (already.includes(actionId)) {
+      return;
+    }
+    // Optimistic mark — confirm is audit-only and should feel instant.
+    setRuns((c) => ({
+      ...c,
+      [runId]: {
+        ...c[runId],
+        confirmedActionIds: [...(c[runId].confirmedActionIds ?? []), actionId],
+      },
+    }));
+    try {
+      await confirmSuggestion({
+        sessionId: current.sessionId || sessionId,
+        actionId,
+        note: "panel-confirm",
+      });
+    } catch {
+      // Roll back only this action id so other confirms stay.
+      setRuns((c) => ({
+        ...c,
+        [runId]: {
+          ...c[runId],
+          confirmedActionIds: (c[runId].confirmedActionIds ?? []).filter((id) => id !== actionId),
+        },
+      }));
     }
   }
 
@@ -612,15 +673,33 @@ export default function App() {
   }
 
   async function handleDeleteSession(sid: string) {
+    // Optimistically drop the row first so a slow/failed post-delete
+    // list refresh cannot leave the sidebar looking like "delete did nothing".
+    // The active workspace is only reset after the API succeeds, so a failed
+    // delete does not wipe the open thread.
+    const previousSessions = sessions;
+    const previousCheckpoint = checkpointStatus[sid];
+    setSessions((items) => items.filter((session) => session.session_id !== sid));
+    setCheckpointStatus((current) => {
+      const { [sid]: _removed, ...remaining } = current;
+      return remaining;
+    });
+
     try {
       await deleteConversation(sid);
     } catch {
-      // best-effort
+      setSessions(previousSessions);
+      if (previousCheckpoint) {
+        setCheckpointStatus((current) => ({ ...current, [sid]: previousCheckpoint }));
+      }
+      return;
     }
-    await refreshSessions();
+
     if (sid === sessionId) {
       handleNewSession();
     }
+    // Reconcile with the server when possible, but never block the UI on it.
+    void refreshSessions();
   }
 
   function handleStop() {
@@ -704,6 +783,9 @@ export default function App() {
           <ChatWorkspace
             mode={mode}
             messages={messages}
+            runs={runs}
+            inlineActivityEnabled={inlineActivityEnabled}
+            granularActivityEnabled={granularActivityEnabled}
             runStatus={isStreaming ? "running" : "idle"}
             pendingAttachments={pendingAttachments}
             selectedId={selectedId}
@@ -715,6 +797,9 @@ export default function App() {
             onRemoveAttachment={handleRemoveAttachment}
             onUploadFile={handleUploadFile}
             onSelectMessage={setSelectedId}
+            onRunFeedback={handleFeedback}
+            onRunDistill={handleDistill}
+            onRunConfirmSuggestion={handleConfirmSuggestion}
             onStop={handleStop}
           />
         )
@@ -728,8 +813,17 @@ export default function App() {
               指标/日志结果中，帮助区分噪声与真实异常。
             </p>
           </div>
-        ) : (
-          <AgentProcessPanel run={panelRun} onFeedback={handleFeedback} onDistill={handleDistill} />
+        ) : inlineActivityEnabled ? undefined : (
+          <AgentProcessPanel
+            run={panelRun}
+            onFeedback={(kind, actualRootCause) =>
+              handleFeedback(selectedId, kind, actualRootCause)
+            }
+            onDistill={(action) => handleDistill(selectedId, action)}
+            onConfirmSuggestion={(actionId) =>
+              handleConfirmSuggestion(selectedId, actionId)
+            }
+          />
         )
       }
     />

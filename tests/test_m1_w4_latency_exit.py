@@ -15,7 +15,7 @@ class FakeRouter:
     def __init__(self, route: str = "knowledge") -> None:
         self.route = route
 
-    async def _resolve_route(self, message: str) -> RouteDecision:
+    async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
         return RouteDecision(route=self.route, reason="fake", confidence=0.9)
 
 
@@ -121,11 +121,13 @@ async def test_knowledge_early_close_emits_stage(monkeypatch):
     monkeypatch.setattr(app_config, "harness_force_expert_delegation", False)
     monkeypatch.setattr(app_config, "harness_dynamic_max_steps", True)
     monkeypatch.setattr(app_config, "harness_route_timeout_profile", True)
+    monkeypatch.setattr(app_config, "harness_llm_planning_enabled", False)
+    monkeypatch.setattr(app_config, "harness_anti_pattern_capture_enabled", False)
+    monkeypatch.setattr(app_config, "long_term_memory_distill_enabled", False)
     monkeypatch.setattr(
         "app.agent.harness.loop.stateful_context_enabled",
         lambda: False,
     )
-
     tool = _knowledge_tool()
     fake_llm = FakeLLM(
         [
@@ -181,21 +183,11 @@ async def test_knowledge_early_close_emits_stage(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_context_rehydrate_failed_when_fresh_and_ref(monkeypatch):
-    from app.config import config as app_config
     from app.agent.context.integration import StatefulContext
     from app.agent.context.state import AgentContextState
+    from app.config import config as app_config
 
     monkeypatch.setattr(app_config, "harness_context_db_snapshot_enabled", True)
-
-    class _Snap:
-        def get_latest_context_snapshot(self, **kwargs):
-            return None
-
-    monkeypatch.setattr(
-        "app.services.context_snapshot_service.context_snapshot_service",
-        _Snap(),
-        raising=False,
-    )
 
     service = HarnessService(
         limits=HarnessLimits(max_steps=2, token_budget=5000, timeout_seconds=10)
@@ -223,7 +215,7 @@ async def test_context_rehydrate_failed_when_fresh_and_ref(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_context_rehydrate_ok_from_store_source():
+async def test_legacy_context_ref_degrades_without_snapshot_service():
     from app.agent.context.integration import StatefulContext
     from app.agent.context.state import AgentContextState
 
@@ -248,5 +240,6 @@ async def test_context_rehydrate_ok_from_store_source():
         )
     ]
     assert len(events) == 1
-    assert events[0]["stage"] == "context_rehydrate"
+    assert events[0]["stage"] == "context_rehydrate_failed"
+    assert events[0]["payload"]["source"] == "redis"
     assert events[0]["payload"]["source"] == "redis"

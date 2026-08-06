@@ -52,7 +52,6 @@ def test_render_includes_every_required_section() -> None:
     view = render_context_view(state)
     for required in (
         "current_goal",
-        "current_question",
         "working_plan",
         "completed_steps",
         "pending_steps",
@@ -62,6 +61,9 @@ def test_render_includes_every_required_section() -> None:
         "do_not_repeat",
     ):
         assert required in view, f"missing key: {required}"
+    # The final user message is the sole source of truth for the full current
+    # question; the default whiteboard view keeps only a distinct short goal.
+    assert "current_question" not in view
 
 
 def test_render_marks_model_notes_as_unverified() -> None:

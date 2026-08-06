@@ -76,7 +76,7 @@ class _ContextBuilder:
 
 
 class _Router:
-    async def _resolve_route(self, _: str) -> RouteDecision:
+    async def _resolve_route(self, _: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
         return RouteDecision(route="diagnosis", reason="test", confidence=0.9)
 
 

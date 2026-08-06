@@ -3,7 +3,6 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 
-from app.config import config
 from app.models.memory import (
     DistillConfirmRequest,
     DistillRejectRequest,
@@ -14,9 +13,14 @@ from app.models.memory import (
     ServiceUpsertRequest,
     UserPreferenceRequest,
 )
+from app.services.authorization_service import require_role
 from app.services.experience_memory_service import experience_memory_service
 from app.services.service_knowledge_service import service_knowledge_service
-from app.services.session_scope_service import require_session_owner
+from app.services.session_scope_service import (
+    AuthenticatedPrincipal,
+    require_authenticated_principal,
+    require_session_owner,
+)
 from app.services.user_preference_service import user_preference_service
 
 __all__ = [
@@ -32,22 +36,24 @@ router = APIRouter()
 @router.post("/memory/feedback")
 async def create_memory_from_feedback(
     request: MemoryFeedbackRequest,
-    owner_key: str = Depends(require_session_owner),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
 ):
+    owner_key = principal.storage_owner_key
     try:
         if request.acceptance_level == "weak":
             experience_id = experience_memory_service.create_weak_acceptance(
-                project_id=config.project_id,
+                project_id=principal.project_id,
                 session_id=request.session_id,
                 user_message=request.user_message,
                 assistant_answer=request.assistant_answer,
                 environment=request.environment,
                 service_name=request.service_name,
                 events=request.events,
+                owner_key=owner_key,
             )
         else:
             experience_id = experience_memory_service.create_from_feedback(
-                project_id=config.project_id,
+                project_id=principal.project_id,
                 session_id=request.session_id,
                 user_message=request.user_message,
                 assistant_answer=request.assistant_answer,
@@ -58,21 +64,30 @@ async def create_memory_from_feedback(
                 service_name=request.service_name,
                 events=request.events,
                 source_feedback_id=f"feedback:{owner_key}:{request.session_id}",
+                owner_key=owner_key,
             )
         return {"code": 200, "message": "success", "data": {"experience_id": experience_id}}
     except Exception as exc:
         logger.error(f"memory feedback failed: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "internal_error",
+                "message": "internal_error",
+                "detail": "memory_feedback_failed",
+            },
+        ) from exc
 
 
 @router.post("/memory/experiences")
 async def create_manual_experience(
     request: ManualExperienceCreateRequest,
-    _owner_key: str = Depends(require_session_owner),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
 ):
+    require_role(principal, "curator")
     try:
         experience_id = experience_memory_service.create_manual(
-            project_id=config.project_id,
+            project_id=principal.project_id,
             symptoms=request.symptoms,
             root_cause=request.root_cause,
             resolution=request.resolution,
@@ -84,19 +99,27 @@ async def create_manual_experience(
         return {"code": 200, "message": "success", "data": {"experience_id": experience_id}}
     except Exception as exc:
         logger.error(f"manual memory create failed: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "internal_error",
+                "message": "internal_error",
+                "detail": "memory_create_failed",
+            },
+        ) from exc
 
 
 @router.get("/memory/experiences")
 async def list_experiences(
-    project_id: str | None = None,
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     enabled: bool | None = None,
     limit: int = 50,
 ):
     memories = experience_memory_service.list(
-        project_id=project_id or config.project_id,
+        project_id=principal.project_id,
         enabled=enabled,
         limit=limit,
+        owner_key=principal.storage_owner_key,
     )
     return {"code": 200, "message": "success", "data": memories}
 
@@ -104,13 +127,17 @@ async def list_experiences(
 @router.post("/memory/distill/confirm")
 async def confirm_distill_draft(
     request: DistillConfirmRequest,
-    owner_key: str = Depends(require_session_owner),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
 ):
     """Promote a pending auto-distill draft to active recallable experience."""
+    require_role(principal, "curator")
+    owner_key = principal.storage_owner_key
     try:
         memory = experience_memory_service.confirm_draft(
             request.experience_id,
             owner_key=owner_key,
+            project_id=principal.project_id,
+            approved_by=principal.username,
         )
         if memory is None:
             raise HTTPException(status_code=404, detail="draft experience not found")
@@ -134,18 +161,27 @@ async def confirm_distill_draft(
         raise
     except Exception as exc:
         logger.error(f"distill confirm failed: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "internal_error",
+                "message": "internal_error",
+                "detail": "distill_confirm_failed",
+            },
+        ) from exc
 
 
 @router.post("/memory/distill/reject")
 async def reject_distill_draft(
     request: DistillRejectRequest,
-    owner_key: str = Depends(require_session_owner),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
 ):
+    owner_key = principal.storage_owner_key
     try:
         memory = experience_memory_service.reject_draft(
             request.experience_id,
             owner_key=owner_key,
+            project_id=principal.project_id,
         )
         if memory is None:
             raise HTTPException(status_code=404, detail="draft experience not found")
@@ -169,40 +205,54 @@ async def reject_distill_draft(
         raise
     except Exception as exc:
         logger.error(f"distill reject failed: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "internal_error",
+                "message": "internal_error",
+                "detail": "distill_reject_failed",
+            },
+        ) from exc
 
 
 @router.get("/memory/distill/pending")
 async def list_pending_distill(
     limit: int = 50,
     session_id: str = "",
-    owner_key: str = Depends(require_session_owner),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
 ):
     """List pending auto-distill drafts for the current project (auth required)."""
     try:
         memories = experience_memory_service.list_pending(
-            project_id=config.project_id,
+            project_id=principal.project_id,
             limit=max(1, min(limit, 200)),
             session_id=session_id or "",
+            owner_key=principal.storage_owner_key,
         )
-        # Shallow owner filter: prefer drafts whose feedback id embeds owner_key.
-        if owner_key:
-            filtered = []
-            for item in memories:
-                fb = str(item.get("source_feedback_id") or "")
-                if not fb or owner_key in fb or fb.startswith("distill:"):
-                    filtered.append(item)
-            memories = filtered
         return {"code": 200, "message": "success", "data": memories}
     except Exception as exc:
         logger.error(f"list pending distill failed: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "internal_error",
+                "message": "internal_error",
+                "detail": "distill_list_failed",
+            },
+        ) from exc
 
 
 @router.get("/memory/experiences/{experience_id}")
-async def get_experience(experience_id: str):
+async def get_experience(
+    experience_id: str, principal: AuthenticatedPrincipal = Depends(require_authenticated_principal)
+):
     memory = experience_memory_service.get(experience_id)
-    if memory is None:
+    if memory is None or memory.get("project_id") != principal.project_id:
+        raise HTTPException(status_code=404, detail="experience memory not found")
+    if memory.get("visibility") == "user" and memory.get("owner_key") not in {
+        "",
+        principal.storage_owner_key,
+    }:
         raise HTTPException(status_code=404, detail="experience memory not found")
     return {"code": 200, "message": "success", "data": memory}
 
@@ -211,8 +261,12 @@ async def get_experience(experience_id: str):
 async def update_experience(
     experience_id: str,
     request: ExperienceMemoryUpdateRequest,
-    _owner_key: str = Depends(require_session_owner),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
 ):
+    require_role(principal, "curator")
+    current = experience_memory_service.get(experience_id)
+    if current is None or current.get("project_id") != principal.project_id:
+        raise HTTPException(status_code=404, detail="experience memory not found")
     updated = experience_memory_service.update(
         experience_id,
         enabled=request.enabled,
@@ -229,26 +283,33 @@ async def update_experience(
 
 @router.post("/memory/experiences/rebuild-index")
 async def rebuild_index(
-    project_id: str | None = None,
-    _owner_key: str = Depends(require_session_owner),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
 ):
-    indexed = experience_memory_service.rebuild_index(project_id=project_id or config.project_id)
+    require_role(principal, "curator")
+    indexed = experience_memory_service.rebuild_index(project_id=principal.project_id)
     return {"code": 200, "message": "success", "data": {"indexed": indexed}}
 
 
 @router.get("/memory/services")
-async def list_services(environment: str | None = None):
+async def list_services(
+    environment: str | None = None,
+    _principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+):
     services = service_knowledge_service.list_services(
-        project_id=config.project_id,
+        project_id=_principal.project_id,
         environment=environment,
     )
     return {"code": 200, "message": "success", "data": services}
 
 
 @router.get("/memory/services/{service_name}")
-async def get_service_knowledge(service_name: str, environment: str = "prod"):
+async def get_service_knowledge(
+    service_name: str,
+    environment: str = "prod",
+    _principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+):
     service = service_knowledge_service.lookup(
-        project_id=config.project_id,
+        project_id=_principal.project_id,
         service_name=service_name,
         environment=environment,
     )
@@ -261,10 +322,11 @@ async def get_service_knowledge(service_name: str, environment: str = "prod"):
 async def upsert_service(
     service_name: str,
     request: ServiceUpsertRequest,
-    _owner_key: str = Depends(require_session_owner),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
 ):
+    require_role(principal, "curator")
     service_knowledge_service.upsert_service(
-        project_id=config.project_id,
+        project_id=principal.project_id,
         service_name=service_name,
         environment=request.environment,
         owner_team=request.owner_team,
@@ -279,10 +341,11 @@ async def upsert_service(
 async def upsert_service_baseline(
     service_name: str,
     request: ServiceBaselineRequest,
-    _owner_key: str = Depends(require_session_owner),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
 ):
+    require_role(principal, "curator")
     service_knowledge_service.upsert_baseline(
-        project_id=config.project_id,
+        project_id=principal.project_id,
         service_name=service_name,
         environment=request.environment,
         metric_name=request.metric_name,
@@ -299,22 +362,32 @@ async def delete_service_baseline(
     service_name: str,
     metric_name: str,
     environment: str = "prod",
-    _owner_key: str = Depends(require_session_owner),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
 ):
+    require_role(principal, "curator")
     deleted = service_knowledge_service.delete_baseline(
-        project_id=config.project_id,
+        project_id=principal.project_id,
         service_name=service_name,
         environment=environment,
         metric_name=metric_name,
     )
     if not deleted:
         raise HTTPException(status_code=404, detail="baseline not found")
-    return {"code": 200, "message": "success", "data": {"service_name": service_name, "metric_name": metric_name}}
+    return {
+        "code": 200,
+        "message": "success",
+        "data": {"service_name": service_name, "metric_name": metric_name},
+    }
 
 
 @router.post("/memory/services/import-seed")
-async def import_service_seed(_owner_key: str = Depends(require_session_owner)):
-    imported = await service_knowledge_service.import_from_monitor_mcp(project_id=config.project_id)
+async def import_service_seed(
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+):
+    require_role(principal, "curator")
+    imported = await service_knowledge_service.import_from_monitor_mcp(
+        project_id=principal.project_id
+    )
     return {"code": 200, "message": "success", "data": {"imported": imported}}
 
 

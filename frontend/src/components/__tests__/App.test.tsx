@@ -104,6 +104,17 @@ vi.mock("../../api/authApi", () => ({
 const mockSubmitFeedback = vi.fn(async (..._args: unknown[]) => "exp-1");
 vi.mock("../../api/memoryApi", () => ({
   submitFeedback: (...args: unknown[]) => mockSubmitFeedback(...args),
+  confirmDistillDraft: vi.fn(async () => "exp-1"),
+  rejectDistillDraft: vi.fn(async () => "exp-1"),
+}));
+
+const mockConfirmSuggestion = vi.fn(async (_args: unknown) => ({
+  accepted: true,
+  executed: false,
+  hint: "确认已记录；系统不会自动执行变更/重启/回滚。",
+}));
+vi.mock("../../api/hitlApi", () => ({
+  confirmSuggestion: (args: unknown) => mockConfirmSuggestion(args),
 }));
 
 const mockGetCheckpoint = vi.fn<(sessionId: string) => Promise<CheckpointSummary>>(async (sessionId) => ({
@@ -133,6 +144,7 @@ async function waitForChatReady() {
 describe("App", () => {
   afterEach(() => {
     cleanup();
+    vi.unstubAllEnvs();
     vi.mocked(streamAgent).mockClear();
     mockGetCheckpoint.mockReset();
     mockDeleteCheckpoint.mockReset();
@@ -140,6 +152,7 @@ describe("App", () => {
 
   it("sends a message and renders realtime agent events", async () => {
     const user = userEvent.setup();
+    vi.stubEnv("VITE_INLINE_AGENT_ACTIVITY_ENABLED", "false");
     const { getConversation } = await import("../../api/conversationApi");
     render(<App />);
     // Wait for the mount-time session hydrate so it cannot wipe streamed events.
@@ -192,6 +205,117 @@ describe("App", () => {
     expect((await screen.findAllByText("诊断结论已确认")).length).toBeGreaterThan(0);
   });
 
+  it("renders agent activity inside the assistant message by default", async () => {
+    const user = userEvent.setup();
+    const { getConversation } = await import("../../api/conversationApi");
+    render(<App />);
+    await waitFor(() => expect(vi.mocked(getConversation)).toHaveBeenCalled());
+
+    await user.type(await waitForChatReady(), "checkout-api slow");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByRole("heading", { name: "执行轨迹" })).toBeInTheDocument();
+    expect(document.querySelector(".app-shell.has-no-process-panel")).not.toBeNull();
+    expect(document.querySelector(".process-panel")).toBeNull();
+    expect(screen.getByText("已识别为综合诊断")).toBeInTheDocument();
+    expect(screen.getByText("已制定排查计划")).toBeInTheDocument();
+    expect(screen.getByText("检索应用日志")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "展开检索应用日志详细信息" }));
+    expect(screen.getByRole("region", { name: "检索应用日志详细信息" })).toHaveTextContent(
+      "检索应用日志中的异常模式和关键时间点。",
+    );
+    expect(screen.queryByText("search_app_logs")).not.toBeInTheDocument();
+    expect(screen.queryByText("redis")).not.toBeInTheDocument();
+  });
+
+  it("restores the aggregate inline activity card with the granular flag off", async () => {
+    const user = userEvent.setup();
+    vi.stubEnv("VITE_GRANULAR_AGENT_ACTIVITY_ENABLED", "false");
+    render(<App />);
+
+    await user.type(await waitForChatReady(), "checkout-api slow");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByRole("button", { name: /已完成/ })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "执行轨迹" })).not.toBeInTheDocument();
+  });
+
+  it("keeps parented child Agent tools inside one aggregate dispatch group", async () => {
+    const user = userEvent.setup();
+    vi.stubEnv("VITE_GRANULAR_AGENT_ACTIVITY_ENABLED", "false");
+    vi.mocked(streamAgent).mockImplementationOnce(async ({ onEvent }) => {
+      onEvent({
+        type: "agent_event",
+        agent: "harness",
+        stage: "delegate_parallel_start",
+        status: "in_progress",
+        summary: "并行调用 2 位专家",
+        payload: {
+          experts: ["metric", "log"],
+          tool_call_id: "activity-parent",
+        },
+      });
+      onEvent({
+        type: "agent_event",
+        agent: "metric_expert",
+        stage: "delegate_start",
+        status: "in_progress",
+        summary: "指标专家开始处理",
+        payload: {
+          delegated_expert: "metric",
+          parent_tool_call_id: "activity-parent",
+          tool_call_id: "activity-child-dispatch",
+        },
+      });
+      onEvent({
+        type: "agent_event",
+        agent: "metric_expert",
+        tool: "query_memory_metrics",
+        stage: "tool_start",
+        status: "in_progress",
+        summary: "检索指标",
+        payload: {
+          delegated_expert: "metric",
+          parent_tool_call_id: "activity-parent",
+          tool: "query_memory_metrics",
+          tool_call_id: "activity-metric-tool",
+        },
+      });
+      onEvent({
+        type: "tool_event",
+        agent: "metric_expert",
+        tool: "query_memory_metrics",
+        stage: "complete",
+        status: "completed",
+        summary: "指标已返回",
+        payload: {
+          delegated_expert: "metric",
+          parent_tool_call_id: "activity-parent",
+          tool_call_id: "activity-metric-tool",
+        },
+      });
+      onEvent({ type: "content", data: "诊断结论已确认" });
+      onEvent({ type: "complete", route: "diagnosis", answer: "诊断结论已确认", case_id: "", events: [] });
+    });
+    render(<App />);
+
+    await user.type(await waitForChatReady(), "checkout-api slow");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await user.click(await screen.findByRole("button", { name: /已完成/ }));
+
+    await waitFor(() => {
+      const activityBody = document.querySelector(".inline-activity__body");
+      expect(activityBody?.querySelectorAll('[data-activity-kind="expert-group"]')).toHaveLength(1);
+      const expertBranches = Array.from(
+        activityBody?.querySelectorAll('[data-activity-kind="expert"]') ?? [],
+        (expert) => expert.closest(".inline-activity__step"),
+      );
+      expect(
+        expertBranches.some((branch) => branch?.querySelector('[data-activity-kind="tool"]')),
+      ).toBe(true);
+    });
+  });
+
   it("submits strong feedback when the user adopts a completed diagnosis", async () => {
     mockSubmitFeedback.mockClear();
     const user = userEvent.setup();
@@ -212,6 +336,46 @@ describe("App", () => {
     expect(await screen.findByText("已采纳，将沉淀为长期经验。")).toBeInTheDocument();
   });
 
+  it("confirms suggested actions via the HITL audit API without executing them", async () => {
+    mockConfirmSuggestion.mockClear();
+    vi.mocked(streamAgent).mockImplementationOnce(async ({ onEvent }) => {
+      onEvent({ type: "content", data: "诊断结论已确认" });
+      onEvent({
+        type: "complete",
+        route: "diagnosis",
+        answer: "诊断结论已确认",
+        case_id: "",
+        events: [],
+        suggested_actions: [
+          {
+            id: "review_metrics",
+            title: "建议：复核相关指标/告警时间窗（只读）",
+            risk: "low",
+            requires_confirm: true,
+          },
+        ],
+      });
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(await waitForChatReady(), "checkout-api slow");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByTestId("suggested-actions-card")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确认建议" }));
+
+    await waitFor(() => {
+      expect(mockConfirmSuggestion).toHaveBeenCalledWith({
+        sessionId: expect.any(String),
+        actionId: "review_metrics",
+        note: "panel-confirm",
+      });
+    });
+    expect(await screen.findByText("已确认（未执行）")).toBeInTheDocument();
+  });
+
   it("renders a complete answer when no content chunks arrive", async () => {
     vi.mocked(streamAgent).mockImplementationOnce(async ({ onEvent }) => {
       onEvent({
@@ -229,6 +393,50 @@ describe("App", () => {
     await user.keyboard("{Enter}");
 
     expect((await screen.findAllByText("fallback answer")).length).toBeGreaterThan(0);
+  });
+
+  it("replaces a provisional streamed answer with the canonical complete answer", async () => {
+    vi.mocked(streamAgent).mockImplementationOnce(async ({ onEvent }) => {
+      onEvent({ type: "content", data: "provisional answer" });
+      onEvent({
+        type: "complete",
+        route: "diagnosis",
+        answer: "verified replacement answer",
+        replace_streamed_answer: true,
+        case_id: "",
+        events: [],
+      });
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(await waitForChatReady(), "check cpu");
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByText("verified replacement answer")).toBeInTheDocument();
+    expect(screen.queryByText("provisional answer")).not.toBeInTheDocument();
+  });
+
+  it("keeps legacy appended content when replacement is not requested", async () => {
+    vi.mocked(streamAgent).mockImplementationOnce(async ({ onEvent }) => {
+      onEvent({ type: "content", data: "initial answer" });
+      onEvent({ type: "content", data: " replacement answer" });
+      onEvent({
+        type: "complete",
+        route: "diagnosis",
+        answer: "replacement answer",
+        replace_streamed_answer: false,
+        case_id: "",
+        events: [],
+      });
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.type(await waitForChatReady(), "check cpu");
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByText("initial answer replacement answer")).toBeInTheDocument();
   });
 
   it("shows a checkpoint_resume banner when the harness reports a resumed run", async () => {

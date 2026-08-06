@@ -6,7 +6,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentRun, TimelineEvent } from "../../types/events";
 import { AgentProcessPanel } from "../AgentProcessPanel";
 
-function makeRun(status: AgentRun["status"], events: TimelineEvent[]): AgentRun {
+function makeRun(
+  status: AgentRun["status"],
+  events: TimelineEvent[],
+  overrides: Partial<AgentRun> = {},
+): AgentRun {
   return {
     runId: "run-1",
     sessionId: "session-1",
@@ -19,6 +23,7 @@ function makeRun(status: AgentRun["status"], events: TimelineEvent[]): AgentRun 
     error: "",
     userMessage: "分析日志",
     feedback: "",
+    ...overrides,
   };
 }
 
@@ -218,5 +223,123 @@ describe("AgentProcessPanel business steps", () => {
 
     expect(screen.getByText("本轮概览")).toBeVisible();
     expect(screen.getByText("按步骤执行")).toBeVisible();
+  });
+
+  it("merges pending distill draft and diagnosis feedback into one card", async () => {
+    const onFeedback = vi.fn();
+    const onDistill = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AgentProcessPanel
+        run={makeRun("completed", [], {
+          answer: "诊断结论已确认",
+          distillDraft: {
+            experience_id: "exp-draft-1",
+            status: "pending",
+            enabled: true,
+            requires_confirm: true,
+          },
+        })}
+        onFeedback={onFeedback}
+        onDistill={onDistill}
+      />,
+    );
+
+    // One unified card — no stacked "这次诊断有帮助吗？" duplicate.
+    expect(screen.getAllByTestId("feedback-card")).toHaveLength(1);
+    expect(screen.getByText(/待确认经验草稿/)).toBeInTheDocument();
+    expect(screen.queryByText("这次诊断有帮助吗？")).not.toBeInTheDocument();
+    expect(screen.queryByText("自动蒸馏草稿")).not.toBeInTheDocument();
+
+    expect(screen.getByRole("button", { name: "采纳为经验" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "纠正" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "拒绝草稿" })).toBeInTheDocument();
+    // The bare "采纳" / "拒绝" buttons from the old dual-card layout must be gone.
+    expect(screen.queryByRole("button", { name: "采纳" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "拒绝" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "采纳为经验" }));
+    expect(onDistill).toHaveBeenCalledWith("confirm");
+    expect(onFeedback).not.toHaveBeenCalled();
+  });
+
+  it("shows a single settled card after distill is confirmed", () => {
+    render(
+      <AgentProcessPanel
+        run={makeRun("completed", [], {
+          answer: "诊断结论已确认",
+          distillDraft: {
+            experience_id: "exp-draft-1",
+            status: "pending",
+            enabled: true,
+            requires_confirm: true,
+          },
+          distillStatus: "confirmed",
+          feedback: "adopted",
+        })}
+      />,
+    );
+
+    expect(screen.getAllByTestId("feedback-card")).toHaveLength(1);
+    expect(screen.getByText("已采纳，将沉淀为长期经验。")).toBeInTheDocument();
+    expect(screen.queryByText("已确认采纳经验草稿（不会执行任何变更）。")).not.toBeInTheDocument();
+  });
+
+  it("renders suggested actions and confirms audit-only HITL actions", async () => {
+    const onConfirmSuggestion = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AgentProcessPanel
+        run={makeRun("completed", [], {
+          answer: "诊断结论已确认",
+          suggestedActions: [
+            {
+              id: "review_metrics",
+              title: "建议：复核相关指标/告警时间窗（只读）",
+              risk: "low",
+              requires_confirm: true,
+            },
+            {
+              id: "review_logs",
+              title: "建议：抽样核对错误日志与变更窗口（只读）",
+              risk: "low",
+              requires_confirm: true,
+            },
+          ],
+        })}
+        onConfirmSuggestion={onConfirmSuggestion}
+      />,
+    );
+
+    expect(screen.getByTestId("suggested-actions-card")).toBeInTheDocument();
+    expect(screen.getByText(/不会自动执行重启/)).toBeInTheDocument();
+
+    const buttons = screen.getAllByRole("button", { name: "确认建议" });
+    expect(buttons).toHaveLength(2);
+    await user.click(buttons[0]);
+    expect(onConfirmSuggestion).toHaveBeenCalledWith("review_metrics");
+  });
+
+  it("marks confirmed suggested actions as audit-only", () => {
+    render(
+      <AgentProcessPanel
+        run={makeRun("completed", [], {
+          answer: "诊断结论已确认",
+          suggestedActions: [
+            {
+              id: "review_metrics",
+              title: "建议：复核相关指标/告警时间窗（只读）",
+              risk: "low",
+              requires_confirm: true,
+            },
+          ],
+          confirmedActionIds: ["review_metrics"],
+        })}
+      />,
+    );
+
+    expect(screen.getByText("已确认（未执行）")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认建议" })).not.toBeInTheDocument();
+    expect(screen.getByText(/全部建议已确认记录/)).toBeInTheDocument();
   });
 });

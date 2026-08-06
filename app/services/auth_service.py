@@ -73,10 +73,18 @@ class AuthService:
         return subject
 
     def owner_key_for_user(self, username: str) -> str:
+        """Return the legacy storage key used by pre-migration rows."""
         subject = username.strip()
         if not subject:
             raise ValueError("username is required")
-        return hashlib.sha256(f"user:{subject}".encode("utf-8")).hexdigest()[:8]
+        return hashlib.sha256(f"user:{subject}".encode()).hexdigest()[:8]
+
+    def stable_owner_key_for_user(self, username: str) -> str:
+        """Return a collision-resistant owner identifier for new request scope."""
+        subject = username.strip()
+        if not subject:
+            raise ValueError("username is required")
+        return hashlib.sha256(f"owner:v2:{subject}".encode()).hexdigest()
 
     def _sign(self, payload_part: str) -> str:
         secret = config.auth_token_secret.encode("utf-8")

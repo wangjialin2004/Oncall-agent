@@ -21,7 +21,7 @@ class FakeRouter:
         self.route = route
         self.aux_routes = aux_routes
 
-    async def _resolve_route(self, message: str) -> RouteDecision:
+    async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
         return RouteDecision(
             route=self.route,
             reason="fake_focus",
@@ -267,6 +267,7 @@ async def test_post_re_evidence_replan(monkeypatch):
     monkeypatch.setattr(app_config, "harness_replan_max_times", 1)
     monkeypatch.setattr(app_config, "harness_re_evidence_enabled", True)
     monkeypatch.setattr(app_config, "harness_re_evidence_max_rounds", 1)
+    monkeypatch.setattr(app_config, "harness_final_answer_replacement_enabled", True)
     monkeypatch.setattr(app_config, "harness_force_expert_delegation", False)
     monkeypatch.setattr(app_config, "harness_corrective_verify_enabled", True)
     monkeypatch.setattr(
@@ -334,6 +335,17 @@ async def test_post_re_evidence_replan(monkeypatch):
         e.get("type") == "tool_event" and e.get("tool") == "query_prometheus_alerts"
         for e in events
     )
+    visible = "".join(
+        str(event.get("data") or "")
+        for event in events
+        if event.get("type") == "content"
+    )
+    assert visible == "I guess CPU is high without tools."
+    complete_payload = next(
+        event for event in reversed(events) if event.get("type") == "complete"
+    )
+    assert "checkout-api CPU elevated based on alerts tool." in complete_payload["answer"]
+    assert complete_payload.get("replace_streamed_answer") is True
 
 
 @pytest.mark.asyncio

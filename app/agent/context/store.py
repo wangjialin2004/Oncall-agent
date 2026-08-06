@@ -1,4 +1,4 @@
-"""Redis-first :class:`AgentContextStateStore` with DB snapshot fallback.
+"""Deprecated callback-injected compatibility store.
 
 Per plan ``plan/2026-07-08-stateful-agent-context.md`` §5 the canonical read
 path is:
@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import inspect
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from loguru import logger
 
@@ -29,7 +30,7 @@ from app.agent.context.persistence import (
     state_from_dict,
     state_to_dict,
 )
-from app.agent.context.state import SCHEMA_VERSION, AgentContextState
+from app.agent.context.state import AgentContextState
 from app.config import config
 
 # Re-export for downstream imports.
@@ -47,8 +48,7 @@ def _build_redis_key(namespace: str, owner_key: str, session_id: str) -> str:
 async def _maybe_await(value: Any) -> Any:
     """Await ``value`` if it's awaitable; return it directly otherwise.
 
-    Lets the store accept either sync callables (current
-    ``ContextSnapshotService`` is sync) or async callables without forcing
+    Lets the store accept either sync or async callables without forcing
     every caller to wrap their service method in ``asyncio.to_thread``.
     """
     if inspect.isawaitable(value):
@@ -107,7 +107,7 @@ class ContextStateStore:
 
         ``db_snapshot_get`` and ``db_snapshot_save`` accept kwargs
         ``owner_key`` / ``session_id`` (and ``state`` for save). They may be
-        either sync (current ``ContextSnapshotService``) or async — the store
+        either sync or async — the store
         awaits the result if it's a coroutine.
 
         ``redis_get_set`` is the Redis access layer:

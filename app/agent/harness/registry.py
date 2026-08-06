@@ -108,8 +108,20 @@ class HarnessToolRegistry:
 
         return ToolCatalog(tools=tools, metadata=metadata)
 
-    def context_tools(self, state: object) -> list[RuntimeTool]:
-        """Return safe ContextState tools when the stateful context feature is on."""
+    def context_tools(
+        self,
+        state: object,
+        *,
+        whiteboard_injected: bool = False,
+        include_read: bool | None = None,
+    ) -> list[RuntimeTool]:
+        """Return whiteboard tools bound to the current AgentContextState.
+
+        These tools attach to the live whiteboard object (unified projection or
+        legacy stateful store). They are not gated on the stateful *storage*
+        path. When the whiteboard/history is already in the model prompt,
+        ``context_read`` is omitted by default.
+        """
         if not bool(getattr(config, "harness_context_tools_enabled", True)):
             return []
         try:
@@ -120,7 +132,11 @@ class HarnessToolRegistry:
             return []
         if not isinstance(state, AgentContextState):
             return []
-        return build_runtime_tools(state)
+        return build_runtime_tools(
+            state,
+            whiteboard_injected=whiteboard_injected,
+            include_read=include_read,
+        )
 
 
 def _tools_for_route(route: str) -> tuple[tuple[RuntimeTool, ...], str | tuple[str, ...] | None]:

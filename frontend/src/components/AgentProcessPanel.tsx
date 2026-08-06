@@ -8,11 +8,13 @@ import { buildProcessPanelModel } from "./agent-process/processModel";
 
 type FeedbackHandler = (kind: "adopted" | "corrected", actualRootCause?: string) => void;
 type DistillHandler = (action: "confirm" | "reject") => void;
+type ConfirmSuggestionHandler = (actionId: string) => void;
 
 type AgentProcessPanelProps = {
   run: AgentRun;
   onFeedback?: FeedbackHandler;
   onDistill?: DistillHandler;
+  onConfirmSuggestion?: ConfirmSuggestionHandler;
 };
 
 const statusLabels: Record<string, string> = {
@@ -1198,13 +1200,33 @@ function StepCardView({ card }: { card: StepCard }) {
   );
 }
 
-function FeedbackCard({ run, onFeedback }: { run: AgentRun; onFeedback?: FeedbackHandler }) {
+function hasPendingDistillDraft(run: AgentRun): boolean {
+  const draft = run.distillDraft;
+  return Boolean(
+    draft?.experience_id &&
+      draft.status === "pending" &&
+      run.distillStatus !== "confirmed" &&
+      run.distillStatus !== "rejected",
+  );
+}
+
+function FeedbackCard({
+  run,
+  onFeedback,
+  onDistill,
+}: {
+  run: AgentRun;
+  onFeedback?: FeedbackHandler;
+  onDistill?: DistillHandler;
+}) {
   const [correcting, setCorrecting] = useState(false);
   const [rootCause, setRootCause] = useState("");
+  const pendingDraft = hasPendingDistillDraft(run);
 
-  if (run.feedback === "adopted") {
+  // Unified settled states — one card only, even when both distill + feedback apply.
+  if (run.feedback === "adopted" || run.distillStatus === "confirmed") {
     return (
-      <div className="panel-card feedback-card">
+      <div className="panel-card feedback-card" data-testid="feedback-card">
         <span className="label">反馈</span>
         <p>已采纳，将沉淀为长期经验。</p>
       </div>
@@ -1212,16 +1234,68 @@ function FeedbackCard({ run, onFeedback }: { run: AgentRun; onFeedback?: Feedbac
   }
   if (run.feedback === "corrected") {
     return (
-      <div className="panel-card feedback-card">
+      <div className="panel-card feedback-card" data-testid="feedback-card">
         <span className="label">反馈</span>
         <p>已记录纠正，将沉淀为长期经验。</p>
       </div>
     );
   }
 
+  // Pending auto-distill + diagnosis feedback share one action surface so the
+  // panel does not stack two near-identical "采纳" cards.
+  if (pendingDraft) {
+    return (
+      <div className="panel-card feedback-card" data-testid="feedback-card">
+        <span className="label">结果反馈</span>
+        <p>系统已生成待确认经验草稿。采纳后进入召回；也可纠正根因，或拒绝该草稿。</p>
+        {correcting ? (
+          <div className="feedback-correct">
+            <textarea
+              aria-label="纠正根因"
+              value={rootCause}
+              placeholder="请填写实际根因…"
+              onChange={(event) => setRootCause(event.target.value)}
+            />
+            <div className="feedback-actions">
+              <button
+                type="button"
+                disabled={!rootCause.trim()}
+                onClick={() => onFeedback?.("corrected", rootCause.trim())}
+              >
+                提交纠正
+              </button>
+              <button type="button" className="ghost" onClick={() => setCorrecting(false)}>
+                取消
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="feedback-actions">
+            <button type="button" onClick={() => onDistill?.("confirm")}>
+              采纳为经验
+            </button>
+            <button type="button" className="ghost" onClick={() => setCorrecting(true)}>
+              纠正
+            </button>
+            <button type="button" className="ghost" onClick={() => onDistill?.("reject")}>
+              拒绝草稿
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Draft rejected without diagnosis feedback: still allow adopt/correct, with a note.
+  const draftRejectedNote =
+    run.distillStatus === "rejected" ? (
+      <p className="feedback-note">已拒绝自动蒸馏草稿，仍可对本次诊断给出反馈。</p>
+    ) : null;
+
   return (
-    <div className="panel-card feedback-card">
+    <div className="panel-card feedback-card" data-testid="feedback-card">
       <span className="label">这次诊断有帮助吗？</span>
+      {draftRejectedNote}
       {correcting ? (
         <div className="feedback-correct">
           <textarea
@@ -1267,6 +1341,71 @@ function describeReplayMode(replayOverride: boolean | null, conservative: boolea
   return conservative ? "保守模式：默认未重放非白名单工具" : "激进模式：按服务端默认重放了工具";
 }
 
+function riskLabel(risk: string): string {
+  const normalized = risk.toLowerCase();
+  if (normalized === "high") return "高风险";
+  if (normalized === "medium") return "中风险";
+  if (normalized === "low") return "低风险";
+  return risk || "未知";
+}
+
+function SuggestedActionsCard({
+  run,
+  onConfirmSuggestion,
+}: {
+  run: AgentRun;
+  onConfirmSuggestion?: ConfirmSuggestionHandler;
+}) {
+  const actions = run.suggestedActions ?? [];
+  if (actions.length === 0) {
+    return null;
+  }
+  const confirmed = new Set(run.confirmedActionIds ?? []);
+  const allConfirmed = actions.every((action) => confirmed.has(action.id));
+
+  return (
+    <div className="panel-card hitl-card" data-testid="suggested-actions-card">
+      <span className="label">建议动作（人工确认）</span>
+      <p className="hitl-hint">
+        以下为只读建议。确认仅记录审计，不会自动执行重启/回滚/扩缩容。
+      </p>
+      <ul className="hitl-action-list">
+        {actions.map((action) => {
+          const isConfirmed = confirmed.has(action.id);
+          return (
+            <li key={action.id} className={`hitl-action-item${isConfirmed ? " is-confirmed" : ""}`}>
+              <div className="hitl-action-main">
+                <span className="hitl-action-title">{action.title}</span>
+                <span className={`hitl-risk hitl-risk-${action.risk || "low"}`}>
+                  {riskLabel(action.risk)}
+                </span>
+              </div>
+              {isConfirmed ? (
+                <span className="hitl-confirmed" role="status">
+                  已确认（未执行）
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="hitl-confirm-btn"
+                  onClick={() => onConfirmSuggestion?.(action.id)}
+                >
+                  确认建议
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {allConfirmed ? (
+        <p className="hitl-footer" role="status">
+          全部建议已确认记录。系统未执行任何变更。
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function CheckpointBanner({ run }: { run: AgentRun }) {
   const resume = run.checkpointResume;
   const close = run.checkpointConservativeClose;
@@ -1310,44 +1449,12 @@ function CheckpointBanner({ run }: { run: AgentRun }) {
   );
 }
 
-function DistillCard({ run, onDistill }: { run: AgentRun; onDistill?: DistillHandler }) {
-  const draft = run.distillDraft;
-  if (!draft?.experience_id || draft.status !== "pending") {
-    return null;
-  }
-  if (run.distillStatus === "confirmed") {
-    return (
-      <div className="panel-card feedback-card" data-testid="distill-card">
-        <span className="label">自动蒸馏</span>
-        <p>已确认采纳经验草稿（不会执行任何变更）。</p>
-      </div>
-    );
-  }
-  if (run.distillStatus === "rejected") {
-    return (
-      <div className="panel-card feedback-card" data-testid="distill-card">
-        <span className="label">自动蒸馏</span>
-        <p>已拒绝该经验草稿。</p>
-      </div>
-    );
-  }
-  return (
-    <div className="panel-card feedback-card" data-testid="distill-card">
-      <span className="label">自动蒸馏草稿</span>
-      <p>系统生成了待确认经验（pending），确认后才进入召回。</p>
-      <div className="feedback-actions">
-        <button type="button" onClick={() => onDistill?.("confirm")}>
-          采纳为经验
-        </button>
-        <button type="button" className="ghost" onClick={() => onDistill?.("reject")}>
-          拒绝
-        </button>
-      </div>
-    </div>
-  );
-}
-
-export function AgentProcessPanel({ run, onFeedback, onDistill }: AgentProcessPanelProps) {
+export function AgentProcessPanel({
+  run,
+  onFeedback,
+  onDistill,
+  onConfirmSuggestion,
+}: AgentProcessPanelProps) {
   const cards = useMemo(() => buildStepCards(run), [run]);
   const planItems = useMemo(() => buildPlanProgress(run), [run]);
   const processModel = useMemo(() => buildProcessPanelModel(run), [run]);
@@ -1432,8 +1539,8 @@ export function AgentProcessPanel({ run, onFeedback, onDistill }: AgentProcessPa
 
       {run.status === "completed" && run.answer ? (
         <>
-          <DistillCard run={run} onDistill={onDistill} />
-          <FeedbackCard run={run} onFeedback={onFeedback} />
+          <SuggestedActionsCard run={run} onConfirmSuggestion={onConfirmSuggestion} />
+          <FeedbackCard run={run} onFeedback={onFeedback} onDistill={onDistill} />
         </>
       ) : null}
 

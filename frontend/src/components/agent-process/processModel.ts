@@ -18,6 +18,10 @@ export type ProcessActivity = {
   summary: string;
   durationMs?: number;
   details: ProcessDetailSection[];
+  /** Shared id for activities that should render side-by-side (parallel experts). */
+  parallelGroupId?: string;
+  /** Expert route key when this activity represents one delegated expert. */
+  expertKey?: string;
 };
 
 export type ProcessStep = {
@@ -114,7 +118,51 @@ function activityId(event: TimelineEvent, index: number): string {
   return event.evidence_id || event.span_id || `${event.type}-${event.stage ?? event.tool ?? index}-${index}`;
 }
 
-function delegationId(event: TimelineEvent, index: number): string {
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item) => String(item ?? "").trim()).filter(Boolean);
+}
+
+function parallelCallId(event: TimelineEvent, index: number): string {
+  const payload = event.payload ?? {};
+  const argumentsPayload = asRecord(payload.arguments) ?? {};
+  return String(
+    payload.tool_call_id ??
+      payload.parent_tool_call_id ??
+      argumentsPayload.tool_call_id ??
+      event.evidence_id ??
+      event.span_id ??
+      `delegate-parallel-${index}`,
+  );
+}
+
+function expertFromEvent(event: TimelineEvent): string {
+  const payload = event.payload ?? {};
+  const argumentsPayload = asRecord(payload.arguments) ?? {};
+  const agent = String(event.agent ?? "");
+  const agentExpert = agent.endsWith("_expert") ? agent.slice(0, -"_expert".length) : "";
+  return String(
+    payload.delegated_expert ??
+      payload.expert ??
+      argumentsPayload.expert ??
+      agentExpert ??
+      "",
+  ).trim();
+}
+
+function expertActivityId(callId: string, expert: string): string {
+  return `parallel:${callId}:${expert || "unknown"}`;
+}
+
+function serialDelegationId(event: TimelineEvent, index: number): string {
   const payload = event.payload ?? {};
   return String(
     payload.tool_call_id ??
@@ -125,14 +173,377 @@ function delegationId(event: TimelineEvent, index: number): string {
   );
 }
 
-function activityFromEvent(event: TimelineEvent, index: number): ProcessActivity {
-  const argumentsPayload =
-    event.payload?.arguments && typeof event.payload.arguments === "object"
-      ? (event.payload.arguments as Record<string, unknown>)
-      : {};
-  const delegatedExpert = String(
-    event.payload?.delegated_expert ?? event.payload?.expert ?? argumentsPayload.expert ?? "",
+function expertsFromParallelEvent(event: TimelineEvent): string[] {
+  const payload = event.payload ?? {};
+  const argumentsPayload = asRecord(payload.arguments) ?? {};
+  const fromPayload = stringList(payload.experts);
+  if (fromPayload.length > 0) {
+    return uniqueStrings(fromPayload);
+  }
+  const fromArgs = stringList(argumentsPayload.experts);
+  if (fromArgs.length > 0) {
+    return uniqueStrings(fromArgs);
+  }
+  const results = Array.isArray(payload.results)
+    ? payload.results
+    : Array.isArray(asRecord(payload.result)?.results)
+      ? (asRecord(payload.result)?.results as unknown[])
+      : [];
+  const fromResults = results
+    .map((item) => {
+      const row = asRecord(item);
+      return row ? String(row.expert ?? "").trim() : "";
+    })
+    .filter(Boolean);
+  return uniqueStrings(fromResults);
+}
+
+function subtasksFromParallelEvent(event: TimelineEvent): string[] {
+  const payload = event.payload ?? {};
+  const argumentsPayload = asRecord(payload.arguments) ?? {};
+  const fromPayload = stringList(payload.subtasks);
+  if (fromPayload.length > 0) {
+    return fromPayload;
+  }
+  return stringList(argumentsPayload.subtasks);
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const key = value.trim();
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(key);
+  }
+  return result;
+}
+
+function isParallelDelegateEvent(event: TimelineEvent): boolean {
+  const stage = event.stage ?? "";
+  return (
+    stage === "delegate_parallel_start" ||
+    stage === "delegate_parallel_done" ||
+    event.tool === "delegate_parallel"
   );
+}
+
+function isSerialDelegateEvent(event: TimelineEvent): boolean {
+  const stage = event.stage ?? "";
+  return (
+    stage === "delegate_start" ||
+    stage === "delegate_dispatch" ||
+    event.tool === "delegate_to_expert"
+  );
+}
+
+function resultRowsFromParallelEvent(event: TimelineEvent): Record<string, unknown>[] {
+  const payload = event.payload ?? {};
+  const direct = Array.isArray(payload.results) ? payload.results : [];
+  if (direct.length > 0) {
+    return direct.map((item) => asRecord(item)).filter((item): item is Record<string, unknown> => Boolean(item));
+  }
+  const nested = asRecord(payload.result);
+  const nestedResults = Array.isArray(nested?.results) ? nested.results : [];
+  return nestedResults
+    .map((item) => asRecord(item))
+    .filter((item): item is Record<string, unknown> => Boolean(item));
+}
+
+function upsertActivity(step: ProcessStep, activity: ProcessActivity, index: number): void {
+  const existingIndex = step.activities.findIndex((item) => item.id === activity.id);
+  if (existingIndex >= 0) {
+    const existing = step.activities[existingIndex];
+    const mergedDetails = mergeActivityDetails(existing.details, activity.details);
+    step.activities[existingIndex] = {
+      ...existing,
+      ...activity,
+      status: mergeStatus(existing.status, activity.status),
+      summary: preferRicherText(activity.summary, existing.summary),
+      durationMs: activity.durationMs ?? existing.durationMs,
+      details: mergedDetails,
+      parallelGroupId: activity.parallelGroupId ?? existing.parallelGroupId,
+      expertKey: activity.expertKey ?? existing.expertKey,
+    };
+  } else {
+    step.activities.push(activity);
+  }
+  step.status = mergeStatus(step.status, activity.status);
+  step.sourceEventIndexes.push(index);
+}
+
+function preferRicherText(next: string, prev: string): string {
+  const a = (next || "").trim();
+  const b = (prev || "").trim();
+  if (!a) {
+    return b;
+  }
+  if (!b) {
+    return a;
+  }
+  // Prefer concrete conclusions over generic progress text.
+  if (a.startsWith("任务：") && !b.startsWith("任务：") && b.length >= a.length) {
+    return b;
+  }
+  return a.length >= b.length ? a : b;
+}
+
+function mergeActivityDetails(
+  existing: ProcessDetailSection[],
+  incoming: ProcessDetailSection[],
+): ProcessDetailSection[] {
+  if (incoming.length === 0) {
+    return existing;
+  }
+  if (existing.length === 0) {
+    return incoming;
+  }
+  const byId = new Map<string, ProcessDetailSection>();
+  for (const section of existing) {
+    byId.set(section.id, section);
+  }
+  for (const section of incoming) {
+    const prev = byId.get(section.id);
+    if (!prev) {
+      byId.set(section.id, section);
+      continue;
+    }
+    byId.set(section.id, {
+      ...prev,
+      ...section,
+      summary: preferRicherText(section.summary ?? "", prev.summary ?? "") || undefined,
+      fields: section.fields.length > 0 ? section.fields : prev.fields,
+      items: section.items.length > 0 ? section.items : prev.items,
+      raw: section.raw ?? prev.raw,
+      remaining: section.remaining ?? prev.remaining,
+    });
+  }
+  // Keep stable order: previous sections first, then newly introduced ones.
+  const ordered: ProcessDetailSection[] = [];
+  const seen = new Set<string>();
+  for (const section of [...existing, ...incoming]) {
+    if (seen.has(section.id)) {
+      continue;
+    }
+    const merged = byId.get(section.id);
+    if (merged) {
+      ordered.push(merged);
+      seen.add(section.id);
+    }
+  }
+  return ordered;
+}
+
+function applyParallelDelegateEvent(
+  step: ProcessStep,
+  event: TimelineEvent,
+  index: number,
+  expertIds: Set<string>,
+): void {
+  const callId = parallelCallId(event, index);
+  const experts = expertsFromParallelEvent(event);
+  const subtasks = subtasksFromParallelEvent(event);
+  const resultRows = resultRowsFromParallelEvent(event);
+  const resultByExpert = new Map(
+    resultRows.map((row) => [String(row.expert ?? "").trim(), row] as const).filter(([key]) => Boolean(key)),
+  );
+  const wallMsRaw = event.payload?.wall_ms;
+  const wallMs =
+    typeof wallMsRaw === "number" && Number.isFinite(wallMsRaw)
+      ? wallMsRaw
+      : typeof asRecord(event.payload?.result)?.wall_ms === "number"
+        ? Number(asRecord(event.payload?.result)?.wall_ms)
+        : undefined;
+
+  if (experts.length === 0) {
+    // Fallback: keep a single activity when payload has no expert list.
+    upsertActivity(
+      step,
+      {
+        id: `parallel:${callId}`,
+        title: presentTool("delegate_parallel"),
+        status: eventStatus(event),
+        summary: presentEventSummary(event) || "并行委派专家",
+        durationMs: durationOf(event) ?? wallMs,
+        details: presentEventDetails(event),
+        parallelGroupId: callId,
+      },
+      index,
+    );
+    expertIds.add(`parallel:${callId}`);
+  } else {
+    experts.forEach((expert, expertIndex) => {
+      const result = resultByExpert.get(expert);
+      const resultStatus = result ? eventStatus({ ...event, status: String(result.status ?? event.status ?? "") }) : eventStatus(event);
+      const subtask = subtasks[expertIndex] ?? String(result?.subtask ?? "");
+      const answer = String(result?.answer ?? result?.error ?? "").trim();
+      const details: ProcessDetailSection[] = [];
+      if (subtask) {
+        details.push({
+          id: `subtask-${expert}`,
+          kind: "input",
+          title: "执行内容",
+          fields: [{ label: "子任务", value: subtask.length > 240 ? `${subtask.slice(0, 240)}…` : subtask }],
+          items: [],
+        });
+      }
+      if (answer) {
+        details.push({
+          id: `result-${expert}`,
+          kind: "result",
+          title: "关键结果",
+          fields: [{ label: "结论", value: answer.length > 240 ? `${answer.slice(0, 240)}…` : answer }],
+          items: [],
+        });
+      }
+      if (details.length === 0) {
+        details.push(...presentEventDetails(event));
+      }
+      upsertActivity(
+        step,
+        {
+          id: expertActivityId(callId, expert),
+          title: presentAgent(expert),
+          status:
+            event.stage === "delegate_parallel_start" ||
+            (event.tool === "delegate_parallel" && event.status === "in_progress")
+              ? "running"
+              : resultStatus,
+          summary:
+            answer ||
+            (subtask ? `任务：${subtask.length > 100 ? `${subtask.slice(0, 100)}…` : subtask}` : "") ||
+            presentEventSummary(event) ||
+            `${presentAgent(expert)}并行取证`,
+          durationMs: durationOf(event) ?? wallMs,
+          details,
+          parallelGroupId: callId,
+          expertKey: expert,
+        },
+        index,
+      );
+      expertIds.add(expertActivityId(callId, expert));
+    });
+  }
+
+  if (event.type === "tool_event" || event.stage === "delegate_parallel_start") {
+    step.summary =
+      experts.length > 0
+        ? `并行委派 ${experts.map((item) => presentAgent(item)).join("、")}`
+        : presentEventSummary(event) || step.summary || "并行委派专家";
+    if (step.phase === "execute" || step.phase === "retry") {
+      step.title = experts.length > 1 ? "并行专家取证" : step.title;
+    }
+  }
+}
+
+function applySerialDelegateEvent(
+  step: ProcessStep,
+  event: TimelineEvent,
+  index: number,
+  expertIds: Set<string>,
+): void {
+  const expert = expertFromEvent(event);
+  const callId = serialDelegationId(event, index);
+  const activityIdValue = expert ? `serial:${callId}:${expert}` : `serial:${callId}`;
+  const argumentsPayload = asRecord(event.payload?.arguments) ?? {};
+  const subtask = String(event.payload?.subtask ?? argumentsPayload.subtask ?? "").trim();
+  const result = asRecord(event.payload?.result);
+  const answer = String(result?.answer ?? event.payload?.answer ?? "").trim();
+  const details: ProcessDetailSection[] = [];
+  if (subtask) {
+    const fields = [
+      ...(expert ? [{ label: "专家", value: presentAgent(expert) }] : []),
+      { label: "子任务", value: subtask.length > 240 ? `${subtask.slice(0, 240)}…` : subtask },
+    ];
+    details.push({
+      id: "subtask",
+      kind: "input",
+      title: "执行内容",
+      // Keep summary empty when fields already carry the subtask text to avoid
+      // duplicate visible strings in the process panel.
+      fields,
+      items: [],
+    });
+  }
+  if (answer) {
+    const fields = [
+      ...(expert && !subtask ? [{ label: "专家", value: presentAgent(expert) }] : []),
+      { label: "结论", value: answer.length > 240 ? `${answer.slice(0, 240)}…` : answer },
+    ];
+    details.push({
+      id: "result",
+      kind: "result",
+      title: "关键结果",
+      fields,
+      items: [],
+    });
+  }
+  if (details.length === 0) {
+    details.push(...presentEventDetails(event));
+  }
+  upsertActivity(
+    step,
+    {
+      id: activityIdValue,
+      title: expert ? `委派${presentAgent(expert)}` : presentTool("delegate_to_expert"),
+      status: eventStatus(event),
+      summary:
+        answer ||
+        (subtask ? `任务：${subtask.length > 100 ? `${subtask.slice(0, 100)}…` : subtask}` : "") ||
+        presentEventSummary(event),
+      durationMs: durationOf(event),
+      details,
+      expertKey: expert || undefined,
+    },
+    index,
+  );
+  expertIds.add(activityIdValue);
+  if (event.type === "tool_event" || !step.summary) {
+    step.summary = expert ? `委派${presentAgent(expert)}` : presentEventSummary(event) || step.summary;
+  }
+}
+
+function applyChildExpertEvent(
+  step: ProcessStep,
+  event: TimelineEvent,
+  index: number,
+  expertIds: Set<string>,
+): boolean {
+  const payload = event.payload ?? {};
+  const expert = expertFromEvent(event);
+  const parentCallId = String(payload.parent_tool_call_id ?? "").trim();
+  const isParallelChild = Boolean(payload.parallel) || Boolean(parentCallId);
+  if (!expert || !isParallelChild) {
+    return false;
+  }
+  const callId = parentCallId || parallelCallId(event, index);
+  const id = expertActivityId(callId, expert);
+  const existing = step.activities.find((item) => item.id === id);
+  const childDetails = presentEventDetails(event);
+  const childSummary = presentEventSummary(event);
+  upsertActivity(
+    step,
+    {
+      id,
+      title: presentAgent(expert),
+      status: eventStatus(event),
+      summary: childSummary || existing?.summary || `${presentAgent(expert)}取证中`,
+      durationMs: durationOf(event) ?? existing?.durationMs,
+      details: childDetails,
+      parallelGroupId: callId,
+      expertKey: expert,
+    },
+    index,
+  );
+  expertIds.add(id);
+  return true;
+}
+
+function activityFromEvent(event: TimelineEvent, index: number): ProcessActivity {
+  const delegatedExpert = expertFromEvent(event);
   return {
     id: activityId(event, index),
     title:
@@ -145,19 +556,30 @@ function activityFromEvent(event: TimelineEvent, index: number): ProcessActivity
     summary: presentEventSummary(event),
     durationMs: durationOf(event),
     details: presentEventDetails(event),
+    expertKey: delegatedExpert || undefined,
   };
 }
 
-function addActivity(step: ProcessStep, event: TimelineEvent, index: number): void {
-  const activity = activityFromEvent(event, index);
-  const existingIndex = step.activities.findIndex((item) => item.id === activity.id);
-  if (existingIndex >= 0) {
-    step.activities[existingIndex] = activity;
-  } else {
-    step.activities.push(activity);
+function addActivity(
+  step: ProcessStep,
+  event: TimelineEvent,
+  index: number,
+  expertIds: Set<string>,
+): void {
+  if (isParallelDelegateEvent(event)) {
+    applyParallelDelegateEvent(step, event, index, expertIds);
+    return;
   }
-  step.status = mergeStatus(step.status, activity.status);
-  step.sourceEventIndexes.push(index);
+  if (isSerialDelegateEvent(event)) {
+    applySerialDelegateEvent(step, event, index, expertIds);
+    return;
+  }
+  if (applyChildExpertEvent(step, event, index, expertIds)) {
+    return;
+  }
+
+  const activity = activityFromEvent(event, index);
+  upsertActivity(step, activity, index);
   if (activity.summary && (event.type === "tool_event" || !step.summary)) {
     step.summary = activity.summary;
   }
@@ -268,16 +690,13 @@ export function buildProcessPanelModel(run: AgentRun): ProcessPanelModel {
 
     if (event.type === "tool_event") {
       const id = activityId(event, index);
-      toolIds.add(id);
-      if (status === "success") {
+      // Parallel/serial delegate tools are counted via expert activity ids, not raw tool ids.
+      if (!["delegate_to_expert", "delegate_parallel"].includes(event.tool ?? "")) {
+        toolIds.add(id);
+      }
+      if (status === "success" && !["delegate_to_expert", "delegate_parallel"].includes(event.tool ?? "")) {
         evidenceIds.add(event.evidence_id || id);
       }
-      if (["delegate_to_expert", "delegate_parallel"].includes(event.tool ?? "")) {
-        expertIds.add(delegationId(event, index));
-      }
-    }
-    if (stage.startsWith("delegate_") && stage !== "delegate_parallel_done") {
-      expertIds.add(delegationId(event, index));
     }
 
     if (event.type === "route_event") {
@@ -339,7 +758,7 @@ export function buildProcessPanelModel(run: AgentRun): ProcessPanelModel {
         });
         executionByNumber.set(stepNumber, currentExecution);
       } else {
-        addActivity(currentExecution, event, index);
+        addActivity(currentExecution, event, index, expertIds);
       }
       continue;
     }
@@ -362,7 +781,13 @@ export function buildProcessPanelModel(run: AgentRun): ProcessPanelModel {
       continue;
     }
 
-    if (event.type === "tool_event" || stage.startsWith("delegate_") || stage.startsWith("log_")) {
+    if (
+      event.type === "tool_event" ||
+      stage.startsWith("delegate_") ||
+      stage.startsWith("log_") ||
+      stage === "aux_probe" ||
+      (event.agent?.endsWith("_expert") && (stage === "start" || stage === "complete" || stage === "evidence_return"))
+    ) {
       const stepNumber = eventStepNumber(event);
       const target =
         (stepNumber !== undefined ? executionByNumber.get(stepNumber) : undefined) ??
@@ -379,7 +804,7 @@ export function buildProcessPanelModel(run: AgentRun): ProcessPanelModel {
       if (!executionByNumber.has(executionSequence) && target.phase === "execute") {
         executionByNumber.set(executionSequence, target);
       }
-      addActivity(target, event, index);
+      addActivity(target, event, index, expertIds);
       continue;
     }
 
@@ -492,7 +917,7 @@ export function buildProcessPanelModel(run: AgentRun): ProcessPanelModel {
     }
 
     if (stage === "complete" && currentExecution) {
-      addActivity(currentExecution, event, index);
+      addActivity(currentExecution, event, index, expertIds);
       continue;
     }
   }

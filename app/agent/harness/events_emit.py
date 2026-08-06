@@ -11,7 +11,6 @@ from app.agent.harness.planner import HarnessPlan
 from app.agent.harness.state import HarnessState
 from app.agent.harness.verifier import VerificationResult
 from app.agent.stream_common import TIMELINE_EVENT_TYPES
-from app.config import config
 
 
 class HarnessEventsMixin:
@@ -215,13 +214,12 @@ class HarnessEventsMixin:
         if stateful_ctx is not None:
             source = str(getattr(stateful_ctx, "source", "") or "")
             warnings = list(getattr(stateful_ctx, "warnings", None) or [])
-        # Store ladder already tried redis → db_snapshot → rebuild. Surface that.
-        if source in {"redis", "db_snapshot", "rebuilt"}:
+        if source == "redis_inflight":
             event = make_agent_event(
                 agent="harness",
                 stage="context_rehydrate",
                 status="completed",
-                summary=f"Context rehydrated from {source}.",
+                summary="Context rehydrated from unified inflight recovery.",
                 payload={
                     "source": source,
                     "context_snapshot_ref": resume_context_ref,
@@ -233,43 +231,11 @@ class HarnessEventsMixin:
             state.timeline_events.append(event)
             yield event
             return
-
-        # Explicit best-effort DB pull when store returned fresh despite a ref.
-        if bool(getattr(config, "harness_context_db_snapshot_enabled", True)):
-            try:
-                from app.services.context_snapshot_service import context_snapshot_service
-
-                snapshot = context_snapshot_service.get_latest_context_snapshot(
-                    owner_key=owner_key, session_id=session_id
-                )
-            except Exception as exc:  # noqa: BLE001 — rehydrate must never break loop
-                snapshot = None
-                warnings.append(f"db snapshot rehydrate failed: {exc!r}")
-            if snapshot is not None and stateful_ctx is not None:
-                stateful_ctx.state = snapshot
-                stateful_ctx.source = "db_snapshot"
-                event = make_agent_event(
-                    agent="harness",
-                    stage="context_rehydrate",
-                    status="completed",
-                    summary="Context rehydrated from db_snapshot after store miss.",
-                    payload={
-                        "source": "db_snapshot",
-                        "context_snapshot_ref": resume_context_ref,
-                        "warnings": warnings,
-                    },
-                    trace_id=session_id,
-                    span_id=f"harness:{session_id}:context_rehydrate",
-                )
-                state.timeline_events.append(event)
-                yield event
-                return
-
         fail_event = make_agent_event(
             agent="harness",
             stage="context_rehydrate_failed",
             status="degraded",
-            summary="Context rehydrate failed; continuing with empty/fresh whiteboard.",
+            summary="Unified inflight context was unavailable; using committed context.",
             payload={
                 "context_snapshot_ref": resume_context_ref,
                 "source": source or "fresh",

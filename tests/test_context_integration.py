@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,12 +15,12 @@ from app.agent.context.integration import (
     stateful_context_enabled,
 )
 from app.agent.context.operations import framework_patch
+from app.agent.context.persistence import state_from_dict, state_to_dict
 from app.agent.context.state import (
     SECTION_INTENT,
     AgentContextState,
 )
 from app.agent.context.store import ContextStateStore
-from app.services.context_snapshot_service import ContextSnapshotService
 
 
 class _InMemoryRedis:
@@ -37,14 +36,27 @@ class _InMemoryRedis:
         raise ValueError(op)
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    return tmp_path / "integration.db"
+class _SnapshotBackend:
+    """Test-only callback backend for the retired compatibility store."""
+
+    def __init__(self) -> None:
+        self._states: dict[tuple[str, str], AgentContextState] = {}
+
+    def save_context_snapshot(
+        self, *, owner_key: str, session_id: str, state: AgentContextState
+    ) -> None:
+        self._states[(owner_key, session_id)] = state_from_dict(state_to_dict(state))
+
+    def get_latest_context_snapshot(
+        self, owner_key: str, session_id: str
+    ) -> AgentContextState | None:
+        state = self._states.get((owner_key, session_id))
+        return state_from_dict(state_to_dict(state)) if state is not None else None
 
 
 @pytest.fixture()
-def store_with_db(db_path: Path) -> ContextStateStore:
-    snap = ContextSnapshotService(db_path=db_path)
+def store_with_db() -> ContextStateStore:
+    snap = _SnapshotBackend()
     redis = _InMemoryRedis()
     return build_default_store(snapshot_service=snap, redis_get_set=redis)
 
@@ -91,9 +103,8 @@ async def test_persist_stateful_context_writes_redis_and_db(
 
 
 async def test_redis_miss_falls_back_to_db_snapshot(
-    db_path: Path,
 ) -> None:
-    snap = ContextSnapshotService(db_path=db_path)
+    snap = _SnapshotBackend()
     redis_a = _InMemoryRedis()
     redis_b = _InMemoryRedis()
 
@@ -187,13 +198,12 @@ async def test_state_version_increments_per_patch(
 
 
 async def test_redis_disabled_skips_redis_layer(
-    db_path: Path,
 ) -> None:
     """With redis_enabled=False, store should still work via DB snapshot."""
     from app.agent.context.integration import build_store_settings
     from app.agent.context.store import ContextStateStore
 
-    snap = ContextSnapshotService(db_path=db_path)
+    snap = _SnapshotBackend()
     redis = _InMemoryRedis()  # not used, but kept for the wiring call
 
     settings = build_store_settings()

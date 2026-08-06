@@ -32,6 +32,13 @@ class MilvusClientManager:
         self._collection: Collection | None = None
 
     @property
+    def collection_name(self) -> str:
+        """Configured collection; legacy ``biz`` remains the fallback."""
+
+        value = str(getattr(config, "rag_collection_name", "") or "").strip()
+        return value or self.COLLECTION_NAME
+
+    @property
     def VECTOR_DIM(self) -> int:
         """Dense vector dim — follows EMBEDDING_DIM (default 1024 for BGE-M3)."""
 
@@ -76,12 +83,12 @@ class MilvusClientManager:
 
             # 检查并创建 collection
             if not self._collection_exists():
-                logger.info(f"collection '{self.COLLECTION_NAME}' 不存在，正在创建...")
+                logger.info(f"collection '{self.collection_name}' 不存在，正在创建...")
                 self._create_collection()
-                logger.info(f"成功创建 collection '{self.COLLECTION_NAME}'")
+                logger.info(f"成功创建 collection '{self.collection_name}'")
             else:
-                logger.info(f"collection '{self.COLLECTION_NAME}' 已存在")
-                self._collection = Collection(self.COLLECTION_NAME)
+                logger.info(f"collection '{self.collection_name}' 已存在")
+                self._collection = Collection(self.collection_name)
                 if not validate_schema:
                     self._load_collection()
                     return self._client
@@ -106,11 +113,11 @@ class MilvusClientManager:
                         logger.warning(
                             f"检测到向量维度不匹配！当前 collection 维度: {existing_dim}, 配置维度: {self.VECTOR_DIM}"
                         )
-                        logger.info(f"正在删除旧 collection '{self.COLLECTION_NAME}'...")
-                        _ = utility.drop_collection(self.COLLECTION_NAME)
-                        logger.info(f"正在重新创建 collection '{self.COLLECTION_NAME}'...")
-                        self._create_collection()
-                        logger.info(f"成功重新创建 collection，维度: {self.VECTOR_DIM}")
+                        raise RuntimeError(
+                            f"collection '{self.collection_name}' vector dimension mismatch: "
+                            f"existing={existing_dim}, configured={self.VECTOR_DIM}; "
+                            "run the explicit migration/rebuild command instead of dropping data"
+                        )
                     else:
                         logger.info(f"向量维度匹配: {self.VECTOR_DIM}")
 
@@ -135,7 +142,7 @@ class MilvusClientManager:
     def _collection_exists(self) -> bool:
         """检查 collection 是否存在"""
         # pymilvus 的类型标注可能不准确，实际返回 bool
-        result = utility.has_collection(self.COLLECTION_NAME)
+        result = utility.has_collection(self.collection_name)
         return bool(result)  # type: ignore[arg-type]
 
     def _create_collection(self) -> None:
@@ -144,7 +151,7 @@ class MilvusClientManager:
 
         # 创建 collection
         self._collection = Collection(
-            name=self.COLLECTION_NAME,
+            name=self.collection_name,
             schema=schema,
             num_shards=self.DEFAULT_SHARD_NUMBER,
         )
@@ -169,13 +176,13 @@ class MilvusClientManager:
             self._collection = None
 
         if self._collection_exists():
-            logger.info(f"正在删除 collection '{self.COLLECTION_NAME}'...")
-            _ = utility.drop_collection(self.COLLECTION_NAME)
+            logger.info(f"正在删除 collection '{self.collection_name}'...")
+            _ = utility.drop_collection(self.collection_name)
 
-        logger.info(f"正在重新创建 collection '{self.COLLECTION_NAME}'...")
+        logger.info(f"正在重新创建 collection '{self.collection_name}'...")
         self._create_collection()
         self._load_collection()
-        logger.info(f"collection '{self.COLLECTION_NAME}' 重建完成")
+        logger.info(f"collection '{self.collection_name}' 重建完成")
 
     def _build_collection_schema(self) -> CollectionSchema:
         """构建 collection schema，支持 dense 和 BM25/hybrid 检索模式。"""
@@ -207,6 +214,16 @@ class MilvusClientManager:
             FieldSchema(
                 name="metadata",
                 dtype=DataType.JSON,
+            ),
+            FieldSchema(
+                name="scope_type",
+                dtype=DataType.VARCHAR,
+                max_length=16,
+            ),
+            FieldSchema(
+                name="scope_id",
+                dtype=DataType.VARCHAR,
+                max_length=256,
             ),
         ]
 
@@ -279,7 +296,14 @@ class MilvusClientManager:
         return config.rag_dense_vector_field or "vector"
 
     def _expected_field_names(self) -> set[str]:
-        names = {"id", "content", "metadata", self._dense_vector_field_name()}
+        names = {
+            "id",
+            "content",
+            "metadata",
+            "scope_type",
+            "scope_id",
+            self._dense_vector_field_name(),
+        }
         if self._retrieval_mode() in {"bm25", "hybrid"}:
             names.add(config.rag_sparse_vector_field)
         return names
@@ -296,7 +320,7 @@ class MilvusClientManager:
             # BM25/hybrid 模式必须要有 sparse_vector 字段 + BM25 Function，
             # 否则检索会静默失败。直接报错并给出修复指引。
             raise RuntimeError(
-                f"Collection '{self.COLLECTION_NAME}' 缺少当前检索模式 "
+                f"Collection '{self.collection_name}' 缺少当前检索模式 "
                 f"({retrieval_mode}) 需要的字段: {missing_desc}。\n"
                 "该 collection 可能是在 dense 模式下创建的，不支持 BM25/hybrid 检索。\n"
                 "请执行以下命令重建 collection 并重新索引文档：\n"
@@ -304,35 +328,35 @@ class MilvusClientManager:
             )
         else:
             logger.warning(
-                f"collection '{self.COLLECTION_NAME}' 缺少字段: {missing_desc}。"
+                f"collection '{self.collection_name}' 缺少字段: {missing_desc}。"
                 "如需启用 BM25/hybrid，请先设置 RAG_RETRIEVAL_MODE=hybrid 再重建 collection。"
             )
 
     def _load_collection(self) -> None:
         """加载 collection 到内存"""
         if self._collection is None:
-            self._collection = Collection(self.COLLECTION_NAME)
+            self._collection = Collection(self.collection_name)
 
         # 检查 collection 是否已加载（兼容多版本）
         try:
             # 方法 1: 尝试使用 utility.load_state（新版本）
-            load_state = utility.load_state(self.COLLECTION_NAME)
+            load_state = utility.load_state(self.collection_name)
             # load_state 返回字符串或枚举，如 "Loaded" 或 "NotLoad"
             state_name = getattr(load_state, "name", str(load_state))
             if state_name != "Loaded":
                 self._collection.load()
-                logger.info(f"成功加载 collection '{self.COLLECTION_NAME}'")
+                logger.info(f"成功加载 collection '{self.collection_name}'")
             else:
-                logger.info(f"Collection '{self.COLLECTION_NAME}' 已加载")
+                logger.info(f"Collection '{self.collection_name}' 已加载")
         except AttributeError:
             # 方法 2: 直接尝试加载，捕获 "already loaded" 异常
             try:
                 self._collection.load()
-                logger.info(f"成功加载 collection '{self.COLLECTION_NAME}'")
+                logger.info(f"成功加载 collection '{self.collection_name}'")
             except MilvusException as e:
                 error_msg = str(e).lower()
                 if "already loaded" in error_msg or "loaded" in error_msg:
-                    logger.info(f"Collection '{self.COLLECTION_NAME}' 已加载")
+                    logger.info(f"Collection '{self.collection_name}' 已加载")
                 else:
                     raise
         except Exception as e:

@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     debug: bool = False
     host: str = "0.0.0.0"
     port: int = 9900
+    static_serve_enabled: bool = False
+    # Runtime observability access. Production defaults to internal-only;
+    # bearer is for a protected Prometheus scrape path.
+    metrics_access_mode: str = "internal"  # internal | bearer | public
+    metrics_bearer_token: str = ""
+    metrics_public_debug_enabled: bool = False
+    health_details_enabled: bool = False
 
     # DashScope 配置（LLM 遗留回退 + embedding=dashscope 时使用）
     dashscope_api_key: str = ""  # 默认空字符串，实际使用需从环境变量加载
@@ -44,23 +51,21 @@ class Settings(BaseSettings):
     embedding_normalize: bool = True
     embedding_use_fp16: bool = True
     # DashScope-compatible endpoint overrides (only when embedding_provider=dashscope).
-    embedding_dashscope_base_url: str = (
-        "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    )
+    embedding_dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     # Generic LLM provider configuration. When unset, the custom LLM client
     # falls back to the legacy DashScope settings above.
     llm_provider: str = "openai"  # openai | azure | custom
     llm_base_url: str = "https://dasuapi.com/v1"
     llm_api_key: str = "get.env('LLM_API_KEY')"
-    llm_model: str = "gpt-5.4"
+    llm_model: str = "gpt-5.6-luna"
     llm_timeout: float = 60.0
     # 瞬时错误（429 / 5xx / 网络超时）的指数退避重试次数；鉴权错误不重试
     llm_max_retries: int = 2
     llm_retry_base_delay: float = 0.5
 
     # Router + 专家 Agent 配置
-    # 语义路由低于该置信度时回退到综合诊断（最稳，可跨域排查）
+    # 语义路由低于该置信度时，旧行为回退 diagnosis；新行为见 low_confidence_keep 开关
     router_min_confidence: float = 0.55
     # 将关键词分为强/弱两层；弱词只作为语义路由提示，避免单个泛化词误导路由
     router_keyword_tiering_enabled: bool = True
@@ -69,6 +74,12 @@ class Settings(BaseSettings):
     # 语义误把“具体目标 + 事故信号”归为 knowledge 时，提升为 diagnosis；
     # 关闭后保留原始语义路由，便于一键回滚。
     router_concrete_incident_override_enabled: bool = True
+    # 「继续/然后呢」等短句续聊继承上一轮 conversation route；关则每轮独立路由
+    router_continuation_inherit_enabled: bool = True
+    # 低置信时尽量保留语义 route（knowledge 非故障等），不全量 diagnosis；关则恢复旧回退
+    router_low_confidence_keep_semantic_enabled: bool = True
+    # knowledge 轻问题（问候/身份/纯解释）跳过 re_evidence/replan 与硬证据要求
+    harness_knowledge_light_path_enabled: bool = True
     # 单个专家执行超时（秒），超时返回降级答案
     expert_timeout_seconds: float = 120.0
 
@@ -117,13 +128,16 @@ class Settings(BaseSettings):
     harness_delegate_timeout_seconds: float = 90.0
     # 模型分层：planner 用轻量模型做路由/单步判断，reasoner 用深度模型做最终收口/证据自检
     llm_planner_model: str = ""
-    llm_reasoner_model: str = "gpt-5.4"
+    llm_reasoner_model: str = "gpt-5.6-luna"
     harness_tool_timeout_seconds: float = 30.0
     harness_tool_collection_timeout_seconds: float = 5.0
     harness_tool_max_output_chars: int = 6000
     # 工具瞬时错误（超时/网络/5xx）的有限重试次数；鉴权/权限类错误不重试
     harness_tool_max_retries: int = 1
     harness_tool_retry_backoff_seconds: float = 0.5
+    # Omit a terminal non-retryable tool from later model menus in one run.
+    # False restores the previous behavior of re-offering it.
+    harness_failed_tool_suppression_enabled: bool = True
     # 连续多少步“重复工具调用且无新增证据”后提前收尾，防止空转
     harness_no_progress_limit: int = 2
     # harness 直连日志类工具时，对超大输出走 analyze_logs 聚类摘要而非硬截断
@@ -133,8 +147,14 @@ class Settings(BaseSettings):
     # 低置信 / 有缺口时，在定稿前最多再跑 N 轮「补取证」tool loop（M1 Close the Loop）
     harness_re_evidence_enabled: bool = True
     harness_re_evidence_max_rounds: int = 1
+    # Once user-visible content has streamed, keep re-evidence/replan replacement
+    # prose in complete.answer instead of appending a second answer body.
+    harness_final_answer_replacement_enabled: bool = True
     # 计划 required_evidence 与成功工具名做类型细匹配（M1 W2）
     harness_evidence_match_enabled: bool = True
+    # Public SSE progress details: safe plan/result/evidence summaries. Set
+    # false to restore the minimal pre-detail public event contract.
+    harness_public_progress_details_enabled: bool = True
     # mid-loop / post re-evidence 规则 replan（M1 W3）
     harness_replan_enabled: bool = True
     harness_replan_max_times: int = 1
@@ -187,7 +207,6 @@ class Settings(BaseSettings):
     # M3 W9：最终答案结构化 suggested_actions[]（只读建议，确认不执行）。
     hitl_suggested_actions_enabled: bool = True
     # M3 W9：升级联系人，空则输出标准「未配置」块。格式 name|channel;name2|channel2
-    oncall_escalation_contacts: str = ""
     # M3 W10：成功 run 半自动蒸馏（默认 draft+confirm，禁止静默全量入库）。
     long_term_memory_distill_enabled: bool = True
     long_term_memory_auto_distill: bool = False
@@ -200,10 +219,8 @@ class Settings(BaseSettings):
     harness_llm_planning_enabled: bool = False
     harness_llm_verify_enabled: bool = False
 
-    # Stateful Harness context whiteboard（默认开启，主路径用 Redis/DB 白板）。
-    # 主路径：True（ContextState 白板）。False = legacy ContextBuilder，
-    # 仅作 rebuild/fallback（见 docs/pilot/context-dual-path.md；H4 收敛，不删代码）。
-    # DEPRECATED 语义：legacy 路径不再接收新特性；新能力只加在 stateful 路径。
+    # Stateful Harness context renderer（默认开启）。ContextRepository 始终拥有
+    # 运行时加载和持久化；False 仅选择兼容的 LLM 视图渲染，不会回退存储路径。
     harness_stateful_context_enabled: bool = True
     # rebuild-from-turns：从 recent_turns 重建白板（resume / 冷启动）。
     harness_context_rebuild_from_turns_enabled: bool = True
@@ -212,7 +229,19 @@ class Settings(BaseSettings):
     harness_context_db_snapshot_enabled: bool = True
     harness_context_patch_history_limit: int = 200
     harness_context_tools_enabled: bool = True
-
+    # When the whiteboard view + turn history are already in the model prompt,
+    # omit context_read by default (note/attachment tools still register).
+    # Set true only for debugging section-level re-reads.
+    harness_context_read_when_view_injected: bool = False
+    # Context deduplication / attachment prompt controls.  Each switch is
+    # independently reversible so a rollout can fall back without changing
+    # the stateful-context storage contract.
+    harness_context_intent_omit_from_view_enabled: bool = True
+    harness_attachment_prompt_mode: str = "summary"  # full | summary | index
+    harness_preference_inject_mode: str = "router_and_harness"  # router_and_harness | harness_only
+    harness_context_view_dedup_tool_evidence: bool = True
+    harness_context_size_metrics_enabled: bool = False
+    # Unified ContextRepository (single load + atomic turn/projection commit).
     # 日志分析管线（处理上万行日志）
     # 进入聚类前允许处理的最大原始行数（超出按时间倒序截断并提示）
     # 注意：原 20000 会触发 5~10 个 Map-Reduce chunk（每个 10~30s）远超总闸门
@@ -240,6 +269,11 @@ class Settings(BaseSettings):
     rag_rrf_k: int = 60  # RRF constant, only used when rag_hybrid_ranker == "rrf"
     rag_dense_vector_field: str = "vector"
     rag_sparse_vector_field: str = "sparse_vector"
+    # Tenant scope is fail-closed by default. biz_v2 is the scoped collection;
+    # set RAG_COLLECTION_NAME=biz only for an isolated rollback/observation run.
+    rag_tenant_scope_enabled: bool = True
+    rag_allow_legacy_unscoped: bool = False
+    rag_collection_name: str = "biz_v2"
 
     # 文档分块配置
     chunk_max_size: int = 800
@@ -265,23 +299,32 @@ class Settings(BaseSettings):
 
     # Redis client (used by the harness checkpoint subsystem).
     redis_enabled: bool = True
-    redis_url: str = "redis://:123456@localhost:6379/0"
+    # Credentials must come from REDIS_URL in the environment/secret manager;
+    # never ship a password in the code default.
+    redis_url: str = "redis://localhost:6379/0"
     redis_namespace: str = "super_biz_agent"
     redis_socket_timeout: float = 5.0
     redis_protocol: int = 2
 
     # Harness loop checkpoint (step-level, Redis-backed).
     # Only effective when all three of harness_enabled, harness_checkpoint_enabled,
-    # and redis_enabled are True. Conservative replay is the default: on resume the
-    # harness skips any step that contains a non-idempotent tool and goes straight
-    # to a single closing LLM call. Set harness_checkpoint_replay=True to replay
-    # remaining steps verbatim (best-effort; external side effects may double-fire).
+    # and redis_enabled are True. Resume restores state/context and continues from
+    # the next incomplete step; historical tool calls are not re-executed.
+    # harness_checkpoint_replay is retained for compatibility (both true/false now
+    # continue by default). Request body checkpoint_replay=False can still force
+    # close-only finalization when harness_checkpoint_request_override_enabled.
     harness_checkpoint_enabled: bool = True
     harness_checkpoint_ttl_seconds: int = 1800
     harness_checkpoint_replay: bool = False
+    # Request-level overrides are intentionally disabled for normal product traffic.
+    harness_checkpoint_request_override_enabled: bool = False
+    harness_eval_hooks_enabled: bool = False
 
     # Long-term memory
     memory_db_path: str = "volumes/long_term_memory.db"
+    # Phase-gated switch: when enabled, domain services verify the explicit
+    # migration version and never run their legacy first-request DDL path.
+    db_schema_enforcement_enabled: bool = False
     project_id: str = "super_biz_agent"
     long_term_memory_enabled: bool = True
     experience_memory_collection: str = "experience_memory"
@@ -298,6 +341,14 @@ class Settings(BaseSettings):
     auth_token_ttl_seconds: int = 86400
     # Fixed account table: "user1:pass1,user2:pass2". Empty rejects all logins.
     auth_users: str = "admin:admin"
+    # Optional per-user role/project maps: ``alice:curator,bob:admin`` and
+    # ``alice:project-a``. Unmapped authenticated users are operators in the
+    # configured default project.
+    auth_user_roles: str = ""
+    auth_user_projects: str = ""
+    # Phase 1 authenticates all business APIs; Phase 2 enables curator/admin
+    # gates after role mappings are deployed.
+    auth_role_enforcement_enabled: bool = False
     # Comma-separated browser origins. Use "*" only for pure local demos.
     cors_allow_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
@@ -353,7 +404,7 @@ class Settings(BaseSettings):
             "monitor": {
                 "transport": self.mcp_monitor_transport,
                 "url": self.mcp_monitor_url,
-            }
+            },
         }
 
     @property
@@ -370,6 +421,25 @@ class Settings(BaseSettings):
             if username and password:
                 mapping[username] = password
         return mapping
+
+    @staticmethod
+    def _parse_user_map(value: str, separator: str = ":") -> dict[str, str]:
+        result: dict[str, str] = {}
+        for item in (value or "").split(","):
+            if separator not in item:
+                continue
+            username, mapped = item.split(separator, 1)
+            username, mapped = username.strip(), mapped.strip()
+            if username and mapped:
+                result[username] = mapped
+        return result
+
+    def role_for_user(self, username: str) -> str:
+        role = self._parse_user_map(self.auth_user_roles).get(username.strip(), "operator")
+        return role if role in {"operator", "curator", "admin"} else "operator"
+
+    def project_for_user(self, username: str) -> str:
+        return self._parse_user_map(self.auth_user_projects).get(username.strip(), self.project_id)
 
     @property
     def cors_origins_list(self) -> list[str]:

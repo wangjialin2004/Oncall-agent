@@ -29,25 +29,20 @@ def test_build_suggested_actions_and_flag_off(monkeypatch):
     assert svc._build_suggested_actions(state, "x") == []
 
 
-def test_escalation_block_configured_and_empty(monkeypatch):
+def test_timeout_soft_close_omits_removed_escalation_field():
     svc = HarnessService.__new__(HarnessService)
-    monkeypatch.setattr(
-        "app.agent.harness.loop.config.oncall_escalation_contacts",
-        "",
-        raising=False,
+    state = HarnessState(trace_id="t", session_id="s", owner_key="o")
+    state.route = "diagnosis"
+    state.append_answer("partial diagnosis")
+
+    result = svc._soft_close_timeout_event(
+        state=state,
+        session_id="s",
+        message="checkout-api slow",
+        timeout_seconds=30,
     )
-    empty = svc._build_escalation_block()
-    assert empty["configured"] is False
-    assert "未配置" in empty["text"]
-    monkeypatch.setattr(
-        "app.agent.harness.loop.config.oncall_escalation_contacts",
-        "Alice|pager;Bob|slack",
-        raising=False,
-    )
-    filled = svc._build_escalation_block()
-    assert filled["configured"] is True
-    assert len(filled["contacts"]) == 2
-    assert "Alice" in filled["text"]
+
+    assert "escalation" not in result["complete"]
 
 
 def test_observe_agent_run_does_not_raise():

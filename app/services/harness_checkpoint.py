@@ -7,9 +7,9 @@ Each completed step writes three keys to Redis:
 * ``{ns}:ckpt:{owner}:{session}:messages`` - serialized ``list[ChatMessage]`` for LLM resume
 
 Resume happens transparently on the next ``POST /api/assistant`` with the same
-``session_id``. When ``harness_checkpoint_replay=False`` (the default), any
-step containing a non-idempotent tool short-circuits the loop into a single
-closing LLM call instead of replaying external side effects.
+``session_id``. The harness restores state/context and continues from the next
+incomplete step; historical tool calls are **not** re-executed. A request-level
+``checkpoint_replay=False`` can still force a close-only finalization.
 
 This module is the only public surface the harness loop should import from.
 All Redis IO is wrapped in a fail-soft envelope so Redis outages never break
@@ -19,6 +19,8 @@ the streaming response.
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 import json
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -29,14 +31,17 @@ from app.config import config
 from app.core.llm_client import ChatMessage
 from app.services.redis_client import (
     is_redis_available,
+    redis_health_snapshot,
     reset_redis_client,
 )
 from app.utils.serialization import json_dumps, json_loads
 from app.utils.time import utc_now
 
 _DEFAULT_TOOLS: tuple[str, ...] = (
-    # Delegation + read-only investigation tools (safe to replay).
+    # Read-only / idempotent investigation tools (metadata + is_step_idempotent).
+    # Resume no longer gates on this list; it continues from next_step by default.
     "delegate_to_expert",
+    "delegate_parallel",
     "query_prometheus_alerts",
     "retrieve_knowledge",
     "recall_experience",
@@ -55,7 +60,7 @@ _CURRENT_VERSION = 2  # bumped: meta now carries context_version/context_snapsho
 #: Schema version stored in ``CheckpointResume.context_snapshot_version`` to
 #: signal that the checkpoint intentionally does NOT carry the full context
 #: body. The harness should recover context via
-#: :class:`app.agent.context.store.ContextStateStore` instead.
+#: :class:`app.services.context_repository.ContextRepository` instead.
 _CHECKPOINT_CONTEXT_BODY_DROPPED_VERSION = 2
 
 
@@ -88,8 +93,8 @@ class CheckpointResume:
 
     Per plan ``plan/2026-07-08-stateful-agent-context.md`` §9, ``messages``
     remains for the migration window — new code still writes them for replay,
-    but :class:`app.agent.context.store.ContextStateStore` is the canonical
-    source of context. ``context_version`` and ``context_snapshot_ref`` are
+    but :class:`app.services.context_repository.ContextRepository` is the
+    canonical source of context. ``context_version`` and ``context_snapshot_ref`` are
     the only authoritative pointers the harness needs to resume correctly.
     """
 
@@ -139,9 +144,13 @@ class HarnessCheckpointStore:
     ) -> None:
         self.namespace = str(namespace or getattr(config, "redis_namespace", "super_biz_agent"))
         self.ttl_seconds = int(
-            ttl_seconds if ttl_seconds is not None else getattr(config, "harness_checkpoint_ttl_seconds", 1800)
+            ttl_seconds
+            if ttl_seconds is not None
+            else getattr(config, "harness_checkpoint_ttl_seconds", 1800)
         )
-        self.idempotent_tools: tuple[str, ...] = idempotent_tools if idempotent_tools is not None else _DEFAULT_TOOLS
+        self.idempotent_tools: tuple[str, ...] = (
+            idempotent_tools if idempotent_tools is not None else _DEFAULT_TOOLS
+        )
         self._redis_factory = redis_factory
         self._clock = clock or utc_now
         self._lock = asyncio.Lock()
@@ -150,10 +159,13 @@ class HarnessCheckpointStore:
     # ------------------------------------------------------- public surface
 
     def is_enabled(self) -> bool:
+        if self._redis_factory is not None:
+            return True
         return (
             bool(getattr(config, "redis_enabled", False))
             and bool(getattr(config, "harness_checkpoint_enabled", False))
             and is_redis_available()
+            and redis_health_snapshot().get("status") == "ready"
         )
 
     async def save_step(
@@ -175,15 +187,20 @@ class HarnessCheckpointStore:
         context path: callers should pass ``persist_messages=False`` once the
         whiteboard is the canonical source. ``context_version`` /
         ``context_snapshot_ref`` are recorded in the meta so resume can ask
-        :class:`ContextStateStore` to rehydrate instead of replaying messages.
+        :class:`ContextRepository` to rehydrate instead of replaying messages.
         """
         try:
             async with self._lock:
                 client = await self._client()
                 meta_key = self._meta_key(owner_key, session_id)
                 existing = await self._safe_get_meta(client, meta_key)
+                if existing and int(existing.get("step") or 0) > int(step_index):
+                    # Background writers can complete out of order. Never let
+                    # an older snapshot move a session backwards.
+                    return
+                state_snapshot = copy.deepcopy(state)
                 meta = self._compose_meta(
-                    state=state,
+                    state=state_snapshot,
                     existing=existing,
                     step_index=step_index,
                     context_version=context_version,
@@ -288,18 +305,19 @@ class HarnessCheckpointStore:
             return None
 
     async def delete(self, owner_key: str, session_id: str) -> int:
-        """Delete every key for this session. Returns the number removed."""
+        """Delete known keys for this session without a broad Redis scan."""
         try:
             client = await self._client()
-            prefix = self._prefix(owner_key, session_id)
-            cursor = 0
-            removed = 0
-            while True:
-                cursor, keys = await client.scan(cursor=cursor, match=f"{prefix}*", count=200)
-                if keys:
-                    removed += await client.delete(*keys)
-                if cursor == 0:
-                    break
+            meta = await self._safe_get_meta(client, self._meta_key(owner_key, session_id))
+            max_step = int((meta or {}).get("step") or 0)
+            keys = [
+                self._meta_key(owner_key, session_id),
+                self._messages_key(owner_key, session_id),
+            ]
+            keys.extend(
+                self._step_key(owner_key, session_id, index) for index in range(1, max_step + 1)
+            )
+            removed = int(await client.delete(*keys)) if keys else 0
             self.stats.deletes += 1
             return removed
         except Exception as exc:
@@ -316,7 +334,8 @@ class HarnessCheckpointStore:
     # ------------------------------------------------------------ internals
 
     def _prefix(self, owner_key: str, session_id: str) -> str:
-        return f"{self.namespace}:ckpt:{owner_key}:{session_id}:"
+        scope = hashlib.sha256(f"{owner_key}\x00{session_id}".encode()).hexdigest()[:32]
+        return f"{self.namespace}:ckpt:{scope}:"
 
     def _meta_key(self, owner_key: str, session_id: str) -> str:
         return f"{self._prefix(owner_key, session_id)}meta"

@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
-
-import pytest
 
 from app.agent.context.persistence import state_from_dict, state_to_dict
 from app.agent.context.state import (
@@ -18,21 +15,28 @@ from app.agent.context.store import (
     ContextStateStoreSettings,
     _build_redis_key,
 )
-from app.services.context_snapshot_service import ContextSnapshotService
 
 
 def _failing_get(*args: Any, **kwargs: Any) -> Any:
     raise AssertionError("snapshot_get should not be called when Redis hits")
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> Path:
-    return tmp_path / "store.db"
+class _SnapshotBackend:
+    """Test-only callback backend for the retired compatibility store."""
 
+    def __init__(self) -> None:
+        self._states: dict[tuple[str, str], AgentContextState] = {}
 
-@pytest.fixture()
-def snapshot_service(db_path: Path) -> ContextSnapshotService:
-    return ContextSnapshotService(db_path=db_path)
+    def save_context_snapshot(
+        self, *, owner_key: str, session_id: str, state: AgentContextState
+    ) -> None:
+        self._states[(owner_key, session_id)] = state_from_dict(state_to_dict(state))
+
+    def get_latest_context_snapshot(
+        self, owner_key: str, session_id: str
+    ) -> AgentContextState | None:
+        state = self._states.get((owner_key, session_id))
+        return state_from_dict(state_to_dict(state)) if state is not None else None
 
 
 def _in_memory_redis() -> Any:
@@ -80,8 +84,8 @@ async def test_redis_hit_skips_snapshot_and_rebuild() -> None:
     assert result.state.version == 7
 
 
-async def test_redis_miss_falls_back_to_db_snapshot(db_path: Path) -> None:
-    snapshot_service = ContextSnapshotService(db_path=db_path)
+async def test_redis_miss_falls_back_to_db_snapshot() -> None:
+    snapshot_service = _SnapshotBackend()
     # Seed DB snapshot.
     snapshot_service.save_context_snapshot(
         owner_key="u", session_id="s", state=_seeded(),
@@ -147,8 +151,8 @@ async def test_no_redis_no_db_no_rebuild_returns_fresh() -> None:
     assert result.state.session_id == "s"
 
 
-async def test_redis_read_failure_falls_back_to_db(db_path: Path) -> None:
-    snapshot_service = ContextSnapshotService(db_path=db_path)
+async def test_redis_read_failure_falls_back_to_db() -> None:
+    snapshot_service = _SnapshotBackend()
     snapshot_service.save_context_snapshot(
         owner_key="u", session_id="s", state=_seeded(),
     )
@@ -188,8 +192,8 @@ async def test_redis_write_failure_does_not_block_main_path() -> None:
     assert any("redis write failed" in w for w in result.warnings)
 
 
-async def test_corrupt_redis_payload_falls_back_to_db(db_path: Path) -> None:
-    snapshot_service = ContextSnapshotService(db_path=db_path)
+async def test_corrupt_redis_payload_falls_back_to_db() -> None:
+    snapshot_service = _SnapshotBackend()
     snapshot_service.save_context_snapshot(
         owner_key="u", session_id="s", state=_seeded(),
     )
@@ -205,8 +209,8 @@ async def test_corrupt_redis_payload_falls_back_to_db(db_path: Path) -> None:
     assert result.source == "db_snapshot"
 
 
-async def test_schema_mismatch_redis_payload_treated_as_miss(db_path: Path) -> None:
-    snapshot_service = ContextSnapshotService(db_path=db_path)
+async def test_schema_mismatch_redis_payload_treated_as_miss() -> None:
+    snapshot_service = _SnapshotBackend()
     snapshot_service.save_context_snapshot(
         owner_key="u", session_id="s", state=_seeded(),
     )
@@ -224,8 +228,8 @@ async def test_schema_mismatch_redis_payload_treated_as_miss(db_path: Path) -> N
     assert result.source == "db_snapshot"
 
 
-async def test_save_writes_redis_and_db(db_path: Path) -> None:
-    snapshot_service = ContextSnapshotService(db_path=db_path)
+async def test_save_writes_redis_and_db() -> None:
+    snapshot_service = _SnapshotBackend()
     backend = _in_memory_redis()
     store = ContextStateStore(
         db_snapshot_get=snapshot_service.get_latest_context_snapshot,

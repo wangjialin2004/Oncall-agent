@@ -56,6 +56,12 @@ class FileStorageService:
         if self._initialized:
             return
         db_path = Path(config.memory_db_path)
+        if bool(getattr(config, "db_schema_enforcement_enabled", False)):
+            from app.services.database_migration_service import DatabaseMigrationService
+
+            DatabaseMigrationService(db_path).require_current()
+            self._initialized = True
+            return
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(str(db_path)) as connection:
             connection.execute(
@@ -411,7 +417,9 @@ class FileStorageService:
             cached.write_bytes(data)
 
             result: SingleFileIndexingResult = vector_index_service.index_single_file(
-                str(cached.resolve())
+                str(cached.resolve()),
+                scope_type="user",
+                scope_id=owner_key,
             )
             status = (
                 STATUS_INDEXED

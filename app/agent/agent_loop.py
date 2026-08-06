@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from typing import Any
 
 from loguru import logger
@@ -69,8 +69,8 @@ def merge_usage(total: dict[str, int], usage: dict[str, Any]) -> None:
 
 # ---------------------------------------------------------------- guarded executor
 
-# Substrings that mark a non-retryable error (auth / permission). Retrying these
-# only wastes budget, so they fail fast.
+# Substrings that mark a non-retryable error. Retrying authorization,
+# configuration, or invalid-input failures only wastes the investigation budget.
 _NON_RETRYABLE_TOKENS = (
     "401",
     "403",
@@ -78,8 +78,42 @@ _NON_RETRYABLE_TOKENS = (
     "forbidden",
     "permission denied",
     "authentication",
+    "invalid argument",
+    "invalid input",
+    "not configured",
+    "misconfigured",
+    "unsupported",
+    "not implemented",
+    "dependency missing",
 )
 _STRUCTURED_FAILURE_STATUSES = frozenset({"error", "failed", "timeout", "timed_out"})
+_NON_RETRYABLE_STRUCTURED_STATUSES = frozenset(
+    {
+        "disabled",
+        "dependency_missing",
+        "unsupported",
+        "not_configured",
+        "misconfigured",
+        "configuration_error",
+        "invalid_argument",
+        "invalid_arguments",
+        "invalid_input",
+        "permission_denied",
+        "unauthorized",
+        "forbidden",
+    }
+)
+_NON_RETRYABLE_ERROR_CODES = frozenset(
+    {
+        "invalid_timezone",
+        "missing_request_scope",
+        "invalid_argument",
+        "invalid_input",
+        "unsupported",
+        "not_configured",
+        "misconfigured",
+    }
+)
 
 
 class GuardedToolExecutor:
@@ -167,19 +201,23 @@ class GuardedToolExecutor:
                 latency_ms = int((time.perf_counter() - started_at) * 1000)
             except TimeoutError:
                 last_error = f"Tool execution timed out after {timeout_seconds:g}s"
-                return _failed(tool_call, last_error)
+                # Preserve the existing no-retry timeout boundary. A later model
+                # turn may choose to retry after the upstream condition changes.
+                return _failed(tool_call, last_error, retryable=True)
             except Exception as exc:
                 last_error = f"Tool execution failed: {exc}"
-                if _is_retryable(exc) and attempt < attempts - 1:
+                retryable = _is_retryable(exc)
+                if retryable and attempt < attempts - 1:
                     await self._sleep_backoff(attempt, tool.name, last_error)
                     continue
-                return _failed(tool_call, last_error)
+                return _failed(tool_call, last_error, retryable=retryable)
 
             content = self._postprocess_output(_stringify_tool_result(raw))
-            structured_failure = _structured_failure_reason(raw)
-            if structured_failure:
-                last_error = f"Tool reported structured failure: {structured_failure}"
-                if _is_retryable(RuntimeError(last_error)) and attempt < attempts - 1:
+            failure = _classify_tool_failure(raw)
+            if failure is not None:
+                reason, retryable = failure
+                last_error = f"Tool reported structured failure: {reason}"
+                if retryable and attempt < attempts - 1:
                     await self._sleep_backoff(attempt, tool.name, last_error)
                     continue
                 return ToolExecutionResult(
@@ -187,6 +225,7 @@ class GuardedToolExecutor:
                     tool_name=tool_call.name,
                     content=content,
                     success=False,
+                    retryable=retryable,
                     raw=raw,
                     latency_ms=latency_ms,
                 )
@@ -224,41 +263,109 @@ def _is_retryable(exc: Exception) -> bool:
     return not any(token in text for token in _NON_RETRYABLE_TOKENS)
 
 
-def _structured_failure_reason(raw: Any) -> str | None:
-    """Return a provider-declared error without confusing it for tool success.
+def _unwrap_tool_result(raw: Any) -> Any:
+    return raw[0] if isinstance(raw, tuple) and raw else raw
 
-    Runtime tools frequently return structured payloads instead of raising: local
-    Prometheus returns a JSON string with ``success=false`` and MCP tools return
-    a mapping with ``status=error``. Both are investigation failures even though
-    the Python handler itself completed normally.
-    """
 
-    payload = raw[0] if isinstance(raw, tuple) and raw else raw
+def _structured_payload(raw: Any) -> Mapping[str, Any] | None:
+    payload = _unwrap_tool_result(raw)
+    structured_content = getattr(payload, "structuredContent", None)
+    if isinstance(structured_content, Mapping):
+        payload = structured_content
     if isinstance(payload, str):
         try:
             payload = json.loads(payload)
         except json.JSONDecodeError:
             return None
-    if not isinstance(payload, dict):
+    return payload if isinstance(payload, Mapping) else None
+
+
+def _is_mcp_execution_error(raw: Any) -> bool:
+    payload = _unwrap_tool_result(raw)
+    if isinstance(payload, Mapping):
+        return bool(payload.get("isError") is True or payload.get("is_error") is True)
+    if isinstance(payload, str):
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, Mapping):
+            return bool(decoded.get("isError") is True or decoded.get("is_error") is True)
+    return bool(
+        getattr(payload, "isError", False) is True
+        or getattr(payload, "is_error", False) is True
+    )
+
+
+def _failure_reason(payload: Mapping[str, Any]) -> str:
+    for key in ("error", "message", "detail", "note", "error_code"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return str(payload.get("status") or "success=false").strip() or "success=false"
+
+
+def _structured_failure_retryable(payload: Mapping[str, Any], reason: str) -> bool:
+    explicit = payload.get("retryable")
+    if isinstance(explicit, bool):
+        return explicit
+
+    if payload.get("source_available") is False or payload.get("capability_available") is False:
+        return False
+    status = str(payload.get("status") or "").strip().lower()
+    if status in _NON_RETRYABLE_STRUCTURED_STATUSES:
+        return False
+    error_code = str(payload.get("error_code") or "").strip().lower()
+    if error_code in _NON_RETRYABLE_ERROR_CODES:
+        return False
+    if str(payload.get("gap") or "").strip().lower() == "missing_change_datasource":
+        return False
+    return _is_retryable(RuntimeError(reason))
+
+
+def _classify_tool_failure(raw: Any) -> tuple[str, bool] | None:
+    """Return a provider-declared failure and whether it can be retried.
+
+    Runtime tools frequently return structured payloads instead of raising. MCP
+    tool execution errors use ``isError=True`` and must not be retried here,
+    because the MCP client has already exhausted its own bounded retries.
+    """
+
+    if _is_mcp_execution_error(raw):
+        reason = _stringify_tool_result(raw).strip() or "MCP tool reported an execution error"
+        return reason, False
+
+    payload = _structured_payload(raw)
+    if payload is None:
         return None
 
     status = str(payload.get("status") or "").strip().lower()
     failed = payload.get("success") is False or status in _STRUCTURED_FAILURE_STATUSES
     if not failed:
         return None
-    for key in ("error", "message", "detail", "note"):
-        value = str(payload.get(key) or "").strip()
-        if value:
-            return value
-    return status or "success=false"
+    reason = _failure_reason(payload)
+    return reason, _structured_failure_retryable(payload, reason)
 
 
-def _failed(tool_call: ToolCall, content: str) -> ToolExecutionResult:
+def _structured_failure_reason(raw: Any) -> str | None:
+    """Compatibility helper for existing callers that only need the reason."""
+
+    failure = _classify_tool_failure(raw)
+    return failure[0] if failure is not None else None
+
+
+def _failed(
+    tool_call: ToolCall,
+    content: str,
+    *,
+    retryable: bool = False,
+) -> ToolExecutionResult:
     return ToolExecutionResult(
         call_id=tool_call.id,
         tool_name=tool_call.name,
         content=content,
         success=False,
+        retryable=retryable,
     )
 
 
@@ -308,6 +415,10 @@ async def stream_tool_results(
             "result": content,
             "tool_latency_ms": tool_latency_ms,
         }
+        if not result.success:
+            # Private harness state needs this for later menu selection. The
+            # public event projector intentionally does not allowlist it.
+            payload["retryable"] = bool(result.retryable)
         tool_event = make_tool_event(
             agent=agent_label,
             tool=result.tool_name,

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from app.config import config
-
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -10,8 +8,10 @@ from app.agent.events import make_agent_event
 from app.agent.experts.registry import EXPERT_ROUTES
 from app.agent.harness.planner import HarnessPlan
 from app.agent.harness.state import HarnessState
+from app.config import config
 from app.core.llm_client import ChatMessage, ToolCall
 from app.core.runtime_tools import RuntimeTool
+
 
 class HarnessPolicyMixin:
     """Policy / evidence / replan / early-close helpers."""
@@ -40,6 +40,19 @@ class HarnessPolicyMixin:
             "read_attachment",
         }
     )
+    _CONTROL_PLANE_TOOLS = frozenset({"delegate_to_expert", "delegate_parallel"})
+
+    @staticmethod
+    def _is_knowledge_light_plan(plan: Any | None) -> bool:
+        """True when planner marked a knowledge light-path (no hard evidence)."""
+        if plan is None:
+            return False
+        if str(getattr(plan, "focus_route", "") or "").strip() != "knowledge":
+            return False
+        if not bool(getattr(config, "harness_knowledge_light_path_enabled", True)):
+            return False
+        required = list(getattr(plan, "required_evidence", None) or [])
+        return len(required) == 0
 
     _CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
@@ -112,6 +125,7 @@ class HarnessPolicyMixin:
         verification_gaps: Sequence[str] | None,
         force_after_re_evidence: bool,
         aux_routes: Sequence[str],
+        plan: Any | None = None,
     ) -> bool:
         if not bool(getattr(config, "harness_replan_enabled", True)):
             return False
@@ -119,6 +133,8 @@ class HarnessPolicyMixin:
         if replan_times_used >= max_times:
             return False
         if resume_close_only:
+            return False
+        if self._is_knowledge_light_plan(plan):
             return False
         if state.over_budget(self.limits):
             return False
@@ -369,7 +385,7 @@ class HarnessPolicyMixin:
         """Build a minimal gap notice when tools failed and model returned no prose.
 
         Used by RE2-style primary-fail paths so complete.answer is not only the
-        escalation footer. Read-only; never claims remediation was executed.
+        empty response. Read-only; never claims remediation was executed.
         """
         if self._has_successful_tool_evidence(state.timeline_events):
             return ""
@@ -467,21 +483,54 @@ class HarnessPolicyMixin:
             counts[tool] = counts.get(tool, 0) + 1
         return counts
 
+    @classmethod
+    def _terminal_non_retryable_failed_tools(
+        cls, events: Sequence[dict[str, Any]]
+    ) -> set[str]:
+        """Return failures that must not be re-offered in this harness run.
+
+        Old timeline events do not carry retryability, so they deliberately keep
+        the previous behavior. Only a shared-executor terminal failure marked
+        ``retryable=false`` is eligible for suppression.
+        """
+
+        failed: set[str] = set()
+        for event in events or []:
+            if event.get("type") != "tool_event":
+                continue
+            status = str(event.get("status") or "").strip().lower()
+            if status not in {"failed", "error", "timeout", "timed_out", "cancelled"}:
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict) or payload.get("retryable") is not False:
+                continue
+            tool = str(event.get("tool") or event.get("tool_name") or "").strip().lower()
+            if tool:
+                failed.add(tool)
+        return failed
+
     def _filter_tools_by_cap(
         self, tools: Sequence[RuntimeTool], state: HarnessState
     ) -> list[RuntimeTool]:
         cap = int(getattr(config, "harness_slow_path_tool_cap", 2) or 0)
-        if cap <= 0:
+        suppressed = (
+            self._terminal_non_retryable_failed_tools(state.timeline_events)
+            if bool(getattr(config, "harness_failed_tool_suppression_enabled", True))
+            else set()
+        )
+        if cap <= 0 and not suppressed:
             return list(tools)
         counts = self._tool_success_counts(state.timeline_events)
         filtered: list[RuntimeTool] = []
         for tool in tools:
             name = str(tool.name or "")
-            # Never cap control-plane tools.
-            if name in {"delegate_to_expert", "delegate_parallel"}:
+            # Never suppress or cap control-plane tools.
+            if name in self._CONTROL_PLANE_TOOLS or self._is_context_helper_tool(name):
                 filtered.append(tool)
                 continue
-            if counts.get(name, 0) >= cap:
+            if name.lower() in suppressed:
+                continue
+            if cap > 0 and counts.get(name, 0) >= cap:
                 continue
             filtered.append(tool)
         return filtered

@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { Activity, CircleDot, Gauge, LogOut, MessageSquarePlus, Trash2 } from "lucide-react";
 
 import type { ConversationSummary } from "../api/conversationApi";
@@ -18,6 +19,9 @@ type SidebarProps = {
   onLogout: () => void;
 };
 
+/** Keep in sync with `.session-item.is-exiting` animation duration in styles.css. */
+export const SESSION_EXIT_MS = 320;
+
 export function Sidebar({
   username,
   activeView,
@@ -31,6 +35,72 @@ export function Sidebar({
   onLogout,
 }: SidebarProps) {
   const avatarLetter = username.charAt(0).toUpperCase() || "U";
+  // Sessions mid-exit stay mounted so the collapse is visible even in long lists.
+  const [exitingIds, setExitingIds] = useState<Set<string>>(() => new Set());
+  const exitTimersRef = useRef<Map<string, number>>(new Map());
+  const itemRefs = useRef<Map<string, HTMLLIElement | null>>(new Map());
+
+  useEffect(() => {
+    const timers = exitTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) {
+        window.clearTimeout(timer);
+      }
+      timers.clear();
+    };
+  }, []);
+
+  // Drop exit bookkeeping for sessions that left the list without us (e.g. external refresh).
+  useEffect(() => {
+    const live = new Set(sessions.map((session) => session.session_id));
+    setExitingIds((current) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of current) {
+        if (live.has(id)) {
+          next.add(id);
+        } else {
+          changed = true;
+          const timer = exitTimersRef.current.get(id);
+          if (timer !== undefined) {
+            window.clearTimeout(timer);
+            exitTimersRef.current.delete(id);
+          }
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [sessions]);
+
+  function handleDeleteClick(sessionId: string) {
+    if (exitingIds.has(sessionId) || exitTimersRef.current.has(sessionId)) {
+      return;
+    }
+
+    // Scroll the row into view so a delete deep in a long list is still obvious.
+    const row = itemRefs.current.get(sessionId);
+    row?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+
+    setExitingIds((current) => {
+      const next = new Set(current);
+      next.add(sessionId);
+      return next;
+    });
+
+    const timer = window.setTimeout(() => {
+      exitTimersRef.current.delete(sessionId);
+      setExitingIds((current) => {
+        if (!current.has(sessionId)) {
+          return current;
+        }
+        const next = new Set(current);
+        next.delete(sessionId);
+        return next;
+      });
+      onDeleteSession(sessionId);
+    }, SESSION_EXIT_MS);
+    exitTimersRef.current.set(sessionId, timer);
+  }
 
   return (
     <div className="sidebar-inner">
@@ -64,15 +134,27 @@ export function Sidebar({
             {sessions.map((session) => {
               const isActive = activeView === "chat" && session.session_id === activeSessionId;
               const resumable = checkpointStatus[session.session_id]?.resumable === true;
+              const isExiting = exitingIds.has(session.session_id);
               return (
                 <li
                   key={session.session_id}
-                  className={`session-item${isActive ? " active" : ""}${resumable ? " resumable" : ""}`}
+                  ref={(node) => {
+                    if (node) {
+                      itemRefs.current.set(session.session_id, node);
+                    } else {
+                      itemRefs.current.delete(session.session_id);
+                    }
+                  }}
+                  className={`session-item${isActive ? " active" : ""}${
+                    resumable ? " resumable" : ""
+                  }${isExiting ? " is-exiting" : ""}`}
+                  aria-busy={isExiting || undefined}
                 >
                   <button
                     type="button"
                     className="session-open"
                     title={session.title}
+                    disabled={isExiting}
                     onClick={() => onSelectSession(session.session_id)}
                   >
                     <span className="session-title">{session.title || "未命名会话"}</span>
@@ -90,7 +172,14 @@ export function Sidebar({
                     type="button"
                     className="session-delete"
                     aria-label={`删除会话 ${session.title}`}
-                    onClick={() => onDeleteSession(session.session_id)}
+                    disabled={isExiting}
+                    onClick={(event) => {
+                      // Keep the sibling "open session" control from also
+                      // handling this gesture if layout/event paths change.
+                      event.preventDefault();
+                      event.stopPropagation();
+                      handleDeleteClick(session.session_id);
+                    }}
                   >
                     <Trash2 size={13} aria-hidden="true" />
                   </button>

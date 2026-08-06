@@ -50,11 +50,15 @@ from app.services.attachment_reference_service import (
 
 from app.services.conversation_service import ConversationService
 
+from app.services.context_repository import ContextRepository, ContextRepositorySettings
+
 from app.services.harness_checkpoint import HarnessCheckpointStore
 
 from app.services.router_service import RouteDecision, RouterService
+from app.services.session_scope_service import AuthenticatedPrincipal
 
 from tests._fake_redis import FakeRedis
+from tests._context_db import initialize_context_db
 
 
 
@@ -94,7 +98,7 @@ class FakeRouter:
 
 
 
-    async def _resolve_route(self, message: str) -> RouteDecision:
+    async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
 
         return RouteDecision(route=self.route, reason="fake_focus", confidence=0.8)
 
@@ -201,17 +205,10 @@ def _disable_extra_harness_loops(monkeypatch) -> None:
         ("long_term_memory_distill_enabled", False),
         ("harness_anti_pattern_capture_enabled", False),
         ("hitl_suggested_actions_enabled", False),
+        ("harness_llm_planning_enabled", False),
     ):
         monkeypatch.setattr(f"app.agent.harness.loop.config.{attr}", value, raising=False)
         monkeypatch.setattr(f"app.config.config.{attr}", value, raising=False)
-    # Escalation footer always has text when contacts empty; classic tests assert exact answers.
-    monkeypatch.setattr(
-        "app.agent.harness.close_path.HarnessClosePathMixin._build_escalation_block",
-        lambda self: {"configured": False, "text": "", "contacts": []},
-    )
-
-
-
 class FakeExpert:
 
     async def run(self, *, message: str, session_id: str, trace_id: str, context: str = ""):
@@ -797,6 +794,35 @@ async def _drain_event_source_response(response) -> None:
         pass
 
 
+def _test_principal(owner_key: str = "owner-1") -> AuthenticatedPrincipal:
+    return AuthenticatedPrincipal(
+        username="test-user",
+        owner_key=owner_key,
+        storage_owner_key=owner_key,
+        project_id="default",
+        role="operator",
+    )
+
+
+def _configure_unified_conversation(monkeypatch, tmp_path, filename: str):
+    from app.agent.context import unified as unified_mod
+
+    db_path = initialize_context_db(tmp_path / filename)
+    conversations = ConversationService(db_path)
+    repository = ContextRepository(
+        db_path=db_path,
+        settings=ContextRepositorySettings(redis_enabled=False, db_snapshot_enabled=True),
+    )
+    real_build = unified_mod.build_completion_committer
+
+    def build_committer(**kwargs):
+        kwargs["repository"] = repository
+        return real_build(**kwargs)
+
+    monkeypatch.setattr("app.api.assistant.build_completion_committer", build_committer)
+    return conversations, repository
+
+
 
 
 
@@ -808,15 +834,13 @@ async def test_assistant_stream_uses_raw_session_id_for_harness(monkeypatch):
 
     monkeypatch.setattr("app.api.assistant.harness_service", fake_harness)
 
-    monkeypatch.setattr("app.api.assistant._persist_turn", lambda *args, **kwargs: None)
-
 
 
     response = await assistant(
 
         ChatRequest(id="visible-session", question="check cpu"),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -840,15 +864,13 @@ async def test_assistant_stream_always_uses_harness_when_flag_is_false(monkeypat
 
     monkeypatch.setattr("app.api.assistant.harness_service", fake_harness)
 
-    monkeypatch.setattr("app.api.assistant._persist_turn", lambda *args, **kwargs: None)
-
 
 
     response = await assistant(
 
         ChatRequest(id="visible-session", question="check memory"),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -872,8 +894,6 @@ async def test_assistant_stream_injects_attachment_context_into_message(monkeypa
 
     monkeypatch.setattr("app.api.assistant.harness_service", fake_harness)
 
-    monkeypatch.setattr("app.api.assistant._persist_turn", lambda *args, **kwargs: None)
-
     monkeypatch.setattr(
 
         "app.api.assistant.attachment_context_service.build_context",
@@ -896,7 +916,7 @@ async def test_assistant_stream_injects_attachment_context_into_message(monkeypa
 
         ),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -922,7 +942,9 @@ async def test_assistant_history_keeps_attachment_context_for_follow_up(tmp_path
 
     _disable_extra_harness_loops(monkeypatch)
 
-    conversation_service = ConversationService(tmp_path / "conversation.db")
+    conversation_service, repository = _configure_unified_conversation(
+        monkeypatch, tmp_path, "conversation.db"
+    )
 
     first_answer = "Attachment content is software architecture review material."
 
@@ -952,6 +974,7 @@ async def test_assistant_history_keeps_attachment_context_for_follow_up(tmp_path
 
         limits=HarnessLimits(max_steps=3, token_budget=1000, timeout_seconds=5),
         checkpoint_store=None,
+        context_repository=repository,
 
     )
 
@@ -994,7 +1017,7 @@ async def test_assistant_history_keeps_attachment_context_for_follow_up(tmp_path
 
         ),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -1004,7 +1027,7 @@ async def test_assistant_history_keeps_attachment_context_for_follow_up(tmp_path
 
         ChatRequest(id="visible-session", question="continue with the key points"),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -1048,7 +1071,7 @@ async def test_harness_error_falls_back_to_knowledge_expert():
 
     class FailingRouter:
 
-        async def _resolve_route(self, message: str) -> RouteDecision:
+        async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
 
             raise RuntimeError("router down")
 
@@ -1110,7 +1133,7 @@ async def test_harness_fallback_uses_raw_vector_when_knowledge_is_empty():
 
     class FailingRouter:
 
-        async def _resolve_route(self, message: str) -> RouteDecision:
+        async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
 
             raise RuntimeError("router down")
 
@@ -1179,7 +1202,9 @@ async def test_assistant_harness_two_turn_flow_persists_and_reloads_history(
 ):
     _disable_extra_harness_loops(monkeypatch)
 
-    conversation_service = ConversationService(tmp_path / "conversation.db")
+    conversation_service, repository = _configure_unified_conversation(
+        monkeypatch, tmp_path, "conversation.db"
+    )
 
     first_answer = "first persisted answer at 10:03"
 
@@ -1213,6 +1238,7 @@ async def test_assistant_harness_two_turn_flow_persists_and_reloads_history(
 
         limits=HarnessLimits(max_steps=3, token_budget=1000, timeout_seconds=5),
         checkpoint_store=None,
+        context_repository=repository,
 
     )
 
@@ -1248,7 +1274,7 @@ async def test_assistant_harness_two_turn_flow_persists_and_reloads_history(
 
         ChatRequest(id="visible-session", question=first_question),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -1258,7 +1284,7 @@ async def test_assistant_harness_two_turn_flow_persists_and_reloads_history(
 
         ChatRequest(id="visible-session", question=second_question),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -1608,7 +1634,11 @@ def _checkpoint_messages(tool_name: str) -> list[ChatMessage]:
 
 @pytest.mark.asyncio
 
-async def test_harness_checkpoint_resume_replays_from_next_step_without_skipping():
+async def test_harness_checkpoint_resume_replays_from_next_step_without_skipping(monkeypatch):
+
+    monkeypatch.setattr(
+        "app.agent.harness.loop.config.harness_llm_planning_enabled", False
+    )
 
     fake_redis = FakeRedis()
 
@@ -1723,285 +1753,142 @@ async def test_harness_checkpoint_resume_replays_from_next_step_without_skipping
 
 
 @pytest.mark.asyncio
+async def test_harness_checkpoint_resume_continues_despite_non_whitelisted_history():
+    """Default resume continues from next_step even if history had non-whitelist tools.
 
-async def test_harness_checkpoint_resume_non_idempotent_closes_without_tool_replay():
-
-    fake_redis = FakeRedis()
-
-    store = HarnessCheckpointStore(
-
-        namespace="test",
-
-        ttl_seconds=300,
-
-        idempotent_tools=("delegate_to_expert",),
-
-        redis_factory=lambda: fake_redis,
-
-    )
-
-    await store.save_step(
-
-        owner_key="user-1",
-
-        session_id="trace-resume-close",
-
-        state=_checkpoint_state(session_id="trace-resume-close", owner_key="user-1", step=2),
-
-        messages=_checkpoint_messages("query_prometheus_alerts"),
-
-        step_index=2,
-
-        step_payload={
-
-            "step": 2,
-
-            "tool_calls": [
-
-                {"id": "checkpoint-call", "function": {"name": "query_prometheus_alerts"}}
-
-            ],
-
-            "events": [],
-
-            "completed": True,
-
-        },
-
-    )
-
-    dangerous_tool = RuntimeTool(
-
-        name="query_prometheus_alerts",
-
-        description="Should not be replayed in conservative checkpoint resume.",
-
-        handler=lambda arguments: (_ for _ in ()).throw(AssertionError("tool replayed")),
-
-    )
-
-    fake_llm = FakeLLM(
-
-        [LLMResponse(content="checkpoint close answer", raw={}, usage={"total_tokens": 5})]
-
-    )
-
-    service = HarnessService(
-
-        router=FakeRouter(route="metric"),
-
-        llm_client=fake_llm,
-
-        tools=[dangerous_tool],
-
-        limits=HarnessLimits(max_steps=4, token_budget=1000, timeout_seconds=5),
-
-        checkpoint_store=store,
-
-    )
-
-
-
-    events = [
-
-        event
-
-        async for event in service.stream(
-
-            "resume conservatively",
-
-            session_id="trace-resume-close",
-
-            owner_key="user-1",
-
-        )
-
-    ]
-
-
-
-    stages = [event.get("stage") for event in events]
-
-    content = "".join(str(event["data"]) for event in events if event.get("type") == "content")
-
-    assert "checkpoint_resume" in stages
-
-    assert "checkpoint_conservative_close" in stages
-
-    assert "model_decision" not in stages
-
-    assert len(fake_llm.calls) == 1
-
-    assert "tools" not in fake_llm.calls[0]["kwargs"]
-
-    assert fake_llm.calls[0]["messages"][0].content == "system prompt from checkpoint"
-
-    assert content == "checkpoint close answer"
-
-
-
-
-
-@pytest.mark.asyncio
-
-async def test_harness_checkpoint_resume_replay_override_replays_non_idempotent_tool():
-
-    """When the caller passes ``checkpoint_replay=True``, the conservative
-
-    short-circuit is bypassed: a non-whitelisted step still gets replayed.
-
-
-
-    The dangerous tool's handler is wired to raise if invoked, so reaching it
-
-    is itself the success signal. We also assert the conservative_close event
-
-    never fires (because we asked for verbatim replay).
-
+    Historical tool calls are not re-executed; the model may choose new tools.
     """
-
     fake_redis = FakeRedis()
-
     store = HarnessCheckpointStore(
-
         namespace="test",
-
         ttl_seconds=300,
-
         idempotent_tools=("delegate_to_expert",),
-
         redis_factory=lambda: fake_redis,
-
     )
-
     await store.save_step(
-
         owner_key="user-1",
-
-        session_id="trace-resume-replay",
-
-        state=_checkpoint_state(session_id="trace-resume-replay", owner_key="user-1", step=2),
-
+        session_id="trace-resume-continue",
+        state=_checkpoint_state(session_id="trace-resume-continue", owner_key="user-1", step=2),
         messages=_checkpoint_messages("query_prometheus_alerts"),
-
         step_index=2,
-
         step_payload={
-
             "step": 2,
-
             "tool_calls": [
-
                 {"id": "checkpoint-call", "function": {"name": "query_prometheus_alerts"}}
-
             ],
-
             "events": [],
-
             "completed": True,
-
         },
-
     )
-
-    replayed_tool = RuntimeTool(
-
+    safe_tool = RuntimeTool(
         name="query_prometheus_alerts",
-
-        description="Caller explicitly opted into replay; must run.",
-
-        handler=lambda arguments: "replayed evidence",
-
+        description="May be chosen by the model after resume; not a historical replay.",
+        handler=lambda arguments: "fresh evidence",
     )
-
     fake_llm = FakeLLM(
-
         [
-
             LLMResponse(
-
                 content="",
-
                 raw={},
-
                 tool_calls=[
-
                     {
-
-                        "id": "replayed-call",
-
+                        "id": "new-call",
                         "type": "function",
-
                         "function": {"name": "query_prometheus_alerts", "arguments": "{}"},
-
                     }
-
                 ],
-
                 usage={"total_tokens": 3},
-
             ),
-
-            LLMResponse(content="replay completed", raw={}, usage={"total_tokens": 5}),
-
+            LLMResponse(content="continued after resume", raw={}, usage={"total_tokens": 5}),
         ]
-
     )
-
     service = HarnessService(
-
         router=FakeRouter(route="metric"),
-
         llm_client=fake_llm,
-
-        tools=[replayed_tool],
-
+        tools=[safe_tool],
         limits=HarnessLimits(max_steps=4, token_budget=1000, timeout_seconds=5),
-
         checkpoint_store=store,
-
     )
-
-
-
     events = [
-
         event
-
         async for event in service.stream(
-
-            "resume aggressively",
-
-            session_id="trace-resume-replay",
-
+            "resume and continue",
+            session_id="trace-resume-continue",
             owner_key="user-1",
-
-            checkpoint_replay=True,
-
         )
-
     ]
-
-
-
     stages = [event.get("stage") for event in events]
-
     resume_events = [event for event in events if event.get("stage") == "checkpoint_resume"]
-
     assert "checkpoint_resume" in stages
-
     assert "checkpoint_conservative_close" not in stages
-
     assert resume_events
-
-    assert resume_events[0]["payload"]["replay_override"] is True
-
+    assert resume_events[0]["payload"].get("continue_from_next_step") is True
+    assert resume_events[0]["payload"].get("conservative") is False
     assert "model_decision" in stages
-
     assert len(fake_llm.calls) >= 1
 
 
-
+@pytest.mark.asyncio
+async def test_harness_checkpoint_resume_close_only_when_override_false(monkeypatch):
+    """Explicit checkpoint_replay=False still forces close-only finalization."""
+    monkeypatch.setattr(
+        "app.agent.harness.loop.config.harness_llm_planning_enabled", False
+    )
+    fake_redis = FakeRedis()
+    store = HarnessCheckpointStore(
+        namespace="test",
+        ttl_seconds=300,
+        idempotent_tools=("delegate_to_expert",),
+        redis_factory=lambda: fake_redis,
+    )
+    await store.save_step(
+        owner_key="user-1",
+        session_id="trace-resume-close",
+        state=_checkpoint_state(session_id="trace-resume-close", owner_key="user-1", step=2),
+        messages=_checkpoint_messages("query_prometheus_alerts"),
+        step_index=2,
+        step_payload={
+            "step": 2,
+            "tool_calls": [
+                {"id": "checkpoint-call", "function": {"name": "query_prometheus_alerts"}}
+            ],
+            "events": [],
+            "completed": True,
+        },
+    )
+    dangerous_tool = RuntimeTool(
+        name="query_prometheus_alerts",
+        description="Must not run in close-only resume.",
+        handler=lambda arguments: (_ for _ in ()).throw(AssertionError("tool replayed")),
+    )
+    fake_llm = FakeLLM(
+        [LLMResponse(content="checkpoint close answer", raw={}, usage={"total_tokens": 5})]
+    )
+    service = HarnessService(
+        router=FakeRouter(route="metric"),
+        llm_client=fake_llm,
+        tools=[dangerous_tool],
+        limits=HarnessLimits(max_steps=4, token_budget=1000, timeout_seconds=5),
+        checkpoint_store=store,
+    )
+    events = [
+        event
+        async for event in service.stream(
+            "resume close-only",
+            session_id="trace-resume-close",
+            owner_key="user-1",
+            checkpoint_replay=False,
+        )
+    ]
+    stages = [event.get("stage") for event in events]
+    content = "".join(str(event["data"]) for event in events if event.get("type") == "content")
+    assert "checkpoint_resume" in stages
+    assert "checkpoint_conservative_close" in stages
+    assert "model_decision" not in stages
+    assert len(fake_llm.calls) == 1
+    assert "tools" not in fake_llm.calls[0]["kwargs"]
+    assert fake_llm.calls[0]["messages"][0].content == "system prompt from checkpoint"
+    assert content == "checkpoint close answer"
 
 
 @pytest.mark.asyncio
@@ -2085,6 +1972,7 @@ async def test_harness_verify_marks_answer_without_tool_evidence_as_degraded(mon
 @pytest.mark.asyncio
 
 async def test_harness_asks_for_missing_metric_subject_after_plan(monkeypatch):
+    _disable_extra_harness_loops(monkeypatch)
     monkeypatch.setattr(
         "app.agent.harness.loop.stateful_context_enabled",
         lambda: False,
@@ -2158,7 +2046,9 @@ async def test_harness_asks_for_missing_metric_subject_after_plan(monkeypatch):
 
 @pytest.mark.asyncio
 
-async def test_harness_delays_missing_param_clarification_until_after_tool_attempt():
+async def test_harness_delays_missing_param_clarification_until_after_tool_attempt(monkeypatch):
+
+    _disable_extra_harness_loops(monkeypatch)
 
     def handler(arguments):
 
@@ -2274,9 +2164,11 @@ async def test_harness_delays_missing_param_clarification_until_after_tool_attem
 
 @pytest.mark.asyncio
 
-async def test_harness_stream_does_not_seed_delegate_before_model_decision():
+async def test_harness_stream_does_not_seed_delegate_before_model_decision(monkeypatch):
 
     """The routed expert is exposed as a tool, but harness no longer calls it first."""
+
+    _disable_extra_harness_loops(monkeypatch)
 
     delegate_tool = create_delegate_tool(
 
@@ -2370,6 +2262,7 @@ async def test_harness_stream_soft_delegation_lets_model_decide(monkeypatch):
 
     from app.config import config as app_config
 
+    _disable_extra_harness_loops(monkeypatch)
 
 
     monkeypatch.setattr(app_config, "harness_force_expert_delegation", False)
@@ -4035,7 +3928,9 @@ async def test_harness_stream_stops_on_no_progress(monkeypatch):
 
 @pytest.mark.asyncio
 
-async def test_harness_stream_runs_log_pipeline_for_large_log_output():
+async def test_harness_stream_runs_log_pipeline_for_large_log_output(monkeypatch):
+
+    _disable_extra_harness_loops(monkeypatch)
 
     log_lines = [f"2026-06-20 10:00:0{i % 10} ERROR upstream timeout id={i}" for i in range(60)]
 
@@ -4912,7 +4807,7 @@ async def test_assistant_keyword_resolves_historical_attachment_without_new_uplo
 
         ),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -5292,7 +5187,7 @@ async def test_assistant_history_resolves_attachment_by_keyword_and_reloads_full
 
         ),
 
-        owner_key="owner-1",
+        principal=_test_principal(),
 
     )
 
@@ -5414,7 +5309,7 @@ async def test_harness_fallback_timeout_returns_report():
 
     class FailingRouter:
 
-        async def _resolve_route(self, message: str) -> RouteDecision:
+        async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
 
             raise RuntimeError("router down")
 
@@ -5494,7 +5389,7 @@ async def test_harness_outer_timeout_uses_configured_limit(monkeypatch):
 
     class HangingRouter:
 
-        async def _resolve_route(self, message: str) -> RouteDecision:
+        async def _resolve_route(self, message: str, previous_route: str | None = None, **kwargs) -> RouteDecision:
 
             await asyncio.sleep(5)
 
@@ -5639,3 +5534,63 @@ async def test_harness_tool_event_includes_tool_latency_ms(monkeypatch):
     assert "tool_latency_ms" in tool_events[0]["payload"]
 
     assert tool_events[0]["payload"]["tool_latency_ms"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_harness_emits_ordinary_tool_start_before_terminal_event(monkeypatch):
+    _disable_extra_harness_loops(monkeypatch)
+    tool = RuntimeTool(
+        name="visible_probe",
+        description="A probe used to verify lifecycle ordering.",
+        handler=lambda arguments: f"ok:{arguments.get('target', '')}",
+    )
+    fake_llm = FakeLLM(
+        [
+            LLMResponse(
+                content="",
+                raw={},
+                tool_calls=[
+                    ToolCall(
+                        id="call-visible-probe",
+                        name="visible_probe",
+                        arguments={"target": "private-target"},
+                    )
+                ],
+                usage={"total_tokens": 2},
+            ),
+            LLMResponse(content="done", raw={}, usage={"total_tokens": 1}),
+        ]
+    )
+    service = HarnessService(
+        router=FakeRouter(),
+        llm_client=fake_llm,
+        tools=[tool],
+        limits=HarnessLimits(max_steps=3, token_budget=1000, timeout_seconds=5),
+        checkpoint_store=None,
+    )
+
+    events = [
+        event
+        async for event in service.stream(
+            "run the visible probe", session_id="trace-tool-start", owner_key="user-1"
+        )
+    ]
+
+    start_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "agent_event" and event.get("stage") == "tool_start"
+    )
+    terminal_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "tool_event" and event.get("tool") == "visible_probe"
+    )
+    start = events[start_index]
+    assert start_index < terminal_index
+    assert start["status"] == "in_progress"
+    assert start["payload"] == {
+        "tool": "visible_probe",
+        "tool_call_id": "call-visible-probe",
+    }
+    assert "private-target" not in json.dumps(start)
