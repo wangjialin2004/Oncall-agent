@@ -182,7 +182,7 @@ async def test_harness_stamps_recent_turns_on_complete(monkeypatch):
     # Avoid real context tools / registry complexity
     monkeypatch.setattr(
         "app.agent.harness.loop.HarnessToolRegistry.context_tools",
-        lambda self, state: [],
+        lambda self, state, **kwargs: [],
     )
 
     class _FakeContextStore:

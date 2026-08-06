@@ -37,6 +37,17 @@ def stateful_context_enabled(*args, **kwargs):
 
 async def build_stateful_context(*args, **kwargs):
     """Compatibility adapter that always loads the unified context envelope."""
+    from app.agent.harness import loop as harness_loop
+    from app.agent.context.integration import build_stateful_context as _legacy_impl
+
+    fn = getattr(harness_loop, "build_stateful_context", None)
+    if (
+        fn is not None
+        and fn is not _legacy_impl
+        and getattr(fn, "__module__", "") != __name__
+    ):
+        return await fn(*args, **kwargs)
+
     from app.agent.context.unified import load_unified_stateful_context
 
     allowed = {
@@ -55,6 +66,17 @@ async def build_stateful_context(*args, **kwargs):
 
 async def persist_stateful_context(*args, **kwargs):
     """Persist only recoverable in-flight unified context state."""
+    from app.agent.harness import loop as harness_loop
+    from app.agent.context.integration import persist_stateful_context as _legacy_impl
+
+    fn = getattr(harness_loop, "persist_stateful_context", None)
+    if (
+        fn is not None
+        and fn is not _legacy_impl
+        and getattr(fn, "__module__", "") != __name__
+    ):
+        return await fn(*args, **kwargs)
+
     from app.agent.context.unified import persist_runtime_state
 
     state = args[0] if args else kwargs.get("state")

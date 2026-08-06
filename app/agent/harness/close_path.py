@@ -30,6 +30,17 @@ from app.core.metrics import (
 
 async def persist_stateful_context(*args, **kwargs):
     """Route unified stage persistence to the inflight recovery key."""
+    from app.agent.harness import loop as harness_loop
+    from app.agent.context.integration import persist_stateful_context as _legacy_impl
+
+    fn = getattr(harness_loop, "persist_stateful_context", None)
+    if (
+        fn is not None
+        and fn is not _legacy_impl
+        and getattr(fn, "__module__", "") != __name__
+    ):
+        return await fn(*args, **kwargs)
+
     from app.agent.context.unified import persist_runtime_state
 
     state = args[0] if args else kwargs.get("state")
