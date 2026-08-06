@@ -89,6 +89,17 @@
 
 ## 快速开始
 
+### Docker 一键栈
+
+需要直接启动后端、前端、Redis 和 Milvus 时，参见 [Docker 部署说明](docs/docker-deployment.md)，或执行：
+
+```bash
+cp .env.example .env
+docker compose --profile monitoring --profile tools up -d --build
+```
+
+前端默认访问 <http://localhost:5173>；Prometheus 和 Attu 分别默认使用宿主机 `9091`、`8001` 端口。
+
 ### 0. 前置依赖
 
 - Python **3.11 – 3.13**
